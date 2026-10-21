@@ -1,0 +1,509 @@
+import {
+  spawn,
+  type ChildProcess,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { createInterface } from "node:readline";
+import type {
+  CaptureFrame,
+  Json,
+  NativeWindow,
+  NodeKind,
+  PlatformCapabilities,
+  RecordedAction,
+  TargetDescriptor,
+} from "../shared/types";
+
+export interface NativeAdapterOptions {
+  binaryPath?: string;
+  env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
+}
+type Pending = {
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  cleanup: () => void;
+};
+export class NativeAdapter {
+  private child?: ChildProcessWithoutNullStreams;
+  private pending = new Map<string, Pending>();
+  private bindings = new Map<string, string>();
+  private bindingDescriptors = new Map<string, string>();
+  private frames = new Map<string, CaptureFrame>();
+  private recording?: (action: RecordedAction) => void;
+  private recordingId?: string;
+  private disposed = false;
+  private platformSession?: string;
+  private cleanupTask: Promise<void> = Promise.resolve();
+  private heldKeys = new Set<string>();
+  readonly binaryPath: string;
+  constructor(private options: NativeAdapterOptions = {}) {
+    const resources = (process as NodeJS.Process & { resourcesPath?: string })
+      .resourcesPath;
+    const name =
+      process.platform === "win32" ? "relay-native.exe" : "relay-native";
+    const candidates = [
+      resources && path.join(resources, "native", name),
+      path.resolve("native/target/release", name),
+      path.resolve("native/target/debug", name),
+    ].filter(Boolean) as string[];
+    this.binaryPath =
+      options.binaryPath ??
+      candidates.find(existsSync) ??
+      candidates[candidates.length - 1]!;
+  }
+  private start() {
+    if (this.disposed) throw new Error("Native adapter is closed");
+    if (this.child) return this.child;
+    if (!existsSync(this.binaryPath))
+      throw new Error("Native service is not built. Run npm run build:native.");
+    const child = spawn(this.binaryPath, [], {
+      env: { ...process.env, ...this.options.env },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+      detached: process.platform !== "win32",
+    });
+    this.child = child;
+    const lines = createInterface({ input: child.stdout });
+    lines.on("line", (line) => {
+      let message: {
+        id?: string;
+        result?: unknown;
+        error?: { message: string };
+        event?: string;
+        recordingId?: string;
+        action?: RecordedAction;
+      };
+      try {
+        message = JSON.parse(line);
+      } catch {
+        this.fail(new Error("Native service returned malformed JSON"));
+        return;
+      }
+      if (message.event === "recordedAction" && message.action) {
+        if (message.recordingId === this.recordingId)
+          this.recording?.({ ...message.action, id: randomUUID() });
+        return;
+      }
+      if (message.event === "recordingStopped") {
+        if (message.recordingId === this.recordingId)
+          this.recording = undefined;
+        return;
+      }
+      const pending = message.id && this.pending.get(message.id);
+      if (!pending || !message.id) return;
+      this.pending.delete(message.id);
+      pending.cleanup();
+      if (message.error) pending.reject(new Error(message.error.message));
+      else pending.resolve(message.result);
+    });
+    // Read stderr so a native dependency cannot fill its pipe; never log typed text or request payloads.
+    child.stderr.on("data", () => {});
+    child.once("error", (error) => {
+      if (this.child === child) this.fail(error);
+    });
+    child.once("exit", (code, signal) => {
+      lines.close();
+      if (this.child === child)
+        this.fail(new Error(`Native service exited (${signal ?? code})`));
+    });
+    return child;
+  }
+  private fail(error: Error, release = true) {
+    const child = this.child;
+    this.child = undefined;
+    const stopped = child ? this.terminate(child) : Promise.resolve();
+    this.recording = undefined;
+    if (child && release)
+      this.cleanupTask = stopped.then(() => this.emergencyRelease());
+    for (const pending of this.pending.values()) {
+      pending.cleanup();
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
+  private terminate(child: ChildProcess): Promise<void> {
+    if (process.platform === "win32" && child.pid && child.exitCode === null) {
+      return new Promise((resolve) => {
+        const killer = spawn(
+          "taskkill",
+          ["/PID", String(child.pid), "/T", "/F"],
+          { stdio: "ignore", windowsHide: true },
+        );
+        const done = () => {
+          child.kill();
+          void this.waitForExit(child).then(resolve);
+        };
+        killer.once("exit", done);
+        killer.once("error", done);
+      });
+    }
+    try {
+      if (child.pid) process.kill(-child.pid, "SIGTERM");
+      else child.kill();
+    } catch {
+      child.kill();
+    }
+    return this.waitForExit(child);
+  }
+  private waitForExit(child: ChildProcess): Promise<void> {
+    if (!child.pid || child.exitCode !== null || child.signalCode !== null)
+      return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        try {
+          if (process.platform !== "win32" && child.pid)
+            process.kill(-child.pid, "SIGKILL");
+          else child.kill("SIGKILL");
+        } catch {
+          /* Already stopped. */
+        }
+      }, 1000);
+      child.once("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      child.once("error", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+  private emergencyRelease(): Promise<void> {
+    if (!existsSync(this.binaryPath)) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const cleanup = spawn(this.binaryPath, [], {
+        env: { ...process.env, ...this.options.env },
+        stdio: ["pipe", "ignore", "ignore"],
+        windowsHide: true,
+        detached: process.platform !== "win32",
+      });
+      let finished = false;
+      const done = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        this.heldKeys.clear();
+        resolve();
+      };
+      const timer = setTimeout(
+        () => {
+          if (process.platform === "win32") {
+            void this.terminate(cleanup).then(done);
+            return;
+          }
+          try {
+            if (cleanup.pid) process.kill(-cleanup.pid, "SIGKILL");
+            else cleanup.kill("SIGKILL");
+          } catch {
+            /* Exit handler completes the barrier. */
+          }
+        },
+        process.platform === "win32" ? 15000 : 5000,
+      );
+      timer.unref();
+      cleanup.once("error", done);
+      cleanup.once("exit", done);
+      cleanup.stdin?.on("error", () => {});
+      cleanup.stdin?.end(
+        `${JSON.stringify({ id: "cleanup-keys", method: "releaseKeys", params: { keys: [...this.heldKeys] } })}\n${JSON.stringify({ id: "cleanup", method: "releaseAll", params: {} })}\n`,
+      );
+    });
+  }
+  private async rpc<T>(
+    method: string,
+    params: Record<string, unknown> = {},
+    signal?: AbortSignal,
+  ): Promise<T> {
+    await this.cleanupTask;
+    if (signal?.aborted)
+      return Promise.reject(signal.reason ?? new Error("Cancelled"));
+    return new Promise<T>((resolve, reject) => {
+      let child: ChildProcessWithoutNullStreams;
+      try {
+        child = this.start();
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      const id = randomUUID();
+      const abort = () => {
+        this.fail(
+          new Error(
+            signal?.aborted ? "Cancelled" : `Native ${method} timed out`,
+          ),
+        );
+      };
+      const timer = setTimeout(
+        abort,
+        this.options.timeoutMs ??
+          Math.max(
+            this.platformSession === "wayland" ? 120000 : 30000,
+            Math.min(120000, Number(params.durationMs ?? 0)) + 5000,
+          ),
+      );
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+      };
+      this.pending.set(id, {
+        resolve: (value) => resolve(value as T),
+        reject,
+        cleanup,
+      });
+      signal?.addEventListener("abort", abort, { once: true });
+      child.stdin.write(
+        `${JSON.stringify({ id, method, params })}\n`,
+        (error) => {
+          if (error) this.fail(error);
+        },
+      );
+    });
+  }
+  async capabilities(): Promise<PlatformCapabilities> {
+    try {
+      const result = await this.rpc<PlatformCapabilities>("capabilities");
+      this.platformSession = result.session;
+      return result;
+    } catch (error) {
+      return {
+        platform: process.platform,
+        session: "unavailable",
+        capture: false,
+        input: false,
+        accessibility: false,
+        directRecording: false,
+        globalShortcuts: false,
+        windows: [],
+        reasons: [(error as Error).message],
+      };
+    }
+  }
+  listWindows(): Promise<NativeWindow[]> {
+    return this.rpc("listWindows");
+  }
+  private async resolve(
+    target: TargetDescriptor,
+    signal?: AbortSignal,
+  ): Promise<NativeWindow> {
+    if (signal?.aborted) throw new Error("Cancelled");
+    if (!this.platformSession) await this.capabilities();
+    if (this.platformSession === "wayland") {
+      const frame = this.frames.get(target.id);
+      return {
+        id: `portal:${target.id}`,
+        title: target.name,
+        bounds: frame?.bounds ?? { x: 0, y: 0, width: 0, height: 0 },
+      };
+    }
+    const windows = await this.listWindows();
+    const descriptor = JSON.stringify([target.application, target.windowTitle]);
+    if (this.bindingDescriptors.get(target.id) !== descriptor)
+      this.bindings.delete(target.id);
+    const binding = this.bindings.get(target.id);
+    const bound = windows.find((window) => window.id === binding);
+    if (bound) return bound;
+    let matches = windows;
+    if (target.application)
+      matches = matches.filter((window) =>
+        window.application
+          ?.toLowerCase()
+          .includes(target.application!.toLowerCase()),
+      );
+    if (target.windowTitle) {
+      const exact = matches.filter(
+        (window) => window.title === target.windowTitle,
+      );
+      matches = exact.length
+        ? exact
+        : matches.filter((window) =>
+            window.title
+              .toLowerCase()
+              .includes(target.windowTitle!.toLowerCase()),
+          );
+    }
+    if (!target.application && !target.windowTitle)
+      throw new Error(
+        "Choose an application or window title for this desktop target",
+      );
+    if (!matches.length)
+      throw new Error(`Target window not found: ${target.name}`);
+    if (matches.length !== 1)
+      throw new Error(
+        `Multiple windows match ${target.name}; use a more specific window title`,
+      );
+    this.bindings.set(target.id, matches[0]!.id);
+    this.bindingDescriptors.set(target.id, descriptor);
+    return matches[0]!;
+  }
+  async capture(
+    target: TargetDescriptor,
+    signal?: AbortSignal,
+  ): Promise<CaptureFrame> {
+    const window = await this.resolve(target, signal);
+    const result = await this.rpc<Omit<CaptureFrame, "id" | "targetId">>(
+      "capture",
+      { windowId: window.id },
+      signal,
+    );
+    const frame: CaptureFrame = {
+      ...result,
+      id: randomUUID(),
+      targetId: target.id,
+      scale: result.bounds?.width ? result.width / result.bounds.width : 1,
+    };
+    this.frames.set(target.id, frame);
+    return frame;
+  }
+  async execute(
+    kind: NodeKind,
+    config: Record<string, Json>,
+    target: TargetDescriptor,
+    signal?: AbortSignal,
+  ): Promise<Json> {
+    if (kind === "launch") {
+      const configured =
+        target.launch?.[process.platform as "linux" | "win32" | "darwin"];
+      const command =
+        typeof config.command === "string"
+          ? config.command
+          : configured?.command;
+      const args = Array.isArray(config.args)
+        ? config.args
+        : (configured?.args ?? []);
+      if (!command)
+        throw new Error(`No launch command configured for ${process.platform}`);
+      this.bindings.delete(target.id);
+      const result = await this.rpc<Json>("launch", { command, args }, signal);
+      const deadline = Date.now() + Number(config.timeoutMs ?? 10000);
+      while (Date.now() < deadline) {
+        if (signal?.aborted) throw new Error("Cancelled");
+        try {
+          await this.resolve(target, signal);
+          return result;
+        } catch {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+      }
+      throw new Error(
+        "Application launched, but its target window did not appear before the timeout",
+      );
+    }
+    const window = await this.resolve(target, signal);
+    if (kind === "attach") return { windowId: window.id };
+    if (kind === "screenshot")
+      return (await this.capture(target, signal)) as unknown as Json;
+    if (kind === "focus" || kind === "close") {
+      const result = await this.rpc<Json>(
+        kind,
+        { windowId: window.id },
+        signal,
+      );
+      if (kind === "close") this.bindings.delete(target.id);
+      return result;
+    }
+    if (config.selector)
+      throw new Error(
+        "Native accessibility selectors are not implemented; use a visual detector or window-relative coordinates",
+      );
+    const sourceFrame = this.frames.get(target.id);
+    if (
+      typeof config.frameId === "string" &&
+      (!sourceFrame ||
+        config.frameId !== sourceFrame.id ||
+        (sourceFrame.bounds &&
+          (sourceFrame.bounds.width !== window.bounds.width ||
+            sourceFrame.bounds.height !== window.bounds.height)))
+    )
+      throw new Error(
+        "Capture geometry changed; capture and detect the target again",
+      );
+    if (
+      typeof config.expectedWidth === "number" &&
+      typeof config.expectedHeight === "number"
+    ) {
+      const latest = await this.capture(target, signal);
+      if (
+        latest.width !== config.expectedWidth ||
+        latest.height !== config.expectedHeight
+      )
+        throw new Error(
+          "Target dimensions changed since recording; recapture and update this action",
+        );
+    }
+    const input = { ...config };
+    const frame = this.frames.get(target.id);
+    if (frame?.bounds) {
+      const sx = frame.bounds.width / frame.width,
+        sy = frame.bounds.height / frame.height;
+      for (const key of ["x", "toX"])
+        if (typeof input[key] === "number") input[key] = input[key] * sx;
+      for (const key of ["y", "toY"])
+        if (typeof input[key] === "number") input[key] = input[key] * sy;
+    }
+    if (
+      kind === "key" &&
+      config.action !== "up" &&
+      typeof config.key === "string"
+    )
+      this.heldKeys.add(config.key);
+    const result = await this.rpc<Json>(
+      "input",
+      { ...input, kind, windowId: window.id },
+      signal,
+    );
+    if (
+      kind === "key" &&
+      config.action !== "down" &&
+      typeof config.key === "string"
+    )
+      this.heldKeys.delete(config.key);
+    return result;
+  }
+  async startRecording(
+    target: TargetDescriptor,
+    onAction: (action: RecordedAction) => void,
+  ): Promise<void> {
+    const window = await this.resolve(target);
+    this.recording = (action) =>
+      onAction({
+        ...action,
+        config: { ...action.config, targetId: target.id },
+      });
+    this.recordingId = randomUUID();
+    try {
+      await this.rpc("startRecording", {
+        windowId: window.id,
+        recordingId: this.recordingId,
+      });
+    } catch (error) {
+      this.recording = undefined;
+      throw error;
+    }
+  }
+  async stopRecording(): Promise<void> {
+    if (this.child) await this.rpc("stopRecording");
+    this.recording = undefined;
+  }
+  async releaseAll(): Promise<void> {
+    await this.cleanupTask;
+    if (this.child) {
+      await this.rpc("releaseKeys", { keys: [...this.heldKeys] });
+      await this.rpc("releaseAll");
+      this.heldKeys.clear();
+    }
+  }
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
+    try {
+      await this.stopRecording();
+      await this.releaseAll();
+    } finally {
+      this.disposed = true;
+      this.fail(new Error("Native adapter closed"), false);
+    }
+  }
+}

@@ -1,0 +1,58 @@
+name: Verify Relay
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - name: Linux native dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb xdotool x11-utils xinput imagemagick tesseract-ocr
+      - run: npm ci
+      - run: node node_modules/electron/install.js
+      - run: npx playwright install --with-deps chromium
+      - run: cargo build --manifest-path native/Cargo.toml
+      - run: npm run build:native
+      - run: npm run check
+      - run: npm run test:ui
+      - run: npm run build
+      - name: Linux isolated desktop smoke test
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:smoke
+        env:
+          RELAY_SMOKE_NATIVE: "1"
+      - name: macOS / Windows application smoke test
+        if: runner.os != 'Linux'
+        run: npm run test:smoke
+      - run: npx electron-builder --dir
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: Linux packaged application smoke test
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:smoke
+        env:
+          RELAY_SMOKE_NATIVE: "1"
+          RELAY_SMOKE_EXECUTABLE: ${{ github.workspace }}/release/linux-unpacked/relay-desktop
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verification-${{ runner.os }}
+          path: test-results/
+          if-no-files-found: ignore

@@ -1,0 +1,40 @@
+import { contextBridge, ipcRenderer } from "electron";
+import type { AppEvent, RelayAPI } from "../shared/types";
+const methods: (keyof Omit<RelayAPI, "onEvent">)[] = [
+  "bootstrap",
+  "saveFlow",
+  "deleteFlow",
+  "validateFlow",
+  "runFlow",
+  "controlRun",
+  "saveSettings",
+  "saveConnection",
+  "deleteConnection",
+  "testConnection",
+  "saveTarget",
+  "deleteTarget",
+  "saveSchedule",
+  "deleteSchedule",
+  "getCapabilities",
+  "browserBridge",
+  "capture",
+  "testDetector",
+  "startRecording",
+  "recordAction",
+  "stopRecording",
+  "importFlow",
+  "exportFlow",
+  "openExternal",
+];
+const api: Record<string, unknown> = Object.fromEntries(
+  methods.map((method) => [
+    method,
+    (...args: unknown[]) => ipcRenderer.invoke("relay:request", method, args),
+  ]),
+);
+api.onEvent = (listener: (event: AppEvent) => void) => {
+  const receive = (_: unknown, event: AppEvent) => listener(event);
+  ipcRenderer.on("relay:event", receive);
+  return () => ipcRenderer.removeListener("relay:event", receive);
+};
+contextBridge.exposeInMainWorld("relay", Object.freeze(api));
