@@ -56,7 +56,13 @@ export interface FlowDefinition {
   hotkey?: string;
 }
 export type ProviderKind =
-  "openai" | "anthropic" | "gemini" | "ollama" | "lmstudio" | "jev";
+  | "openai"
+  | "openrouter"
+  | "anthropic"
+  | "gemini"
+  | "ollama"
+  | "lmstudio"
+  | "jev";
 export interface AIConnection {
   id: string;
   name: string;

@@ -88,6 +88,7 @@ export const connectionSchema = z.object({
   name: z.string().min(1).max(160),
   provider: z.enum([
     "openai",
+    "openrouter",
     "anthropic",
     "gemini",
     "ollama",

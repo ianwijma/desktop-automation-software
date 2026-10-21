@@ -35,6 +35,28 @@ const json = (value: unknown, status = 200) =>
 function mockFetch(body: unknown) {
   return vi.fn<typeof fetch>(async () => json(body));
 }
+function completion(content: string) {
+  return {
+    id: "completion",
+    object: "chat.completion",
+    created: 1,
+    model: "fixture/vision-model",
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content },
+        finish_reason: "stop",
+      },
+    ],
+    usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+  };
+}
+const openrouter = () =>
+  connection("openrouter", {
+    name: "OpenRouter",
+    baseUrl: "https://openrouter.ai/api/v1/",
+    model: "fixture/vision-model",
+  });
 
 describe("bring-your-own AI adapters", () => {
   it("never uses a returned Jev box when the presence decision says absent or uncertain", async () => {
@@ -234,6 +256,111 @@ describe("bring-your-own AI adapters", () => {
       "http://localhost:1234/v1/chat/completions",
     );
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("tests OpenRouter using the user's key, exact model and direct chat endpoint", async () => {
+    const fetcher = mockFetch(completion("Relay connected"));
+    const service = new AIService(() => "sk-or-v1-test-key", fetcher);
+    expect(await service.test(openrouter())).toMatchObject({ ok: true });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const [url, options] = fetcher.mock.calls[0];
+    expect(String(url)).toBe("https://openrouter.ai/api/v1/chat/completions");
+    expect(new Headers(options?.headers).get("Authorization")).toBe(
+      "Bearer sk-or-v1-test-key",
+    );
+    const body = JSON.parse(String(options?.body));
+    expect(body.model).toBe("fixture/vision-model");
+    expect(body.provider).toEqual({ allow_fallbacks: false });
+    expect(body.models).toBeUndefined();
+    expect(body.messages[0]).toMatchObject({ role: "user" });
+    expect(body.response_format).toBeUndefined();
+  });
+
+  it("sends OpenRouter screenshot data and strict JSON schema, then validates its response", async () => {
+    const fetcher = mockFetch(completion('{"count":3}'));
+    const service = new AIService(() => "test-key", fetcher);
+    const schema = {
+      type: "object",
+      properties: { count: { type: "integer", minimum: 1 } },
+      required: ["count"],
+      additionalProperties: false,
+    };
+    const request = {
+      prompt: "Count the buttons",
+      mode: "structured" as const,
+      schema,
+      frame,
+    };
+    expect(await service.generate(openrouter(), request)).toEqual({ count: 3 });
+    const body = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
+    expect(body.messages[0].content).toEqual([
+      { type: "text", text: "Count the buttons" },
+      { type: "image_url", image_url: { url: frame.dataUrl } },
+    ]);
+    expect(body.response_format).toMatchObject({
+      type: "json_schema",
+      json_schema: { schema, strict: true },
+    });
+    expect(body.provider).toEqual({
+      allow_fallbacks: false,
+      require_parameters: true,
+    });
+    fetcher.mockImplementationOnce(async () =>
+      json(completion('{"count":"three"}')),
+    );
+    await expect(service.generate(openrouter(), request)).rejects.toThrow();
+  });
+
+  it("rejects missing OpenRouter credentials and unsupported capabilities before sending captures", async () => {
+    const fetcher = mockFetch({});
+    expect(
+      await new AIService(() => undefined, fetcher).test(openrouter()),
+    ).toMatchObject({ ok: false, message: "Add an API key for OpenRouter." });
+    const service = new AIService(() => "test-key", fetcher);
+    await expect(
+      service.generate(
+        {
+          ...openrouter(),
+          capabilities: { text: true, vision: false, structured: true },
+        },
+        { prompt: "Find Save", mode: "vision", frame },
+      ),
+    ).rejects.toThrow("not configured for vision");
+    await expect(
+      service.generate(
+        {
+          ...openrouter(),
+          capabilities: { text: true, vision: true, structured: false },
+        },
+        {
+          prompt: "Find Save",
+          mode: "vision",
+          frame,
+          schema: { type: "object" },
+        },
+      ),
+    ).rejects.toThrow("does not support structured output");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("reports OpenRouter authentication failures without retries, fallback or exposing the key", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      json(
+        {
+          error: { message: "Invalid API key sk-or-v1-test-secret", code: 401 },
+        },
+        401,
+      ),
+    );
+    const service = new AIService(() => "sk-or-v1-test-secret", fetcher);
+    const result = await service.test(openrouter());
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("Invalid API key");
+    expect(result.message).not.toContain("test-secret");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(String(fetcher.mock.calls[0][0])).toBe(
+      "https://openrouter.ai/api/v1/chat/completions",
+    );
   });
 
   it("propagates cancellation and cleans authentication details in errors", async () => {

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import assert from "node:assert/strict";
 import sharp from "sharp";
+import { DatabaseSync } from "node:sqlite";
 
 const dataDir = await mkdtemp(join(tmpdir(), "relay-smoke-"));
 await mkdir("test-results", { recursive: true });
@@ -26,6 +27,49 @@ try {
   assert.equal(initial.flows.length, 3);
   assert.equal(initial.connections.length, 0);
   assert.equal(initial.keys, undefined);
+  const aiFixture = {
+    id: "provider-switch-smoke",
+    name: "Provider switch fixture",
+    provider: "openai",
+    baseUrl: "https://example.invalid/v1",
+    model: "test-model",
+    capabilities: { text: true, vision: false, structured: false },
+    hasKey: false,
+  };
+  await page.evaluate(
+    (connection) => window.relay.saveConnection(connection),
+    aiFixture,
+  );
+  const fixtureDb = new DatabaseSync(join(dataDir, "relay.sqlite"));
+  fixtureDb
+    .prepare("INSERT INTO credentials(id,value) VALUES(?,?)")
+    .run("provider-switch-smoke", "test-only-encrypted-credential-marker");
+  fixtureDb.close();
+  assert.equal(
+    (
+      await page.evaluate(
+        (connection) => window.relay.saveConnection(connection),
+        aiFixture,
+      )
+    ).hasKey,
+    true,
+  );
+  const switched = await page.evaluate(
+    (connection) => window.relay.saveConnection(connection),
+    {
+      ...aiFixture,
+      provider: "openrouter",
+      baseUrl: "https://openrouter.ai/api/v1",
+    },
+  );
+  assert.equal(
+    switched.hasKey,
+    false,
+    "Changing providers must not reuse the previous provider API key",
+  );
+  await page.evaluate(() =>
+    window.relay.deleteConnection("provider-switch-smoke"),
+  );
   async function waitRun(id) {
     const deadline = Date.now() + 25000;
     while (Date.now() < deadline) {
@@ -261,6 +305,7 @@ try {
           "Electron launch",
           "IPC isolation",
           "SQLite bootstrap",
+          "provider credential isolation",
           "real welcome execution",
           "12-child fixed batch",
           "theme switching",

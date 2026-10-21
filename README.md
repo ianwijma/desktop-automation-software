@@ -50,7 +50,9 @@ The bridge listens only on loopback and authenticates requests. Pairing is scope
 
 ## AI connections
 
-Connections support OpenAI-compatible APIs, Anthropic, Gemini, Jev, Ollama, and LM Studio. Supply the endpoint and exact model you want to run. Local runtimes are managed outside Relay.
+Connections support OpenAI-compatible APIs, OpenRouter, Anthropic, Gemini, Jev, Ollama, and LM Studio. Supply the endpoint and exact model you want to run. Local runtimes are managed outside Relay.
+
+For OpenRouter, select its provider preset, add your OpenRouter API key, and enter the model ID from its model catalog. The default endpoint is `https://openrouter.ai/api/v1`. Enable vision and structured output only for models that support those features.
 
 API keys are encrypted with the operating system's credential service. On Linux, a functioning Secret Service or KWallet is required to persist keys; Relay refuses Electron's plaintext fallback. Keys are never included in workflow exports. Screenshot inference is sent only to the connection selected for that node; there is no automatic cloud fallback.
 

@@ -343,6 +343,11 @@ const providers: Record<
     baseUrl: "https://api.openai.com/v1",
     model: "",
   },
+  openrouter: {
+    name: "OpenRouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    model: "",
+  },
   anthropic: {
     name: "Anthropic",
     baseUrl: "https://api.anthropic.com/v1",
@@ -513,7 +518,7 @@ function Connections({ workspace, api, refresh, onError, onSuccess }: Props) {
         <EmptyState
           icon={<PlugZap size={32} />}
           title="Bring your own intelligence"
-          description="Your keys stay on this device. Add OpenAI, Anthropic, Gemini, Jev, or connect an Ollama or LM Studio server."
+          description="Your keys stay on this device. Add OpenAI, OpenRouter, Anthropic, Gemini, Jev, or connect an Ollama or LM Studio server."
         />
       )}
       <Notice>
@@ -540,14 +545,23 @@ function Connections({ workspace, api, refresh, onError, onSuccess }: Props) {
             </Field>
             <Field label="Provider">
               <Select
+                aria-label="Provider"
                 value={editing.provider}
                 onChange={(e) => {
                   const provider = e.target.value as ProviderKind;
+                  setKey("");
                   setEditing({
                     ...editing,
                     provider,
+                    hasKey: false,
                     baseUrl: providers[provider].baseUrl,
                     model: providers[provider].model,
+                    capabilities: {
+                      text: true,
+                      vision: false,
+                      structured: false,
+                    },
+                    experimentalVision: undefined,
                   });
                 }}
               >
@@ -567,13 +581,25 @@ function Connections({ workspace, api, refresh, onError, onSuccess }: Props) {
                 placeholder="https://your-provider.example/v1"
               />
             </Field>
-            <Field label="Model ID">
+            <Field
+              label="Model ID"
+              help={
+                editing.provider === "openrouter"
+                  ? "Use the exact provider/model ID from OpenRouter. Capabilities depend on your selected model."
+                  : undefined
+              }
+            >
               <input
+                aria-label="Model ID"
                 value={editing.model}
                 onChange={(e) =>
                   setEditing({ ...editing, model: e.target.value })
                 }
-                placeholder="The model name provided by your server"
+                placeholder={
+                  editing.provider === "openrouter"
+                    ? "provider/model-id"
+                    : "The model name provided by your server"
+                }
               />
             </Field>
             <Field
@@ -586,6 +612,9 @@ function Connections({ workspace, api, refresh, onError, onSuccess }: Props) {
             >
               <input
                 type="password"
+                aria-label={
+                  editing.hasKey ? "Replace API key (optional)" : "API key"
+                }
                 autoComplete="new-password"
                 value={key}
                 disabled={!workspace.desktop}
@@ -593,7 +622,9 @@ function Connections({ workspace, api, refresh, onError, onSuccess }: Props) {
                 placeholder={
                   editing.hasKey
                     ? "•••••••• · already configured"
-                    : "Optional for local servers"
+                    : editing.provider === "openrouter"
+                      ? "Your OpenRouter API key"
+                      : "Optional for local servers"
                 }
               />
             </Field>
@@ -620,6 +651,12 @@ function Connections({ workspace, api, refresh, onError, onSuccess }: Props) {
                 </label>
               ))}
             </div>
+            {editing.provider === "openrouter" ? (
+              <Notice>
+                Enable only capabilities supported by your chosen model. Visual
+                detectors require both vision and structured output.
+              </Notice>
+            ) : null}
             {editing.provider === "jev" ? (
               <label className="toggle-row">
                 <span>

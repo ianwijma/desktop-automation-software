@@ -44,7 +44,10 @@ export class AIService {
       throw new Error("Choose a model in AI Connections.");
     if (request.frame && !connection.capabilities.vision)
       throw new Error(`${connection.name} is not configured for vision.`);
-    if (request.mode === "structured" && !connection.capabilities.structured)
+    if (
+      (request.mode === "structured" || request.schema) &&
+      !connection.capabilities.structured
+    )
       throw new Error(`${connection.name} does not support structured output.`);
     if (
       !this.getKey(connection.id) &&
@@ -100,6 +103,17 @@ export class AIService {
           : request.prompt,
       },
     ];
+    const providerOptions =
+      connection.provider === "openrouter"
+        ? {
+            openrouter: {
+              provider: {
+                allow_fallbacks: false,
+                ...(request.schema ? { require_parameters: true } : {}),
+              },
+            },
+          }
+        : undefined;
     if (request.schema) {
       const validator = ajv.compile(request.schema);
       const schema = jsonSchema<Json>(request.schema, {
@@ -115,6 +129,7 @@ export class AIService {
         model: this.model(connection),
         messages,
         output: Output.object({ schema }),
+        providerOptions,
         abortSignal: signal,
         maxRetries: 0,
       });
@@ -123,6 +138,7 @@ export class AIService {
     const result = await generateText({
       model: this.model(connection),
       messages,
+      providerOptions,
       abortSignal: signal,
       maxRetries: 0,
     });

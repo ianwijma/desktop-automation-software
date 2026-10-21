@@ -164,6 +164,48 @@ try {
   assert.equal(saved.settings.accent, "#6dd4cf");
   assert.equal(saved.settings.theme, "light");
 
+  await page
+    .getByRole("button", { name: "AI connections", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Add connection", exact: true })
+    .click();
+  await page
+    .getByLabel("Connection name", { exact: true })
+    .fill("OpenRouter QA");
+  await page.getByLabel("Provider", { exact: true }).selectOption("openrouter");
+  assert.equal(
+    await page.getByLabel("Endpoint", { exact: true }).inputValue(),
+    "https://openrouter.ai/api/v1",
+  );
+  assert.equal(
+    await page.getByLabel("Model ID", { exact: true }).inputValue(),
+    "",
+  );
+  assert.equal(
+    await page.getByLabel("Vision", { exact: true }).isChecked(),
+    false,
+  );
+  assert.equal(
+    await page.getByLabel("Structured output", { exact: true }).isChecked(),
+    false,
+  );
+  assert.equal(
+    await page.getByLabel("API key", { exact: true }).isDisabled(),
+    true,
+  );
+  await page
+    .getByLabel("Model ID", { exact: true })
+    .fill("test-provider/test-model");
+  await page.getByLabel("Vision", { exact: true }).check();
+  await page.getByLabel("Structured output", { exact: true }).check();
+  await page
+    .getByRole("button", { name: "Save connection", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Edit OpenRouter QA", exact: true })
+    .waitFor();
+
   await page.getByRole("button", { name: "Schedules", exact: true }).click();
   await page.getByRole("button", { name: "New schedule", exact: true }).click();
   await page
@@ -186,6 +228,18 @@ try {
       (schedule) => schedule.name === "Renderer daily check",
     ),
   );
+  const openRouter = saved.connections.find(
+    (connection) => connection.name === "OpenRouter QA",
+  );
+  assert.equal(openRouter.provider, "openrouter");
+  assert.equal(openRouter.baseUrl, "https://openrouter.ai/api/v1");
+  assert.equal(openRouter.model, "test-provider/test-model");
+  assert.deepEqual(openRouter.capabilities, {
+    text: true,
+    vision: true,
+    structured: true,
+  });
+  assert.equal(openRouter.hasKey, false);
   await page.getByRole("button", { name: "Run flow", exact: true }).click();
   await page
     .getByText(/Running flows requires the Relay desktop application/)
@@ -206,7 +260,7 @@ try {
   );
   await page.screenshot({ path: "test-results/relay-ui-dark.png" });
   console.log(
-    "PASS: readable graph and minimap; palette search; add/edit/save; undo/redo; copy/paste; detected-click reference authoring; canonical child group editing; theme/accent persistence; schedule create/reload; honest preview execution rejection; no page errors.",
+    "PASS: readable graph and minimap; palette search; add/edit/save; undo/redo; copy/paste; detected-click reference authoring; canonical child group editing; theme/accent persistence; OpenRouter configuration persistence; schedule create/reload; honest preview execution rejection; no page errors.",
   );
 } finally {
   await browser?.close();

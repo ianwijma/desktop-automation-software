@@ -450,6 +450,9 @@ async function request(
     }
     case "saveConnection": {
       const connection = connectionSchema.parse(args[0]);
+      const previous = store.get("connections", connection.id);
+      const providerChanged =
+        previous && previous.provider !== connection.provider;
       const key =
         args[1] === undefined ? undefined : z.string().max(8192).parse(args[1]);
       if (key?.trim()) {
@@ -466,9 +469,13 @@ async function request(
           safeStorage.encryptString(key.trim()).toString("base64"),
         );
         encryptedKeys.set(connection.id, key.trim());
+      } else if (providerChanged) {
+        store.deleteCredential(connection.id);
+        encryptedKeys.delete(connection.id);
       }
       const result = store.put("connections", {
         ...connection,
+        lastTest: providerChanged ? undefined : connection.lastTest,
         hasKey: Boolean(store.credential(connection.id)),
       });
       await sync();
