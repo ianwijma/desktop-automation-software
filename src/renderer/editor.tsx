@@ -35,6 +35,14 @@ import type {
 } from "../shared/types";
 import { catalog, uid, type FieldSpec } from "./catalog";
 import { ValueField } from "./value-field";
+import { ChildInputs, isRecord } from "./child-inputs";
+import { SchemaField } from "./schema-field";
+import {
+  updateNodeConfig,
+  setWaitMode,
+  setLoopMode,
+} from "../shared/node-authoring";
+import "./inspector-fields.css";
 import {
   createReferenceInspector,
   nodeReference,
@@ -68,20 +76,26 @@ const FlowCard = memo(function FlowCard({
     n.kind === "navigate"
       ? String(n.config.url || "Choose a URL")
       : n.kind === "wait"
-        ? `${n.config.durationMs ?? 1000} ms delay`
-        : n.kind === "group"
-          ? n.config.mode === "sequence"
-            ? "Run children one at a time"
-            : n.config.mode === "batches"
-              ? `Fixed batches of ${n.config.concurrency ?? 3}`
-              : `Rolling pool · ${n.config.concurrency ?? 3} at a time`
-          : n.kind === "ai"
-            ? String(n.config.prompt || "Configure your model")
-            : n.kind === "start"
-              ? "Ready when you are"
-              : n.kind === "end"
-                ? "Workflow complete"
-                : data.targetName || spec.description;
+        ? n.config.detector
+          ? `Wait for ${n.config.detector} match`
+          : `${n.config.durationMs ?? n.config.ms ?? 1000} ms delay`
+        : n.kind === "loop"
+          ? n.config.items !== undefined
+            ? "Run a child flow for each item"
+            : `Repeat ${n.config.count ?? 3} times`
+          : n.kind === "group"
+            ? (n.config.mode ?? "sequence") === "sequence"
+              ? "Run children one at a time"
+              : n.config.mode === "batches"
+                ? `Fixed batches of ${n.config.concurrency ?? 3}`
+                : `Rolling pool · ${n.config.concurrency ?? 3} at a time`
+            : n.kind === "ai"
+              ? String(n.config.prompt || "Configure your model")
+              : n.kind === "start"
+                ? "Ready when you are"
+                : n.kind === "end"
+                  ? "Workflow complete"
+                  : data.targetName || spec.description;
   return (
     <div
       className={`flow-card ${selected ? "selected" : ""} ${data.status ?? ""}`}
@@ -445,6 +459,33 @@ function ConfigField({
   node: FlowNode;
   references: ReturnType<typeof createReferenceInspector>;
 }) {
+  if (node.kind === "ai" && field.key === "schema")
+    return (
+      <>
+        {value !== undefined &&
+        (node.config.mode === "text" || node.config.mode === undefined) ? (
+          <Notice>
+            An imported schema still controls the AI response in text mode.
+            Remove the schema here to request plain text.
+          </Notice>
+        ) : null}
+        <SchemaField label={field.label} value={value} onChange={onChange} />
+      </>
+    );
+  if ((node.kind === "call" || node.kind === "loop") && field.key === "inputs")
+    return (
+      <ChildInputs
+        label={field.label}
+        value={value}
+        child={workspace.flows.find(
+          (candidate) => candidate.id === node.config.flowId,
+        )}
+        references={references}
+        consumerNodeId={node.id}
+        loopInputs={node.kind === "loop"}
+        onChange={onChange}
+      />
+    );
   if (
     field.reference !== false &&
     !["target", "connection", "flow", "select", "image"].includes(
@@ -546,30 +587,57 @@ function ConfigField({
                 .filter((f) => f.id !== flow.id)
                 .map((f) => ({ id: f.id, name: f.name }))
             : (field.options ?? []).map((id) => ({ id, name: id }));
+    const importedImageSource =
+      node.kind === "ai" &&
+      field.key === "targetId" &&
+      node.config.mode !== "vision" &&
+      value !== undefined &&
+      value !== "";
     return (
-      <Field label={field.label} help={field.help}>
-        <Select
-          value={String(value ?? "")}
-          onChange={(e) => onChange(e.target.value)}
-        >
-          <option value="">
-            Choose{" "}
-            {field.type === "select"
-              ? "an option"
-              : field.type === "connection"
-                ? "a connection"
-                : field.type === "flow"
-                  ? "a flow"
-                  : "a target"}
-            …
-          </option>
-          {options.map((o) => (
-            <option key={o.id} value={o.id}>
-              {o.name}
+      <>
+        {importedImageSource ? (
+          <Notice>
+            This imported image source still reserves its target. Clear it if it
+            is not needed in this mode.
+          </Notice>
+        ) : null}
+        <Field label={field.label} help={field.help}>
+          <Select
+            aria-label={field.label}
+            value={String(value ?? "")}
+            onChange={(e) => onChange(e.target.value)}
+          >
+            <option value="">
+              Choose{" "}
+              {field.type === "select"
+                ? "an option"
+                : field.type === "connection"
+                  ? "a connection"
+                  : field.type === "flow"
+                    ? "a flow"
+                    : "a target"}
+              …
             </option>
-          ))}
-        </Select>
-      </Field>
+            {value !== undefined &&
+            value !== "" &&
+            !options.some((option) => option.id === value) ? (
+              <option value={String(value)}>
+                Unavailable: {String(value)}
+              </option>
+            ) : null}
+            {options.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.name}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {importedImageSource ? (
+          <Button onClick={() => onChange(undefined)}>
+            Clear image source
+          </Button>
+        ) : null}
+      </>
     );
   }
   return (
@@ -628,6 +696,9 @@ export function Inspector({
   const copyReference = node ? nodeReference(node.id) : null;
   useEffect(() => setCopyStatus(""), [node?.id]);
   const spec = node ? catalog[node.kind] : null;
+  const effectiveDetector = node
+    ? (node.config.detector ?? (node.kind === "detect" ? "text" : undefined))
+    : undefined;
   const update = (patch: Partial<FlowNode>) => {
     if (node)
       onChange({
@@ -703,6 +774,47 @@ export function Inspector({
             </div>
             <div className="section-divider" />
             <h4 className="section-eyebrow">CONFIGURATION</h4>
+            {node.kind === "wait" ? (
+              <Field
+                label="Wait for"
+                help="A duration pauses for a fixed time. A detector continues when a match appears."
+              >
+                <Select
+                  aria-label="Wait for"
+                  value={node.config.detector ? "detector" : "duration"}
+                  onChange={(event) =>
+                    update({
+                      config: setWaitMode(
+                        node.config,
+                        event.target.value as "duration" | "detector",
+                      ),
+                    })
+                  }
+                >
+                  <option value="duration">Duration</option>
+                  <option value="detector">Detector match</option>
+                </Select>
+              </Field>
+            ) : null}
+            {node.kind === "loop" ? (
+              <Field label="Loop mode">
+                <Select
+                  aria-label="Loop mode"
+                  value={node.config.items !== undefined ? "foreach" : "count"}
+                  onChange={(event) =>
+                    update({
+                      config: setLoopMode(
+                        node.config,
+                        event.target.value as "count" | "foreach",
+                      ),
+                    })
+                  }
+                >
+                  <option value="count">Repeat a count</option>
+                  <option value="foreach">For each item</option>
+                </Select>
+              </Field>
+            ) : null}
             {node.kind === "group" ? (
               <GroupChildren
                 config={node.config}
@@ -721,7 +833,7 @@ export function Inspector({
                     type: "number" as const,
                   },
                   {
-                    key: "pollMs",
+                    key: "pollIntervalMs",
                     label: "Check every (ms)",
                     type: "number" as const,
                   },
@@ -734,16 +846,43 @@ export function Inspector({
                     node.kind === "group" &&
                     (["flowIds", "children"].includes(f.key) ||
                       (f.key === "concurrency" &&
-                        node.config.mode === "sequence"))
+                        (node.config.mode ?? "sequence") === "sequence"))
                   ),
               )
               .filter((f) => {
+                if (
+                  node.kind === "condition" &&
+                  f.key === "right" &&
+                  (node.config.operator ?? "truthy") === "truthy"
+                )
+                  return false;
+                if (
+                  node.kind === "loop" &&
+                  ((f.key === "items" && node.config.items === undefined) ||
+                    (f.key === "count" && node.config.items !== undefined))
+                )
+                  return false;
+                if (
+                  node.kind === "ai" &&
+                  f.key === "schema" &&
+                  node.config.mode !== "structured" &&
+                  node.config.mode !== "vision" &&
+                  node.config.schema === undefined
+                )
+                  return false;
+                if (
+                  node.kind === "ai" &&
+                  f.key === "targetId" &&
+                  node.config.mode !== "vision" &&
+                  !node.config.targetId
+                )
+                  return false;
                 if (
                   node.kind !== "detect" &&
                   !(node.kind === "wait" && node.config.detector)
                 )
                   return true;
-                const method = node.config.detector;
+                const method = effectiveDetector;
                 return (
                   (f.key !== "color" || method === "color") &&
                   (f.key !== "template" || method === "image") &&
@@ -757,12 +896,36 @@ export function Inspector({
                 <ConfigField
                   key={`${node.id}-${field.key}`}
                   field={field}
-                  value={node.config[field.key]}
+                  value={
+                    field.key === "detector"
+                      ? effectiveDetector
+                      : node.kind === "condition" && field.key === "operator"
+                        ? (node.config.operator ?? "truthy")
+                        : field.key === "mode" && node.kind === "ai"
+                          ? (node.config.mode ?? "text")
+                          : field.key === "mode" && node.kind === "group"
+                            ? (node.config.mode ?? "sequence")
+                            : field.key === "durationMs"
+                              ? (node.config.durationMs ?? node.config.ms)
+                              : field.key === "pollIntervalMs"
+                                ? (node.config.pollIntervalMs ??
+                                  node.config.pollMs)
+                                : field.key === "variable"
+                                  ? (node.config.variable ?? node.config.name)
+                                  : field.key === "prompt" &&
+                                      effectiveDetector === "text"
+                                    ? (node.config.text ?? node.config.prompt)
+                                    : node.config[field.key]
+                  }
                   onChange={(value) => {
-                    const config = { ...node.config };
-                    if (value === undefined) delete config[field.key];
-                    else config[field.key] = value;
-                    update({ config });
+                    update({
+                      config: updateNodeConfig(
+                        node.kind,
+                        node.config,
+                        field.key,
+                        value,
+                      ),
+                    });
                   }}
                   workspace={workspace}
                   flow={flow}
@@ -874,21 +1037,21 @@ export function Inspector({
                 placeholder="CommandOrControl+Shift+1"
               />
             </Field>
-            <JsonField
+            <FlowValues
+              key={`${flow.id}-inputs`}
               label="Flow inputs"
               value={flow.inputs}
-              onChange={(value) => {
-                if (value && typeof value === "object" && !Array.isArray(value))
-                  onChange({ ...flow, inputs: value });
-              }}
+              references={references}
+              allowReference={false}
+              onChange={(value) => onChange({ ...flow, inputs: value })}
             />
-            <JsonField
+            <FlowValues
+              key={`${flow.id}-outputs`}
               label="Flow outputs"
               value={flow.outputs}
-              onChange={(value) => {
-                if (value && typeof value === "object" && !Array.isArray(value))
-                  onChange({ ...flow, outputs: value });
-              }}
+              references={references}
+              allowReference
+              onChange={(value) => onChange({ ...flow, outputs: value })}
             />
             <div className="inspector-tip">
               <CornerDownRight size={17} />
@@ -907,6 +1070,54 @@ function WorkflowIcon() {
   return <Layers3 size={13} />;
 }
 
+function FlowValues({
+  label,
+  value,
+  references,
+  allowReference,
+  onChange,
+}: {
+  label: string;
+  value: Record<string, Json>;
+  references: ReturnType<typeof createReferenceInspector>;
+  allowReference: boolean;
+  onChange: (value: Record<string, Json>) => void;
+}) {
+  const [error, setError] = useState("");
+  return (
+    <div className="flow-value-contract">
+      <ValueField
+        label={label}
+        value={value}
+        references={references}
+        literalType="object"
+        allowReference={allowReference}
+        allowWholeReference={false}
+        help={
+          allowReference
+            ? "Named results returned when the workflow finishes. Choose outputs from earlier nodes for each property."
+            : "Literal default values available when this flow runs. Callers can override individual properties."
+        }
+        onChange={(next) => {
+          if (!isRecord(next)) {
+            setError(
+              "The root must remain an object with named properties. This edit has not been applied.",
+            );
+            return;
+          }
+          setError("");
+          onChange(next);
+        }}
+      />
+      {error ? (
+        <span role="alert" className="field-error">
+          {error}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 function GroupChildren({
   config,
   flows,
@@ -920,24 +1131,10 @@ function GroupChildren({
   references: ReturnType<typeof createReferenceInspector>;
   onChange: (config: Record<string, Json>) => void;
 }) {
-  const children: (Record<string, Json> & { flowId: string })[] = Array.isArray(
-    config.children,
-  )
-    ? config.children.flatMap((child) =>
-        child &&
-        typeof child === "object" &&
-        !Array.isArray(child) &&
-        typeof child.flowId === "string"
-          ? [
-              {
-                ...child,
-                flowId: child.flowId,
-              },
-            ]
-          : [],
-      )
+  const children: Json[] = Array.isArray(config.children)
+    ? config.children
     : Array.isArray(config.flowIds)
-      ? config.flowIds.map((id) => ({ flowId: String(id), inputs: {} }))
+      ? config.flowIds.map((id) => ({ flowId: id, inputs: {} }))
       : [];
   const update = (next: typeof children) => {
     const { flowIds: _old, children: _previous, ...rest } = config;
@@ -965,53 +1162,95 @@ function GroupChildren({
         </Select>
       </Field>
       <div className="child-list">
-        {children.map((child, index) => (
-          <div className="child-entry" key={`${child.flowId}-${index}`}>
-            <div className="child-row">
-              <WorkflowIcon />
-              <span>
-                {index + 1}.{" "}
-                {flows.find((flow) => flow.id === child.flowId)?.name ??
-                  child.flowId}
-              </span>
-              <IconButton
-                label={`Remove child ${index + 1}`}
-                onClick={() => update(children.filter((_, i) => i !== index))}
-              >
-                <X size={12} />
-              </IconButton>
+        {children.map((child, index) => {
+          if (!isRecord(child) || typeof child.flowId !== "string")
+            return (
+              <div className="child-entry" key={index}>
+                <JsonField
+                  label={`Child ${index + 1} (advanced)`}
+                  value={child}
+                  onChange={(value) =>
+                    update(
+                      children.map((item, i) => (i === index ? value : item)),
+                    )
+                  }
+                  help="This imported entry needs advanced editing. Other child edits preserve it."
+                />
+                <IconButton
+                  label={`Remove child ${index + 1}`}
+                  onClick={() => update(children.filter((_, i) => i !== index))}
+                >
+                  <X size={12} />
+                </IconButton>
+              </div>
+            );
+          const selectedChild = flows.find((flow) => flow.id === child.flowId);
+          return (
+            <div className="child-entry" key={`${child.flowId}-${index}`}>
+              <div className="child-row">
+                <WorkflowIcon />
+                <Select
+                  aria-label={`Flow for child ${index + 1}`}
+                  value={child.flowId}
+                  onChange={(event) =>
+                    update(
+                      children.map((item, i) =>
+                        i === index
+                          ? { ...child, flowId: event.target.value }
+                          : item,
+                      ),
+                    )
+                  }
+                >
+                  {!selectedChild ? (
+                    <option value={child.flowId}>
+                      {child.flowId || "Missing child flow"}
+                    </option>
+                  ) : null}
+                  {flows.map((flow) => (
+                    <option key={flow.id} value={flow.id}>
+                      {index + 1}. {flow.name}
+                    </option>
+                  ))}
+                </Select>
+                <IconButton
+                  label={`Remove child ${index + 1}`}
+                  onClick={() => update(children.filter((_, i) => i !== index))}
+                >
+                  <X size={12} />
+                </IconButton>
+              </div>
+              <details className="child-inputs">
+                <summary>
+                  Inputs
+                  {child.inputs &&
+                  typeof child.inputs === "object" &&
+                  Object.keys(child.inputs).length
+                    ? ` · ${Object.keys(child.inputs).length} values`
+                    : ""}
+                </summary>
+                <ChildInputs
+                  label={`Inputs for child ${index + 1}`}
+                  value={child.inputs}
+                  child={selectedChild}
+                  references={references}
+                  consumerNodeId={nodeId}
+                  onChange={(value) => {
+                    update(
+                      children.map((item, i) => {
+                        if (i !== index) return item;
+                        const next = { ...child };
+                        if (value === undefined) delete next.inputs;
+                        else next.inputs = value;
+                        return next;
+                      }),
+                    );
+                  }}
+                />
+              </details>
             </div>
-            <details className="child-inputs">
-              <summary>
-                Inputs
-                {child.inputs &&
-                typeof child.inputs === "object" &&
-                Object.keys(child.inputs).length
-                  ? ` · ${Object.keys(child.inputs).length} values`
-                  : ""}
-              </summary>
-              <ValueField
-                label={`Inputs for child ${index + 1}`}
-                value={child.inputs}
-                references={references}
-                consumerNodeId={nodeId}
-                literalType="object"
-                allowTypeChange
-                onChange={(value) => {
-                  update(
-                    children.map((item, i) => {
-                      if (i !== index) return item;
-                      const next = { ...item };
-                      if (value === undefined) delete next.inputs;
-                      else next.inputs = value;
-                      return next;
-                    }),
-                  );
-                }}
-              />
-            </details>
-          </div>
-        ))}
+          );
+        })}
       </div>
       <span className="field-help">
         {children.length} child invocation{children.length === 1 ? "" : "s"}

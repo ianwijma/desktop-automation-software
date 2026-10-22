@@ -33,6 +33,8 @@ Shared node definitions provide defaults, inspector fields, ports, output metada
 
 Reference discovery uses the same shared output metadata and computes graph ancestry, dominance, and reaching variable assignments once per immutable editor snapshot. The inspector and validator warn about conditional outputs, error paths, and possibly unset variables. This is advisory analysis: it does not evaluate conditions, insert defaults, or change execution semantics. Typed editor values use the existing JSON/reference representation without a schema-version change; exact references retain their runtime types.
 
+Structured authoring helpers apply explicit mode changes as one configuration update, removing known conflicting settings and aliases while preserving extensions. Flow input defaults are literal JSON; flow output mappings use completion-scope references. Child mappings store invocation-specific overrides without changing the child's defaults. The AI schema builder preserves unsupported keywords during local edits, offers advanced JSON, and exposes explicit schema property paths to reference discovery. It adds no provider or execution contract.
+
 Run events include redacted input/output and error evidence. Captures are held in a bounded in-memory cache; template crops explicitly selected by the user are persisted in node configuration. Continuous video is not stored. On restart, unfinished runs become interrupted, preserving evidence without replaying side effects.
 
 ## Resource ownership

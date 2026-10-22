@@ -140,7 +140,7 @@ export function JsonField({
   label: string;
   help?: string;
 }) {
-  const serialized = JSON.stringify(value ?? {}, null, 2);
+  const serialized = JSON.stringify(value === undefined ? {} : value, null, 2);
   const [text, setText] = useState(serialized);
   const [error, setError] = useState("");
   useEffect(() => {

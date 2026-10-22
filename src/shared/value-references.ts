@@ -19,7 +19,7 @@ export interface ReferenceOptions {
 }
 export interface ReferenceInspector {
   referenceOptions(
-    consumerNodeId: string,
+    consumerNodeId?: string,
     options?: ReferenceOptions,
   ): ReferenceOption[];
   /** Omitting the consumer inspects flow outputs, evaluated after a Finish node. */
@@ -89,6 +89,77 @@ interface Edge {
   source: string;
   target: string;
   port: string;
+}
+
+/** Infer only explicit local schema types; never rewrite or resolve advanced schemas. */
+function schemaOutputs(value: Json): OutputSpec[] {
+  let schema = value;
+  if (typeof schema === "string") {
+    try {
+      schema = JSON.parse(schema) as Json;
+    } catch {
+      /* Dynamic or incomplete schema. */
+    }
+  }
+  const specs: OutputSpec[] = [];
+  const object = (value: Json | undefined): value is Record<string, Json> =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  const walk = (
+    current: Json,
+    path: string[],
+    optional: boolean,
+    depth: number,
+  ) => {
+    if (specs.length >= 1000 || depth > 12) return;
+    const record = object(current) ? current : undefined;
+    const advanced =
+      record &&
+      [
+        "$ref",
+        "$dynamicRef",
+        "$recursiveRef",
+        "anyOf",
+        "oneOf",
+        "allOf",
+        "not",
+        "if",
+        "then",
+        "else",
+      ].some((key) => Object.hasOwn(record, key));
+    const declared = advanced ? undefined : record?.type;
+    const type: OutputSpec["type"] =
+      declared === "integer"
+        ? "number"
+        : typeof declared === "string" &&
+            ["object", "array", "string", "number", "boolean", "null"].includes(
+              declared,
+            )
+          ? (declared as OutputSpec["type"])
+          : "json";
+    specs.push({
+      path: path.join("."),
+      type,
+      description:
+        typeof record?.description === "string"
+          ? record.description
+          : path.length
+            ? `Structured output: ${path.join(" → ")}`
+            : "Schema-validated AI result",
+      ...(optional ? { optional: true } : {}),
+    });
+    if (type !== "object" || !object(record?.properties)) return;
+    const required = Array.isArray(record.required) ? record.required : [];
+    for (const [name, child] of Object.entries(record.properties))
+      if (safeSegment(name))
+        walk(
+          child,
+          [...path, name],
+          optional || !required.includes(name),
+          depth + 1,
+        );
+  };
+  walk(schema, [], false, 0);
+  return specs;
 }
 
 /** Make one inspector per immutable flow revision/render. It never caches mutable flows globally. */
@@ -367,6 +438,8 @@ export function createReferenceInspector(
       ];
     else if (node.kind === "set")
       result = nestedSpecs(assignedValue(node), node.id);
+    else if (node.kind === "ai" && config.schema !== undefined)
+      result = schemaOutputs(config.schema);
     else if (node.kind === "wait")
       result = config.detector
         ? exactPath(config.detector)
@@ -575,7 +648,7 @@ export function createReferenceInspector(
         ? describe(parts, consumerNodeId ?? completion, options)
         : null;
     },
-    referenceOptions(consumer, options = {}) {
+    referenceOptions(consumer = completion, options = {}) {
       const key = JSON.stringify([consumer, Boolean(options.loopInputs)]);
       const cached = optionsCache.get(key);
       if (cached) return cached;
@@ -630,7 +703,7 @@ export function createReferenceInspector(
 
 export function referenceOptions(
   flow: FlowDefinition,
-  consumerNodeId: string,
+  consumerNodeId?: string,
   options?: ReferenceOptions,
 ): ReferenceOption[] {
   return createReferenceInspector(flow).referenceOptions(
@@ -641,7 +714,7 @@ export function referenceOptions(
 export function describeReference(
   value: unknown,
   flow: FlowDefinition,
-  consumerNodeId: string,
+  consumerNodeId?: string,
   options?: ReferenceOptions,
 ): ReferenceOption | null {
   return createReferenceInspector(flow).describeReference(

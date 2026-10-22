@@ -50,11 +50,15 @@ export interface ValueFieldProps {
   value: Json | undefined;
   onChange: (value: Json | undefined) => void;
   references: ReturnType<typeof createReferenceInspector>;
-  consumerNodeId: string;
+  consumerNodeId?: string;
   help?: string;
   placeholder?: string;
   literalType?: LiteralType;
   allowTypeChange?: boolean;
+  /** Flow input defaults are literal data, even when a string looks like a reference. */
+  allowReference?: boolean;
+  /** Keep a record root literal while allowing references in its properties. */
+  allowWholeReference?: boolean;
   multiline?: boolean;
   loopInputs?: boolean;
   depth?: number;
@@ -71,6 +75,8 @@ export function ValueField({
   placeholder,
   literalType = "string",
   allowTypeChange = false,
+  allowReference = true,
+  allowWholeReference = true,
   multiline = false,
   loopInputs = false,
   depth = 0,
@@ -81,20 +87,26 @@ export function ValueField({
   const [newProperty, setNewProperty] = useState("");
   const [propertyError, setPropertyError] = useState("");
   const sourceButton = useRef<HTMLButtonElement>(null);
-  const expression = hasReference(value);
+  const canReference = allowReference && allowWholeReference;
+  const expression = canReference && hasReference(value);
   const lastLiteral = useRef<Json | undefined>(expression ? undefined : value);
   useEffect(() => {
-    if (!hasReference(value)) lastLiteral.current = value;
-  }, [value]);
+    if (!expression) lastLiteral.current = value;
+  }, [value, expression]);
   const options = useMemo(
-    () => references.referenceOptions(consumerNodeId, { loopInputs }),
-    [references, consumerNodeId, loopInputs],
+    () =>
+      canReference
+        ? references.referenceOptions(consumerNodeId, { loopInputs })
+        : [],
+    [references, consumerNodeId, loopInputs, canReference],
   );
-  const description = references.describeReference(value, consumerNodeId, {
-    loopInputs,
-  });
+  const description = canReference
+    ? references.describeReference(value, consumerNodeId, {
+        loopInputs,
+      })
+    : null;
   const warnings = useMemo(() => {
-    if (!hasReference(value)) return [];
+    if (!canReference || !hasReference(value)) return [];
     return Array.from(
       new Set(
         (value.match(/\$\{[^{}]+\}/g) ?? [])
@@ -107,7 +119,7 @@ export function ValueField({
           .filter((warning): warning is string => Boolean(warning)),
       ),
     );
-  }, [value, references, consumerNodeId, loopInputs]);
+  }, [value, references, consumerNodeId, loopInputs, canReference]);
   const type =
     !allowTypeChange && literalType === "number"
       ? "number"
@@ -123,6 +135,7 @@ export function ValueField({
     consumerNodeId,
     loopInputs,
     allowTypeChange: true,
+    allowReference,
     depth: depth + 1,
   };
   const updateObject = (key: string, next: Json | undefined) => {
@@ -150,15 +163,17 @@ export function ValueField({
         <label htmlFor={id} className="field-label">
           {label}
         </label>
-        <button
-          ref={sourceButton}
-          type="button"
-          className="value-source-button"
-          aria-label={`Use value from for ${label}`}
-          onClick={() => setPickerOpen(true)}
-        >
-          <Link2 size={12} /> Use value from…
-        </button>
+        {canReference ? (
+          <button
+            ref={sourceButton}
+            type="button"
+            className="value-source-button"
+            aria-label={`Use value from for ${label}`}
+            onClick={() => setPickerOpen(true)}
+          >
+            <Link2 size={12} /> Use value from…
+          </button>
+        ) : null}
       </div>
       {expression ? (
         <>
@@ -405,6 +420,7 @@ export function ValueField({
               value={value}
               onChange={onChange}
               placeholder={placeholder}
+              allowReference={canReference}
             />
           ) : multiline && type === "string" ? (
             <textarea
@@ -453,11 +469,13 @@ function NumberValue({
   value,
   onChange,
   placeholder,
+  allowReference,
 }: {
   id: string;
   value: Json | undefined;
   onChange: (value: Json | undefined) => void;
   placeholder?: string;
+  allowReference: boolean;
 }) {
   const serialized =
     typeof value === "number" || typeof value === "string" ? String(value) : "";
@@ -479,13 +497,16 @@ function NumberValue({
           const next = event.target.value;
           setText(next);
           setError("");
-          if (next.includes("${")) onChange(next);
+          if (allowReference && next.includes("${")) onChange(next);
           else if (next.trim() !== "" && Number.isFinite(Number(next)))
             onChange(Number(next));
         }}
         onBlur={() => {
           if (!text.trim()) onChange(undefined);
-          else if (!Number.isFinite(Number(text)) && !text.includes("${"))
+          else if (
+            !Number.isFinite(Number(text)) &&
+            !(allowReference && text.includes("${"))
+          )
             setError("Enter a number. This edit has not been applied.");
         }}
       />

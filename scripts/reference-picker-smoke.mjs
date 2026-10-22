@@ -438,7 +438,7 @@ export async function runReferencePickerSmoke({
     await page.keyboard.press("Enter");
     await addProperty("Child inputs", "position");
     await chooseReference("Child inputs.position", "${index}", "index");
-    await openPicker("Iterations");
+    await openPicker("Items (optional)");
     assert.equal(await referenceOption("${item}").count(), 0);
     assert.equal(await referenceOption("${index}").count(), 0);
     await search.press("Escape");
