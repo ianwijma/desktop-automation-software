@@ -34,6 +34,11 @@ import type {
   RunRecord,
 } from "../shared/types";
 import { catalog, uid, type FieldSpec } from "./catalog";
+import { ValueField } from "./value-field";
+import {
+  createReferenceInspector,
+  nodeReference,
+} from "../shared/value-references";
 import {
   Button,
   IconButton,
@@ -428,14 +433,58 @@ function ConfigField({
   value,
   onChange,
   workspace,
-  flowId,
+  flow,
+  node,
+  references,
 }: {
   field: FieldSpec;
   value: Json | undefined;
-  onChange: (value: Json) => void;
+  onChange: (value: Json | undefined) => void;
   workspace: WorkspaceState;
-  flowId: string;
+  flow: FlowDefinition;
+  node: FlowNode;
+  references: ReturnType<typeof createReferenceInspector>;
 }) {
+  if (
+    field.reference !== false &&
+    !["target", "connection", "flow", "select", "image"].includes(
+      field.type ?? "",
+    )
+  )
+    return (
+      <ValueField
+        label={field.label}
+        value={value}
+        onChange={onChange}
+        references={references}
+        consumerNodeId={node.id}
+        help={field.help}
+        placeholder={field.placeholder}
+        literalType={
+          field.type === "number"
+            ? "number"
+            : field.type === "boolean"
+              ? "boolean"
+              : field.type === "json"
+                ? "object"
+                : "string"
+        }
+        allowTypeChange={field.type === "value" || field.type === "json"}
+        multiline={field.type === "textarea"}
+        loopInputs={node.kind === "loop" && field.key === "inputs"}
+      />
+    );
+  // Imported expressions remain editable even when this structural field cannot offer references.
+  if (
+    typeof value === "string" &&
+    value.includes("${") &&
+    ["boolean", "select"].includes(field.type ?? "")
+  )
+    return (
+      <Field label={field.label} help={field.help}>
+        <input value={value} onChange={(e) => onChange(e.target.value)} />
+      </Field>
+    );
   if (field.type === "boolean")
     return (
       <label className="toggle-row">
@@ -494,7 +543,7 @@ function ConfigField({
           ? workspace.connections.map((c) => ({ id: c.id, name: c.name }))
           : field.type === "flow"
             ? workspace.flows
-                .filter((f) => f.id !== flowId)
+                .filter((f) => f.id !== flow.id)
                 .map((f) => ({ id: f.id, name: f.name }))
             : (field.options ?? []).map((id) => ({ id, name: id }));
     return (
@@ -574,6 +623,10 @@ export function Inspector({
   issues: ValidationIssue[];
 }) {
   const [advanced, setAdvanced] = useState(false);
+  const [copyStatus, setCopyStatus] = useState("");
+  const references = useMemo(() => createReferenceInspector(flow), [flow]);
+  const copyReference = node ? nodeReference(node.id) : null;
+  useEffect(() => setCopyStatus(""), [node?.id]);
   const spec = node ? catalog[node.kind] : null;
   const update = (patch: Partial<FlowNode>) => {
     if (node)
@@ -615,12 +668,47 @@ export function Inspector({
                 onChange={(e) => update({ label: e.target.value })}
               />
             </Field>
+            <div className="node-reference">
+              <span className="field-label">Node ID</span>
+              <code data-node-id>{node.id}</code>
+              <button
+                type="button"
+                className="value-source-button"
+                aria-label="Copy node reference"
+                disabled={!copyReference}
+                onClick={() => {
+                  void Promise.resolve()
+                    .then(() => navigator.clipboard.writeText(copyReference!))
+                    .then(() => setCopyStatus("Reference copied."))
+                    .catch(() =>
+                      setCopyStatus(
+                        "Could not copy. Select the node ID above to build its reference.",
+                      ),
+                    );
+                }}
+              >
+                <Copy size={12} /> Copy node reference
+              </button>
+              {!copyReference ? (
+                <span className="field-help">
+                  This imported ID cannot be used in a reference. Duplicate the
+                  node to give it a new ID.
+                </span>
+              ) : null}
+              {copyStatus ? (
+                <span role="status" className="field-help">
+                  {copyStatus}
+                </span>
+              ) : null}
+            </div>
             <div className="section-divider" />
             <h4 className="section-eyebrow">CONFIGURATION</h4>
             {node.kind === "group" ? (
               <GroupChildren
                 config={node.config}
                 flows={workspace.flows.filter((f) => f.id !== flow.id)}
+                nodeId={node.id}
+                references={references}
                 onChange={(config) => update({ config })}
               />
             ) : null}
@@ -670,11 +758,16 @@ export function Inspector({
                   key={`${node.id}-${field.key}`}
                   field={field}
                   value={node.config[field.key]}
-                  onChange={(value) =>
-                    update({ config: { ...node.config, [field.key]: value } })
-                  }
+                  onChange={(value) => {
+                    const config = { ...node.config };
+                    if (value === undefined) delete config[field.key];
+                    else config[field.key] = value;
+                    update({ config });
+                  }}
                   workspace={workspace}
-                  flowId={flow.id}
+                  flow={flow}
+                  node={node}
+                  references={references}
                 />
               ))}
             {spec.fields.length === 0 ? (
@@ -817,35 +910,35 @@ function WorkflowIcon() {
 function GroupChildren({
   config,
   flows,
+  nodeId,
+  references,
   onChange,
 }: {
   config: Record<string, Json>;
   flows: FlowDefinition[];
+  nodeId: string;
+  references: ReturnType<typeof createReferenceInspector>;
   onChange: (config: Record<string, Json>) => void;
 }) {
-  const children: { flowId: string; inputs: Record<string, Json> }[] =
-    Array.isArray(config.children)
-      ? config.children.flatMap((child) =>
-          child &&
-          typeof child === "object" &&
-          !Array.isArray(child) &&
-          typeof child.flowId === "string"
-            ? [
-                {
-                  flowId: child.flowId,
-                  inputs:
-                    child.inputs &&
-                    typeof child.inputs === "object" &&
-                    !Array.isArray(child.inputs)
-                      ? child.inputs
-                      : {},
-                },
-              ]
-            : [],
-        )
-      : Array.isArray(config.flowIds)
-        ? config.flowIds.map((id) => ({ flowId: String(id), inputs: {} }))
-        : [];
+  const children: (Record<string, Json> & { flowId: string })[] = Array.isArray(
+    config.children,
+  )
+    ? config.children.flatMap((child) =>
+        child &&
+        typeof child === "object" &&
+        !Array.isArray(child) &&
+        typeof child.flowId === "string"
+          ? [
+              {
+                ...child,
+                flowId: child.flowId,
+              },
+            ]
+          : [],
+      )
+    : Array.isArray(config.flowIds)
+      ? config.flowIds.map((id) => ({ flowId: String(id), inputs: {} }))
+      : [];
   const update = (next: typeof children) => {
     const { flowIds: _old, children: _previous, ...rest } = config;
     onChange({ ...rest, children: next });
@@ -891,24 +984,29 @@ function GroupChildren({
             <details className="child-inputs">
               <summary>
                 Inputs
-                {Object.keys(child.inputs).length
+                {child.inputs &&
+                typeof child.inputs === "object" &&
+                Object.keys(child.inputs).length
                   ? ` · ${Object.keys(child.inputs).length} values`
                   : ""}
               </summary>
-              <JsonField
+              <ValueField
                 label={`Inputs for child ${index + 1}`}
                 value={child.inputs}
+                references={references}
+                consumerNodeId={nodeId}
+                literalType="object"
+                allowTypeChange
                 onChange={(value) => {
-                  if (
-                    value &&
-                    typeof value === "object" &&
-                    !Array.isArray(value)
-                  )
-                    update(
-                      children.map((item, i) =>
-                        i === index ? { ...item, inputs: value } : item,
-                      ),
-                    );
+                  update(
+                    children.map((item, i) => {
+                      if (i !== index) return item;
+                      const next = { ...item };
+                      if (value === undefined) delete next.inputs;
+                      else next.inputs = value;
+                      return next;
+                    }),
+                  );
                 }}
               />
             </details>

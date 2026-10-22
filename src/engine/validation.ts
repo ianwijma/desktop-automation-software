@@ -10,6 +10,7 @@ import {
   nodeOutputPorts,
   type ValidationContext,
 } from "../shared/node-definitions";
+import { createReferenceInspector } from "../shared/value-references";
 export type { ValidationContext } from "../shared/node-definitions";
 
 export interface ChildSpec {
@@ -65,6 +66,27 @@ export function validateFlow(
   if (flow.edges.length > 4000)
     error("A workflow cannot contain more than 4000 edges");
   const nodes = new Map(flow.nodes.map((node) => [node.id, node]));
+  // Reuse graph analysis for every reference in this validation pass.
+  const references = createReferenceInspector(flow);
+  const warnings = new Set<string>();
+  const referenceWarning = (
+    value: string,
+    nodeId?: string,
+    loopInputs = false,
+  ) => {
+    const option = references.describeReference(value, nodeId, { loopInputs });
+    if (!option?.warning) return;
+    const message = `${option.label}: ${option.warning}`;
+    const key = `${nodeId ?? ""}:${message}`;
+    if (!warnings.has(key)) {
+      warnings.add(key);
+      issues.push({
+        severity: "warning",
+        message,
+        ...(nodeId ? { nodeId } : {}),
+      });
+    }
+  };
   if (nodes.size !== flow.nodes.length) error("Node IDs must be unique");
   if (new Set(flow.edges.map((edge) => edge.id)).size !== flow.edges.length)
     error("Edge IDs must be unique");
@@ -120,6 +142,9 @@ export function validateFlow(
       nodes,
       (message) => error(message, node.id),
       node.kind === "loop",
+      [],
+      (reference, loopInputs) =>
+        referenceWarning(reference, node.id, loopInputs),
     );
     const detection =
       typeof node.config.detection === "string"
@@ -189,7 +214,9 @@ export function validateFlow(
       }
     }
   }
-  validateReferences(flow.outputs, nodes, error);
+  validateReferences(flow.outputs, nodes, error, false, [], (reference) =>
+    referenceWarning(reference),
+  );
   const reached = new Set<string>();
   const stack = new Set<string>();
   const walk = (id: string) => {
@@ -263,6 +290,7 @@ function validateReferences(
   error: (message: string) => void,
   loop = false,
   path: string[] = [],
+  warn?: (reference: string, loopInputs: boolean) => void,
 ): void {
   if (typeof value === "string") {
     const pattern = /\$\{([^{}]+)\}/g;
@@ -291,6 +319,11 @@ function validateReferences(
         );
       else if (root === "index" && parts.length !== 1)
         error("Loop index is a number and cannot have a property path");
+      if (
+        (root === "nodes" && parts[1] && nodes.has(parts[1])) ||
+        root === "vars"
+      )
+        warn?.(match[0], loop && path[0] === "inputs");
     }
     if (value.replace(pattern, "").includes("${"))
       error(
@@ -300,7 +333,7 @@ function validateReferences(
     for (const [key, child] of Object.entries(value)) {
       if (["__proto__", "prototype", "constructor"].includes(key))
         error(`Unsafe property: ${key}`);
-      validateReferences(child, nodes, error, loop, [...path, key]);
+      validateReferences(child, nodes, error, loop, [...path, key], warn);
     }
   }
 }

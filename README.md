@@ -64,9 +64,9 @@ Jev vision is experimental and must be enabled in its connection. Presence is ch
 
 Execution follows explicit edges. Use conditions for branches and bounded loop nodes to call child flows repeatedly. Arbitrary cycles and recursive child references are rejected.
 
-Reference data with `${inputs.name}`, `${vars.name}`, or `${nodes.nodeId}`. Exact references preserve JSON types; embedded references interpolate strings. There is no arbitrary JavaScript evaluation.
+Choose **Use value from…** beside a node field to select flow inputs, variables, or earlier node outputs. The picker shows readable names while storing stable references such as `${inputs.name}`, `${vars.name}`, and `${nodes.nodeId}`. Exact references preserve JSON types; embedded references interpolate strings. There is no arbitrary JavaScript evaluation. See [working with values and references](docs/value-references.md).
 
-To click an image or AI-detected object, connect the detector's **match** output to a Click node and set **Detected result** to `${nodes.detectorNodeId}`. Relay clicks the box center and verifies its capture is still fresh and belongs to the selected target. Enable location output for AI detectors; browser element detection uses selectors.
+To click an image or AI-detected object, connect the detector's **match** output to a Click node. Beside **Detected result**, choose **Use value from…** and select the detector's complete result. Use the same application target for both nodes. Relay clicks the box center and verifies its capture is still fresh and belongs to the selected target. Enable location output for AI detectors; browser element detection uses selectors.
 
 A root run snapshots its complete referenced flow tree. Child results preserve input order. Desktop-dependent work reserves the physical desktop across waits; independent browser profiles and AI work can overlap. Nested callers inherit reservations without allowing conflicting siblings to run together.
 

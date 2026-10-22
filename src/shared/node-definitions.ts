@@ -47,11 +47,14 @@ export interface FieldSpec {
     | "flow"
     | "select"
     | "json"
+    | "value"
     | "boolean"
     | "image";
   placeholder?: string;
   options?: string[];
   help?: string;
+  /** False for structural fields that must remain literal in the authoring UI. */
+  reference?: boolean;
 }
 export interface ValidationContext {
   targets?: TargetDescriptor[];
@@ -112,6 +115,7 @@ const xy: FieldSpec[] = [
 const detection: FieldSpec = {
   key: "detection",
   label: "Detected result (optional)",
+  type: "value",
   placeholder: "${nodes.detectId}",
   help: "Reference a detector result to use the center of its matched box. Use the same target.",
 };
@@ -293,6 +297,7 @@ const definitions: Record<NodeKind, DefinitionMetadata> = {
         label: "Detector",
         type: "select",
         options: ["image", "text", "color", "change", "element", "ai"],
+        reference: false,
       },
       { key: "prompt", label: "Text or question", type: "textarea" },
       { key: "template", label: "Template image", type: "image" },
@@ -328,14 +333,20 @@ const definitions: Record<NodeKind, DefinitionMetadata> = {
     group: "Logic",
     defaults: { left: "", operator: "eq", right: "" },
     fields: [
-      { key: "left", label: "Value", placeholder: "${nodes.detect.outcome}" },
+      {
+        key: "left",
+        label: "Value",
+        type: "value",
+        placeholder: "${nodes.detect.outcome}",
+      },
       {
         key: "operator",
         label: "Operator",
         type: "select",
         options: ["eq", "neq", "gt", "gte", "lt", "lte", "contains", "truthy"],
+        reference: false,
       },
-      { key: "right", label: "Compare with" },
+      { key: "right", label: "Compare with", type: "value" },
     ],
     ports: ["true", "false"],
   },
@@ -345,8 +356,8 @@ const definitions: Record<NodeKind, DefinitionMetadata> = {
     group: "Logic",
     defaults: { variable: "value", value: "" },
     fields: [
-      { key: "variable", label: "Variable name" },
-      { key: "value", label: "Value", type: "textarea" },
+      { key: "variable", label: "Variable name", reference: false },
+      { key: "value", label: "Value", type: "value" },
     ],
   },
   loop: {
@@ -357,6 +368,18 @@ const definitions: Record<NodeKind, DefinitionMetadata> = {
     fields: [
       { key: "flowId", label: "Child flow", type: "flow" },
       { key: "count", label: "Iterations", type: "number" },
+      {
+        key: "items",
+        label: "Items (optional)",
+        type: "value",
+        help: "Use an array to iterate its items instead of a count.",
+      },
+      {
+        key: "inputs",
+        label: "Child inputs",
+        type: "json",
+        help: "Map values to the child flow. Item and index are available for each iteration.",
+      },
       { key: "maxIterations", label: "Safety limit", type: "number" },
     ],
   },
@@ -371,6 +394,7 @@ const definitions: Record<NodeKind, DefinitionMetadata> = {
         label: "Mode",
         type: "select",
         options: ["text", "structured", "vision"],
+        reference: false,
       },
       { key: "connectionId", label: "AI connection", type: "connection" },
       {
@@ -380,7 +404,12 @@ const definitions: Record<NodeKind, DefinitionMetadata> = {
         placeholder: "Describe what you see…",
       },
       { key: "targetId", label: "Optional image source", type: "target" },
-      { key: "schema", label: "Output schema (optional)", type: "json" },
+      {
+        key: "schema",
+        label: "Output schema (optional)",
+        type: "json",
+        reference: false,
+      },
     ],
   },
   call: {
@@ -409,12 +438,14 @@ const definitions: Record<NodeKind, DefinitionMetadata> = {
         label: "Child flow IDs",
         type: "json",
         help: "Each flow is invoked once. Repeat an ID to run it again.",
+        reference: false,
       },
       {
         key: "mode",
         label: "Execution mode",
         type: "select",
         options: ["sequence", "pool", "batches"],
+        reference: false,
       },
       { key: "concurrency", label: "Pool or batch size", type: "number" },
       {
@@ -427,6 +458,7 @@ const definitions: Record<NodeKind, DefinitionMetadata> = {
         label: "Children with inputs (optional)",
         type: "json",
         help: "An array of {flowId, inputs} objects; use instead of flow IDs.",
+        reference: false,
       },
     ],
   },
@@ -871,6 +903,12 @@ const detectorOutputs: OutputSpec[] = [
     description: "Matched rectangle in capture pixels",
     optional: true,
   },
+  ...["x", "y", "width", "height"].map((dimension) => ({
+    path: `box.${dimension}`,
+    type: "number" as const,
+    description: `Matched rectangle ${dimension} in capture pixels`,
+    optional: true,
+  })),
   {
     path: "frameId",
     type: "string",
