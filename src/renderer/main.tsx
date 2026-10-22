@@ -1,0 +1,1157 @@
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
+import {
+  Workflow,
+  Activity,
+  CalendarClock,
+  Settings2,
+  Plus,
+  Search,
+  ChevronDown,
+  ChevronRight,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Play,
+  Check,
+  CheckCircle2,
+  X,
+  Moon,
+  Sun,
+  Folder,
+  Layers3,
+  PanelRightClose,
+  PanelRightOpen,
+  Undo2,
+  Redo2,
+  Save,
+  MoreHorizontal,
+  ShieldCheck,
+  CircleAlert,
+  Copy,
+  Trash2,
+  Video,
+  ArrowRight,
+  LoaderCircle,
+} from "lucide-react";
+import type {
+  WorkspaceState,
+  RelayAPI,
+  FlowDefinition,
+  FlowNode,
+  NodeKind,
+  ValidationIssue,
+  RecordedAction,
+  Json,
+} from "../shared/types";
+import { previewAPI } from "./preview-api";
+import { catalog, blankFlow, uid } from "./catalog";
+import { GraphEditor, Inspector, NodePalette } from "./editor";
+import { Recorder } from "./recorder";
+import { Settings } from "./settings";
+import { Runs, Schedules } from "./runs";
+import { Button, IconButton, Modal, JsonField } from "./components";
+import "@xyflow/react/dist/style.css";
+import "./styles.css";
+const api: RelayAPI = window.relay ?? previewAPI;
+type Page = "flows" | "runs" | "schedules" | "settings";
+type Toast = { id: string; message: string; error: boolean };
+function App() {
+  const [workspace, setWorkspace] = useState<WorkspaceState | null>(null);
+  const [draft, setDraft] = useState<FlowDefinition | null>(null);
+  const [page, setPage] = useState<Page>("flows");
+  const [flowTab, setFlowTab] = useState<"flow" | "record" | "runs">("flow");
+  const [selected, setSelected] = useState<string | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const [search, setSearch] = useState("");
+  const [palette, setPalette] = useState(false);
+  const [showInspector, setShowInspector] = useState(true);
+  const [issues, setIssues] = useState<ValidationIssue[]>([]);
+  const [showValidation, setShowValidation] = useState(false);
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [bootError, setBootError] = useState("");
+  const [undo, setUndo] = useState<FlowDefinition[]>([]);
+  const [redo, setRedo] = useState<FlowDefinition[]>([]);
+  const [runInputs, setRunInputs] = useState<Record<string, Json> | null>(null);
+  const clipboard = useRef<FlowNode | null>(null);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const toast = useCallback((message: string, error = false) => {
+    const id = uid();
+    setToasts((t) => [...t.slice(-3), { id, message, error }]);
+    setTimeout(
+      () => setToasts((t) => t.filter((item) => item.id !== id)),
+      error ? 10000 : 4500,
+    );
+  }, []);
+  const onError = useCallback(
+    (error: unknown) =>
+      toast(error instanceof Error ? error.message : String(error), true),
+    [toast],
+  );
+  const refresh = useCallback(async () => {
+    const next = await api.bootstrap();
+    setWorkspace(next);
+    if (!draftRef.current && next.flows.length) {
+      setDraft(next.flows[0]);
+      draftRef.current = next.flows[0];
+    }
+  }, []);
+  useEffect(() => {
+    void refresh().catch((error) => setBootError(String(error)));
+    return api.onEvent((event) => {
+      if (event.type === "run")
+        setWorkspace((w) =>
+          w
+            ? {
+                ...w,
+                runs: [
+                  event.run,
+                  ...w.runs.filter((r) => r.id !== event.run.id),
+                ],
+              }
+            : w,
+        );
+      else if (event.type === "recording")
+        setWorkspace((w) => (w ? { ...w, recording: event.recording } : w));
+      else if (event.type === "capabilities")
+        setWorkspace((w) =>
+          w ? { ...w, capabilities: event.capabilities } : w,
+        );
+      else void refresh().catch(onError);
+    });
+  }, [refresh, onError]);
+  useEffect(() => {
+    if (!workspace) return;
+    const apply = () => {
+      const theme =
+        workspace.settings.theme === "system"
+          ? matchMedia("(prefers-color-scheme: dark)").matches
+            ? "dark"
+            : "light"
+          : workspace.settings.theme;
+      document.documentElement.dataset.theme = theme;
+      const accent = /^#[\da-f]{6}$/i.test(workspace.settings.accent)
+        ? workspace.settings.accent
+        : "#9292ff";
+      document.documentElement.style.setProperty("--accent-raw", accent);
+      document.documentElement.style.setProperty(
+        "--accent",
+        readableAccent(accent, theme),
+      );
+      document.documentElement.style.setProperty(
+        "--accent-ink",
+        theme === "light"
+          ? "#ffffff"
+          : luminance(readableAccent(accent, theme)) > 0.3
+            ? "#111318"
+            : "#ffffff",
+      );
+    };
+    apply();
+    const media = matchMedia("(prefers-color-scheme: dark)");
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, [workspace?.settings.theme, workspace?.settings.accent]);
+  const change = useCallback((next: FlowDefinition) => {
+    const previous = draftRef.current;
+    if (previous)
+      setUndo((items) => [...items.slice(-59), structuredClone(previous)]);
+    draftRef.current = next;
+    setDraft(next);
+    setRedo([]);
+    setDirty(true);
+  }, []);
+  const save = useCallback(async () => {
+    const current = draftRef.current;
+    if (!current) return null;
+    setBusy("save");
+    try {
+      const result = await api.saveFlow(current);
+      if (draftRef.current === current) {
+        setDraft(result);
+        draftRef.current = result;
+        setDirty(false);
+      } else {
+        setDraft((latest) =>
+          latest ? { ...latest, revision: result.revision } : latest,
+        );
+      }
+      await refresh();
+      toast("Flow saved.");
+      return result;
+    } catch (error) {
+      onError(error);
+      return null;
+    } finally {
+      setBusy(null);
+    }
+  }, [refresh, toast, onError]);
+  const chooseFlow = (id: string) => {
+    if (
+      dirty &&
+      !window.confirm(
+        "You have unsaved changes. Discard them and open another flow?",
+      )
+    )
+      return;
+    const next = workspace?.flows.find((f) => f.id === id);
+    if (next) {
+      setDraft(structuredClone(next));
+      setDirty(false);
+      setSelected(null);
+      setIssues([]);
+      setUndo([]);
+      setRedo([]);
+      setPage("flows");
+      setFlowTab("flow");
+    }
+  };
+  const newFlow = async () => {
+    if (
+      dirty &&
+      !window.confirm("Discard unsaved changes and create a new flow?")
+    )
+      return;
+    try {
+      const flow = await api.saveFlow(blankFlow());
+      await refresh();
+      setDraft(flow);
+      setSelected(null);
+      setDirty(false);
+      setPage("flows");
+      setFlowTab("flow");
+      setUndo([]);
+      setRedo([]);
+    } catch (error) {
+      onError(error);
+    }
+  };
+  const addNode = (kind: NodeKind) => {
+    if (!draft) return;
+    const parent =
+      draft.nodes.find((n) => n.id === selected) ?? draft.nodes.at(-1);
+    const id = uid();
+    const node: FlowNode = {
+      id,
+      kind,
+      label: catalog[kind].label,
+      position: {
+        x: parent ? parent.position.x + 310 : 80,
+        y: parent ? parent.position.y : 180,
+      },
+      config: structuredClone(catalog[kind].defaults),
+    };
+    const canConnect =
+      parent &&
+      parent.kind !== "end" &&
+      !draft.edges.some((e) => e.source === parent.id);
+    change({
+      ...draft,
+      nodes: [...draft.nodes, node],
+      edges: canConnect
+        ? [
+            ...draft.edges,
+            {
+              id: uid(),
+              source: parent.id,
+              target: id,
+              port: catalog[parent.kind].ports?.[0] ?? "next",
+            },
+          ]
+        : draft.edges,
+    });
+    setSelected(id);
+  };
+  const deleteNode = () => {
+    if (!draft || !selected) return;
+    change({
+      ...draft,
+      nodes: draft.nodes.filter((n) => n.id !== selected),
+      edges: draft.edges.filter(
+        (e) => e.source !== selected && e.target !== selected,
+      ),
+    });
+    setSelected(null);
+  };
+  const duplicateNode = () => {
+    if (!draft || !selected) return;
+    const node = draft.nodes.find((n) => n.id === selected);
+    if (!node) return;
+    const copy = {
+      ...structuredClone(node),
+      id: uid(),
+      position: { x: node.position.x + 40, y: node.position.y + 180 },
+      label: `${node.label} copy`,
+    };
+    change({ ...draft, nodes: [...draft.nodes, copy] });
+    setSelected(copy.id);
+  };
+  const undoAction = () => {
+    if (!draft || !undo.length) return;
+    setRedo((values) => [...values, structuredClone(draft)]);
+    setDraft(undo[undo.length - 1]);
+    setUndo((values) => values.slice(0, -1));
+    setDirty(true);
+  };
+  const redoAction = () => {
+    if (!draft || !redo.length) return;
+    setUndo((values) => [...values, structuredClone(draft)]);
+    setDraft(redo[redo.length - 1]);
+    setRedo((values) => values.slice(0, -1));
+    setDirty(true);
+  };
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const editing =
+        event.target instanceof HTMLElement &&
+        (event.target.matches("input,textarea,select") ||
+          event.target.isContentEditable);
+      const command = event.ctrlKey || event.metaKey;
+      if (command && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        if (document.activeElement instanceof HTMLElement)
+          document.activeElement.blur();
+        queueMicrotask(() => void save());
+        return;
+      }
+      if (editing || page !== "flows" || flowTab !== "flow") return;
+      if (command && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        if (event.shiftKey) redoAction();
+        else undoAction();
+      } else if (command && event.key.toLowerCase() === "y") {
+        event.preventDefault();
+        redoAction();
+      } else if (command && event.key.toLowerCase() === "d") {
+        event.preventDefault();
+        duplicateNode();
+      } else if (command && event.key.toLowerCase() === "c" && selected) {
+        event.preventDefault();
+        clipboard.current = structuredClone(
+          draft?.nodes.find((n) => n.id === selected) ?? null,
+        );
+        toast("Node copied.");
+      } else if (
+        command &&
+        event.key.toLowerCase() === "v" &&
+        clipboard.current &&
+        draft
+      ) {
+        event.preventDefault();
+        const n = {
+          ...structuredClone(clipboard.current),
+          id: uid(),
+          position: {
+            x: clipboard.current.position.x + 60,
+            y: clipboard.current.position.y + 180,
+          },
+        };
+        change({ ...draft, nodes: [...draft.nodes, n] });
+        setSelected(n.id);
+      } else if (!command && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        setPalette(true);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  });
+  const validate = async () => {
+    if (!draft) return;
+    setBusy("validate");
+    try {
+      const result = await api.validateFlow(draft);
+      setIssues(result);
+      setShowValidation(true);
+    } catch (error) {
+      onError(error);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const run = async (inputs?: Record<string, Json>) => {
+    if (!draft) return;
+    setBusy("run");
+    try {
+      const result = await api.validateFlow(draft);
+      setIssues(result);
+      if (result.some((issue) => issue.severity === "error")) {
+        setShowValidation(true);
+        return;
+      }
+      let flow = draft;
+      if (dirty) {
+        flow = await api.saveFlow(draft);
+        setDraft(flow);
+        setDirty(false);
+      }
+      const resultRun = await api.runFlow(flow.id, inputs ?? flow.inputs);
+      setWorkspace((w) =>
+        w
+          ? {
+              ...w,
+              runs: [resultRun, ...w.runs.filter((r) => r.id !== resultRun.id)],
+            }
+          : w,
+      );
+      setRunInputs(null);
+      toast("Flow started.");
+    } catch (error) {
+      onError(error);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const recorded = (actions: RecordedAction[]) => {
+    if (!draft) return;
+    const parent =
+      draft.nodes.find((n) => n.id === selected) ??
+      draft.nodes.find(
+        (n) => !draft.edges.some((e) => e.source === n.id) && n.kind !== "end",
+      ) ??
+      draft.nodes.at(-1);
+    const nodes = actions.map((action, i) => ({
+      id: uid(),
+      kind: action.kind,
+      label: action.label,
+      position: {
+        x: (parent?.position.x ?? -230) + (i + 1) * 310,
+        y: parent?.position.y ?? 180,
+      },
+      config: action.config,
+    }));
+    const edges = [...draft.edges];
+    if (
+      parent &&
+      parent.kind !== "end" &&
+      !edges.some((e) => e.source === parent.id) &&
+      nodes.length
+    )
+      edges.push({
+        id: uid(),
+        source: parent.id,
+        target: nodes[0].id,
+        port: catalog[parent.kind].ports?.[0] ?? "next",
+      });
+    nodes.slice(1).forEach((n, i) =>
+      edges.push({
+        id: uid(),
+        source: nodes[i].id,
+        target: n.id,
+        port: catalog[nodes[i].kind].ports?.[0] ?? "next",
+      }),
+    );
+    change({ ...draft, nodes: [...draft.nodes, ...nodes], edges });
+    setFlowTab("flow");
+    setSelected(nodes[0]?.id ?? null);
+    toast(`${actions.length} recorded steps added.`);
+  };
+  const importFlow = async () => {
+    try {
+      const flow = await api.importFlow();
+      if (flow) {
+        await refresh();
+        setDraft(flow);
+        setDirty(false);
+        setPage("flows");
+        setFlowTab("flow");
+        toast("Flow imported.");
+      }
+    } catch (error) {
+      onError(error);
+    }
+  };
+  if (bootError)
+    return (
+      <div className="boot-screen">
+        <CircleAlert size={36} />
+        <h1>Relay couldn’t open your workspace</h1>
+        <p>{bootError}</p>
+        <Button
+          onClick={() => {
+            setBootError("");
+            void refresh().catch((error) => setBootError(String(error)));
+          }}
+        >
+          Try again
+        </Button>
+      </div>
+    );
+  if (!workspace)
+    return (
+      <div className="boot-screen">
+        <RelayLogo />
+        <LoaderCircle className="spin" size={22} />
+        <p>Opening your workspace…</p>
+      </div>
+    );
+  const flowRuns = workspace.runs
+    .filter((r) => r.flowId === draft?.id && !r.parentId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const currentRun = flowRuns.find((r) =>
+    ["running", "paused"].includes(r.status),
+  );
+  const selectedNode = draft?.nodes.find((n) => n.id === selected);
+  const filteredFlows = workspace.flows.filter((f) =>
+    `${f.name} ${f.description}`.toLowerCase().includes(search.toLowerCase()),
+  );
+  const folders = Array.from(
+    new Set(filteredFlows.map((f) => f.folder || "My flows")),
+  );
+  return (
+    <div className="app-shell">
+      <nav className="app-rail" aria-label="Main navigation">
+        <button
+          className="brand-mark"
+          aria-label="Relay workflows"
+          onClick={() => setPage("flows")}
+        >
+          <RelayLogo />
+        </button>
+        <div className="rail-separator" />
+        {(
+          [
+            { id: "flows", label: "Workflows", icon: Workflow },
+            { id: "runs", label: "Run history", icon: Activity },
+            { id: "schedules", label: "Schedules", icon: CalendarClock },
+          ] as const
+        ).map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            className={`rail-button ${page === id ? "active" : ""}`}
+            title={label}
+            aria-label={label}
+            onClick={() => setPage(id)}
+          >
+            <Icon size={22} />
+          </button>
+        ))}
+        <div className="rail-spacer" />
+        <button
+          className="rail-button"
+          aria-label="Toggle light and dark theme"
+          title="Toggle theme"
+          onClick={() =>
+            void api
+              .saveSettings({
+                ...workspace.settings,
+                theme:
+                  document.documentElement.dataset.theme === "dark"
+                    ? "light"
+                    : "dark",
+              })
+              .then(refresh)
+              .catch(onError)
+          }
+        >
+          {document.documentElement.dataset.theme === "light" ? (
+            <Moon size={20} />
+          ) : (
+            <Sun size={20} />
+          )}
+        </button>
+        <button
+          className={`rail-button ${page === "settings" ? "active" : ""}`}
+          aria-label="Settings"
+          title="Settings"
+          onClick={() => setPage("settings")}
+        >
+          <Settings2 size={21} />
+        </button>
+        <div className="rail-separator" />
+        <span className="workspace-avatar" title="Local workspace">
+          L<span />
+        </span>
+      </nav>
+      <aside className="flow-sidebar">
+        <div className="workspace-heading">
+          <span className="workspace-icon">
+            <Layers3 size={17} />
+          </span>
+          <div>
+            <strong>My workspace</strong>
+            <small>Local & yours</small>
+          </div>
+          <ChevronDown size={14} />
+        </div>
+        <div className="sidebar-search">
+          <Search size={14} />
+          <input
+            aria-label="Search flows"
+            placeholder="Find a flow…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <kbd>⌕</kbd>
+        </div>
+        <button className="new-flow-button" onClick={() => void newFlow()}>
+          <Plus size={15} /> New workflow <span>+</span>
+        </button>
+        <div className="flow-navigation">
+          <div className="sidebar-section-label">
+            WORKFLOWS <span>{workspace.flows.length}</span>
+          </div>
+          {folders.map((folder) => (
+            <section className="flow-folder" key={folder}>
+              <div className="folder-name">
+                <ChevronDown size={12} />
+                <Folder size={13} />
+                {folder}
+                <span>
+                  {
+                    filteredFlows.filter(
+                      (f) => (f.folder || "My flows") === folder,
+                    ).length
+                  }
+                </span>
+              </div>
+              {filteredFlows
+                .filter((f) => (f.folder || "My flows") === folder)
+                .map((flow) => (
+                  <button
+                    key={flow.id}
+                    className={`flow-nav-item ${draft?.id === flow.id && page === "flows" ? "active" : ""}`}
+                    onClick={() => chooseFlow(flow.id)}
+                  >
+                    <Workflow size={15} />
+                    <span>{flow.name}</span>
+                    {draft?.id === flow.id && dirty ? (
+                      <span className="unsaved-dot" />
+                    ) : null}
+                  </button>
+                ))}
+            </section>
+          ))}
+          {!filteredFlows.length ? (
+            <p className="sidebar-empty">No flows found.</p>
+          ) : null}
+        </div>
+        <div className="sidebar-bottom">
+          <button onClick={() => void importFlow()}>
+            <ArrowDownToLine size={15} /> Import a workflow
+          </button>
+          <div className="local-status">
+            <span className="online-dot" />
+            <span>
+              {workspace.desktop ? "On your device" : "Browser preview"}
+            </span>
+            <span className="version">v0.1</span>
+          </div>
+        </div>
+      </aside>
+      <main className="main-area">
+        {page === "flows" && draft ? (
+          <>
+            <header className="flow-header">
+              <div className="breadcrumb">
+                <Workflow size={16} />
+                <span>Workflows</span>
+                <ChevronRight size={13} />
+                <strong>{draft.name}</strong>
+                {dirty ? (
+                  <span className="unsaved-dot" title="Unsaved changes" />
+                ) : (
+                  <span className="saved-check" title="Saved">
+                    <Check size={13} />
+                  </span>
+                )}
+              </div>
+              <div className="header-actions">
+                <span className="saved-label">
+                  {dirty ? "Unsaved changes" : "All changes saved"}
+                </span>
+                <IconButton
+                  label="Export flow"
+                  onClick={() =>
+                    void (dirty ? save() : Promise.resolve(draft))
+                      .then((flow) => (flow ? api.exportFlow(flow.id) : false))
+                      .catch(onError)
+                  }
+                >
+                  <ArrowUpFromLine size={16} />
+                </IconButton>
+                <details className="more-menu">
+                  <summary aria-label="More flow actions">
+                    <MoreHorizontal size={18} />
+                  </summary>
+                  <div>
+                    <button
+                      onClick={() => {
+                        const copy = {
+                          ...structuredClone(draft),
+                          id: uid(),
+                          name: `${draft.name} copy`,
+                          revision: 1,
+                        };
+                        void api
+                          .saveFlow(copy)
+                          .then(async (result) => {
+                            await refresh();
+                            setDraft(result);
+                            setDirty(false);
+                          })
+                          .catch(onError);
+                      }}
+                    >
+                      <Copy size={14} /> Duplicate flow
+                    </button>
+                    <button
+                      className="danger-text"
+                      onClick={() => {
+                        if (
+                          window.confirm(
+                            `Delete “${draft.name}”? This removes the saved flow.`,
+                          )
+                        )
+                          void api
+                            .deleteFlow(draft.id)
+                            .then(async () => {
+                              setDraft(null);
+                              draftRef.current = null;
+                              setDirty(false);
+                              await refresh();
+                            })
+                            .catch(onError);
+                      }}
+                    >
+                      <Trash2 size={14} /> Delete flow
+                    </button>
+                  </div>
+                </details>
+              </div>
+            </header>
+            <div className="flow-toolbar">
+              <div className="flow-tabs">
+                {(["flow", "record", "runs"] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    className={flowTab === tab ? "active" : ""}
+                    onClick={() => setFlowTab(tab)}
+                  >
+                    {tab === "flow" ? (
+                      <Workflow size={15} />
+                    ) : tab === "record" ? (
+                      <Video size={15} />
+                    ) : (
+                      <Activity size={15} />
+                    )}{" "}
+                    {tab === "flow"
+                      ? "Editor"
+                      : tab === "record"
+                        ? "Record"
+                        : "Runs"}
+                    {tab === "runs" && flowRuns.length ? (
+                      <span>{flowRuns.length}</span>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+              <div className="toolbar-actions">
+                {flowTab === "flow" ? (
+                  <>
+                    <div className="undo-controls">
+                      <IconButton
+                        label="Undo (Ctrl+Z)"
+                        onClick={undoAction}
+                        disabled={!undo.length}
+                      >
+                        <Undo2 size={15} />
+                      </IconButton>
+                      <IconButton
+                        label="Redo (Ctrl+Shift+Z)"
+                        onClick={redoAction}
+                        disabled={!redo.length}
+                      >
+                        <Redo2 size={15} />
+                      </IconButton>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      busy={busy === "validate"}
+                      onClick={() => void validate()}
+                    >
+                      <ShieldCheck size={15} /> Validate
+                    </Button>
+                    <Button
+                      busy={busy === "save"}
+                      onClick={() => void save()}
+                      disabled={!dirty}
+                    >
+                      <Save size={14} /> Save
+                    </Button>
+                    <Button
+                      variant="primary"
+                      busy={busy === "run"}
+                      onClick={() =>
+                        Object.keys(draft.inputs).length
+                          ? setRunInputs(structuredClone(draft.inputs))
+                          : void run()
+                      }
+                    >
+                      <Play size={14} fill="currentColor" /> Run flow
+                    </Button>
+                    <IconButton
+                      label={
+                        showInspector ? "Hide properties" : "Show properties"
+                      }
+                      onClick={() => setShowInspector(!showInspector)}
+                    >
+                      {showInspector ? (
+                        <PanelRightClose size={17} />
+                      ) : (
+                        <PanelRightOpen size={17} />
+                      )}
+                    </IconButton>
+                  </>
+                ) : null}
+              </div>
+            </div>
+            {flowTab === "flow" ? (
+              <>
+                <div className="editor-body">
+                  <GraphEditor
+                    key={draft.id}
+                    flow={draft}
+                    workspace={workspace}
+                    selected={selected}
+                    onSelect={setSelected}
+                    onChange={change}
+                    onAdd={() => setPalette(true)}
+                    issues={issues}
+                    run={currentRun}
+                  />
+                  {showInspector ? (
+                    <Inspector
+                      key={selected ?? "flow"}
+                      flow={draft}
+                      node={selectedNode}
+                      workspace={workspace}
+                      onChange={change}
+                      onDelete={deleteNode}
+                      onDuplicate={duplicateNode}
+                      onTest={(config) =>
+                        void api
+                          .testDetector(config)
+                          .then((result) =>
+                            toast(
+                              `Detector: ${result.outcome}${result.confidence !== undefined ? ` (${Math.round(result.confidence * 100)}%)` : ""}${result.evidence ? ` — ${result.evidence}` : ""}`,
+                            ),
+                          )
+                          .catch(onError)
+                      }
+                      issues={issues}
+                    />
+                  ) : null}
+                </div>
+                <footer className="editor-status">
+                  <span>
+                    <span
+                      className={`tiny-dot ${currentRun ? "running" : ""}`}
+                    />
+                    {currentRun
+                      ? `${currentRun.status === "paused" ? "Paused" : "Running"} · ${draft.nodes.find((n) => n.id === currentRun.currentNodeId)?.label ?? draft.name}`
+                      : "Ready to connect the dots"}
+                  </span>
+                  <div>
+                    {currentRun ? (
+                      <>
+                        <button
+                          onClick={() =>
+                            void api
+                              .controlRun(
+                                currentRun.id,
+                                currentRun.status === "paused"
+                                  ? "resume"
+                                  : "pause",
+                              )
+                              .catch(onError)
+                          }
+                        >
+                          {currentRun.status === "paused" ? "Resume" : "Pause"}
+                        </button>
+                        <button
+                          className="danger-text"
+                          onClick={() =>
+                            void api
+                              .controlRun(currentRun.id, "stop")
+                              .catch(onError)
+                          }
+                        >
+                          Stop
+                        </button>
+                      </>
+                    ) : null}
+                    <span>{draft.nodes.length} nodes</span>
+                    <span>{draft.edges.length} connections</span>
+                    <span>
+                      {workspace.desktop
+                        ? workspace.capabilities.platform
+                        : "Design preview"}
+                    </span>
+                  </div>
+                </footer>
+              </>
+            ) : flowTab === "record" ? (
+              <Recorder
+                api={api}
+                workspace={workspace}
+                onRecorded={recorded}
+                onError={onError}
+              />
+            ) : (
+              <Runs
+                workspace={workspace}
+                api={api}
+                onError={onError}
+                flowId={draft.id}
+                onOpenFlow={chooseFlow}
+              />
+            )}
+          </>
+        ) : page === "flows" ? (
+          <div className="welcome-page">
+            <div className="welcome-orbit">
+              <RelayLogo />
+            </div>
+            <span className="section-eyebrow">
+              LESS REPETITION. MORE POSSIBILITY.
+            </span>
+            <h1>
+              Make your desktop
+              <br />
+              work for you.
+            </h1>
+            <p>
+              Connect a few actions. Add a little intelligence.
+              <br />
+              Get back to what you love doing.
+            </p>
+            <Button variant="primary" onClick={() => void newFlow()}>
+              <Plus size={16} /> Create your first flow <ArrowRight size={16} />
+            </Button>
+          </div>
+        ) : page === "settings" ? (
+          <Settings
+            workspace={workspace}
+            api={api}
+            refresh={refresh}
+            onError={onError}
+            onSuccess={toast}
+          />
+        ) : page === "runs" ? (
+          <Runs
+            workspace={workspace}
+            api={api}
+            onError={onError}
+            onOpenFlow={chooseFlow}
+          />
+        ) : (
+          <Schedules
+            workspace={workspace}
+            api={api}
+            refresh={refresh}
+            onError={onError}
+            onSuccess={toast}
+          />
+        )}
+      </main>
+      <NodePalette
+        open={palette}
+        onClose={() => setPalette(false)}
+        onAdd={addNode}
+      />
+      <Modal
+        open={showValidation}
+        onClose={() => setShowValidation(false)}
+        title={
+          issues.some((i) => i.severity === "error")
+            ? "A few things need your attention"
+            : "Your flow is looking good"
+        }
+        description="Check your graph before taking it for a run."
+      >
+        {issues.length ? (
+          <div className="validation-list">
+            {issues.map((issue, index) => (
+              <button
+                key={index}
+                onClick={() => {
+                  if (issue.nodeId) {
+                    setSelected(issue.nodeId);
+                    setShowInspector(true);
+                    setShowValidation(false);
+                  }
+                }}
+              >
+                <span
+                  className={
+                    issue.severity === "error" ? "error-text" : "warning-text"
+                  }
+                >
+                  <CircleAlert size={18} />
+                </span>
+                <span>
+                  {issue.message}
+                  <small>
+                    {issue.nodeId
+                      ? draft?.nodes.find((n) => n.id === issue.nodeId)?.label
+                      : issue.severity}
+                  </small>
+                </span>
+                {issue.nodeId ? <ChevronRight size={15} /> : null}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="validation-success">
+            <CheckCircle2 size={40} />
+            <h3>All checks passed</h3>
+            <p>Your flow is connected and ready to run.</p>
+          </div>
+        )}
+        <div className="modal-actions">
+          <Button onClick={() => setShowValidation(false)}>Back to flow</Button>
+        </div>
+      </Modal>
+      <Modal
+        open={runInputs !== null}
+        onClose={() => setRunInputs(null)}
+        title="Run with inputs"
+        description="These values are passed to this run only."
+      >
+        {runInputs ? (
+          <>
+            <JsonField
+              label="Inputs"
+              value={runInputs}
+              onChange={(value) => {
+                if (value && typeof value === "object" && !Array.isArray(value))
+                  setRunInputs(value);
+              }}
+            />
+            <div className="modal-actions">
+              <Button onClick={() => setRunInputs(null)}>Cancel</Button>
+              <Button
+                variant="primary"
+                busy={busy === "run"}
+                onClick={() => void run(runInputs)}
+              >
+                <Play size={14} /> Run flow
+              </Button>
+            </div>
+          </>
+        ) : null}
+      </Modal>
+      <div className="toast-container" aria-live="polite">
+        {toasts.map((item) => (
+          <div className={`toast ${item.error ? "error" : ""}`} key={item.id}>
+            {item.error ? (
+              <CircleAlert size={17} />
+            ) : (
+              <CheckCircle2 size={17} />
+            )}
+            <span>{item.message}</span>
+            <button
+              aria-label="Dismiss notification"
+              onClick={() =>
+                setToasts((t) => t.filter((i) => i.id !== item.id))
+              }
+            >
+              <X size={14} />
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+function RelayLogo() {
+  return (
+    <svg
+      width="30"
+      height="30"
+      viewBox="0 0 32 32"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M8 8h9a7 7 0 0 1 0 14h-2"
+        stroke="currentColor"
+        strokeWidth="4"
+        strokeLinecap="round"
+      />
+      <path
+        d="M8 15v9M15 22l6 6"
+        stroke="currentColor"
+        strokeWidth="4"
+        strokeLinecap="round"
+      />
+      <circle cx="8" cy="8" r="3" fill="currentColor" />
+    </svg>
+  );
+}
+function luminance(hex: string) {
+  const rgb = hex
+    .slice(1)
+    .match(/../g)!
+    .map((value) => parseInt(value, 16) / 255)
+    .map((value) =>
+      value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4,
+    );
+  return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+}
+function readableAccent(hex: string, theme: "light" | "dark") {
+  const channels = hex
+    .slice(1)
+    .match(/../g)!
+    .map((value) => parseInt(value, 16));
+  let result = hex;
+  for (let blend = 0; blend <= 1; blend += 0.02) {
+    const brightness = luminance(result);
+    if (theme === "light" ? brightness <= 0.15 : brightness >= 0.31)
+      return result;
+    result =
+      "#" +
+      channels
+        .map((value) =>
+          Math.round(
+            theme === "light"
+              ? value * (1 - blend)
+              : value + (255 - value) * blend,
+          )
+            .toString(16)
+            .padStart(2, "0"),
+        )
+        .join("");
+  }
+  return result;
+}
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: string }
+> {
+  state = { error: "" };
+  static getDerivedStateFromError(error: Error) {
+    return { error: error.message };
+  }
+  render() {
+    return this.state.error ? (
+      <div className="boot-screen">
+        <CircleAlert size={32} />
+        <h1>Something interrupted the interface</h1>
+        <p>{this.state.error}</p>
+        <Button onClick={() => location.reload()}>Reload workspace</Button>
+      </div>
+    ) : (
+      this.props.children
+    );
+  }
+}
+createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
+  </React.StrictMode>,
+);

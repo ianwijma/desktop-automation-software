@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Relay Browser Bridge",
+  "version": "0.1.0",
+  "description": "Pair your browser with Relay for workflow actions and semantic recording.",
+  "permissions": [
+    "tabs",
+    "debugger",
+    "scripting",
+    "storage",
+    "alarms",
+    "webNavigation"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup.html" }
+}

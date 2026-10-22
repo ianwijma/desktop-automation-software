@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        font: 14px system-ui;
+        background: #181b23;
+        color: #e8ebf3;
+        width: 300px;
+        padding: 18px;
+      }
+      label {
+        display: block;
+        margin-top: 14px;
+      }
+      input {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 9px;
+        margin-top: 6px;
+        background: #282e3b;
+        color: inherit;
+        border: 1px solid #404b60;
+        border-radius: 5px;
+      }
+      button {
+        margin-top: 18px;
+        padding: 9px 14px;
+        background: #8a76f0;
+        color: white;
+        border: 0;
+        border-radius: 5px;
+      }
+      p {
+        line-height: 1.5;
+        color: #b1bbcd;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>Connect to Relay</h2>
+    <p>
+      Copy the port and pairing token from Relay → Settings → Browser bridge.
+    </p>
+    <form id="pair">
+      <label
+        >Port<input
+          id="port"
+          type="number"
+          min="1"
+          max="65535"
+          required /></label
+      ><label
+        >Pairing token<input
+          id="token"
+          type="password"
+          required
+          autocomplete="off" /></label
+      ><button type="submit">Connect</button
+      ><button id="disconnect" type="button">Disconnect</button>
+    </form>
+    <p id="status"></p>
+    <script src="popup.js"></script>
+  </body>
+</html>
