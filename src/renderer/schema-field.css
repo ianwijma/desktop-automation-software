@@ -1,0 +1,101 @@
+.schema-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.schema-heading,
+.schema-type-row,
+.schema-property-name,
+.schema-add-property,
+.schema-enum-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.schema-heading {
+  justify-content: space-between;
+}
+.schema-heading > .field-label {
+  overflow-wrap: anywhere;
+}
+.schema-link {
+  border: 0;
+  padding: 2px 0;
+  background: transparent;
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.schema-type-row .select-wrap,
+.schema-enum-row .select-wrap,
+.schema-property-name input,
+.schema-add-property input,
+.schema-enum-row > input,
+.schema-enum-number {
+  flex: 1;
+  min-width: 0;
+}
+.schema-field > .field {
+  margin: 0;
+}
+.schema-property {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.schema-property > .schema-nested {
+  padding-left: 0;
+  border-left: 0;
+}
+.schema-nested {
+  border-left: 1px solid var(--border);
+  padding-left: 8px;
+}
+.schema-required {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.schema-required input[type="checkbox"] {
+  width: 13px;
+  height: 13px;
+  min-height: 0;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.schema-enum {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.schema-add-enum {
+  align-self: flex-start;
+  font-size: 10px;
+  padding: 5px 8px;
+  min-height: 0;
+}
+.schema-null {
+  flex: 1;
+  font-family: monospace;
+  color: var(--muted);
+  padding: 7px;
+}
+.schema-field .icon-button {
+  flex-shrink: 0;
+}
+.schema-enum-number input {
+  width: 100%;
+}

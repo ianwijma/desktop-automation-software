@@ -72,6 +72,133 @@ function branches(
 }
 
 describe("reference discovery", () => {
+  it("offers completion-scope output references without a consuming node", () => {
+    const flow = branches();
+    const inspector = createReferenceInspector(flow);
+    expect(inspector.referenceOptions()).toBe(
+      inspector.referenceOptions(undefined),
+    );
+    expect(
+      referenceOptions(flow).find(
+        (option) => option.reference === "${vars.choice}",
+      ),
+    ).toMatchObject({ type: "string", warning: undefined });
+    expect(
+      referenceOptions(flow).find(
+        (option) => option.reference === "${nodes.left}",
+      )?.warning,
+    ).toContain("flow finishes");
+    expect(describeReference("${nodes.left}", flow)?.warning).toContain(
+      "flow finishes",
+    );
+  });
+
+  it("infers structured AI schema properties and propagates optional-parent warnings", () => {
+    const schema = {
+      type: "object",
+      description: "Invoice",
+      properties: {
+        total: { type: "number", description: "Invoice total" },
+        details: {
+          type: "object",
+          properties: { code: { type: "string" } },
+          required: ["code"],
+        },
+        count: { type: "integer" },
+        enabled: { type: "boolean" },
+        rows: {
+          type: "array",
+          items: { type: "object", properties: { name: { type: "string" } } },
+        },
+        absent: { type: "null" },
+      },
+      required: ["total", "count", "enabled", "rows", "absent"],
+    };
+    const flow = graph([
+      node("ai", "ai", { mode: "structured", schema }),
+      node("consume", "type"),
+    ]);
+    expect(find(flow, "${nodes.ai}")).toMatchObject({
+      type: "object",
+      description: "Invoice",
+      warning: undefined,
+    });
+    expect(find(flow, "${nodes.ai.total}")).toMatchObject({
+      type: "number",
+      description: "Invoice total",
+      warning: undefined,
+    });
+    expect(find(flow, "${nodes.ai.count}")?.type).toBe("number");
+    expect(find(flow, "${nodes.ai.enabled}")?.type).toBe("boolean");
+    expect(find(flow, "${nodes.ai.absent}")?.type).toBe("null");
+    expect(find(flow, "${nodes.ai.details.code}")).toMatchObject({
+      type: "string",
+      warning: expect.stringContaining("optional"),
+    });
+    expect(find(flow, "${nodes.ai.rows}")?.type).toBe("array");
+    expect(find(flow, "${nodes.ai.rows.0.name}")).toBeUndefined();
+    flow.nodes.find((item) => item.id === "ai")!.config.schema =
+      JSON.stringify(schema);
+    expect(find(flow, "${nodes.ai.total}")?.type).toBe("number");
+  });
+
+  it("preserves advanced schemas and declines to invent union or reference output shapes", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        dynamic: {
+          $ref: "#/$defs/custom",
+          properties: { invented: { type: "string" } },
+        },
+        maybe: {
+          type: ["object", "null"],
+          properties: { name: { type: "string" } },
+        },
+        choice: { anyOf: [{ type: "number" }, { type: "string" }] },
+        "bad.path": { type: "number" },
+        constructor: { type: "number" },
+      },
+      $defs: { custom: { type: "object" } },
+    };
+    const flow = graph([
+      node("ai", "ai", { mode: "vision", schema }),
+      node("consume", "type"),
+    ]);
+    const before = JSON.stringify(flow);
+    const options = referenceOptions(flow, "consume");
+    expect(
+      options
+        .filter((option) => option.nodeId === "ai")
+        .map(({ reference, type }) => [reference, type]),
+    ).toEqual([
+      ["${nodes.ai}", "object"],
+      ["${nodes.ai.dynamic}", "json"],
+      ["${nodes.ai.maybe}", "json"],
+      ["${nodes.ai.choice}", "json"],
+    ]);
+    expect(JSON.stringify(flow)).toBe(before);
+    flow.nodes.find((item) => item.id === "ai")!.config.schema =
+      "${inputs.schema}";
+    expect(
+      referenceOptions(flow, "consume").filter(
+        (option) => option.nodeId === "ai",
+      ),
+    ).toHaveLength(1);
+    expect(find(flow, "${nodes.ai}")?.type).toBe("json");
+    for (const keyword of ["not", "$recursiveRef"]) {
+      flow.nodes.find((item) => item.id === "ai")!.config.schema = {
+        type: "object",
+        properties: { hidden: { type: "string" } },
+        [keyword]: keyword === "not" ? { required: ["hidden"] } : "#",
+      };
+      const inferred = referenceOptions(flow, "consume").filter(
+        (option) => option.nodeId === "ai",
+      );
+      expect(inferred).toHaveLength(1);
+      expect(inferred[0].type).toBe("json");
+    }
+  });
+
   it("uses graph order and stable IDs while displaying current node labels", () => {
     const flow = graph([
       node("read-uuid", "read", {}, "Read invoice"),

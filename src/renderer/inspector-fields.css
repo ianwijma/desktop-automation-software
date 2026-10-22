@@ -1,0 +1,60 @@
+.child-input-mapping {
+  margin-bottom: 17px;
+  min-width: 0;
+}
+.declared-inputs {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 9px;
+  margin: 8px 0 13px;
+}
+.declared-inputs h5 {
+  font-size: 10px;
+  line-height: 1.5;
+  font-weight: 500;
+  color: var(--muted);
+  margin: 0 0 9px;
+  overflow-wrap: anywhere;
+}
+.declared-input {
+  padding: 7px 0;
+}
+.declared-input + .declared-input {
+  border-top: 1px solid var(--border-soft);
+}
+.declared-input > div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 5px;
+}
+.declared-input strong {
+  font-size: 10px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.declared-input code {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 9px;
+  color: var(--muted);
+  line-height: 1.5;
+  margin: 5px 0;
+}
+.child-row > .select-wrap {
+  flex: 1;
+  min-width: 0;
+}
+.child-row select {
+  padding: 5px 20px 5px 6px;
+}
+.child-flow-picker .child-list {
+  max-height: 520px;
+}
+.inspector-mode {
+  padding: 9px 0 0;
+}
+.flow-value-contract {
+  margin-bottom: 20px;
+}
