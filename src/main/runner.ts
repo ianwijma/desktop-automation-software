@@ -372,6 +372,11 @@ async function handle(method: string, args: unknown[]): Promise<unknown> {
     engine = new WorkflowEngine({
       getFlows: () => workspace.flows,
       getTargets: () => workspace.targets,
+      validationContext: () => ({
+        targets: workspace.targets,
+        connections: workspace.connections,
+        settings: workspace.settings,
+      }),
       executeNode: execute,
       onRun: (run) => port.postMessage({ event: { type: "run", run } }),
       releaseInputs: async (runId, physicalInput) => {

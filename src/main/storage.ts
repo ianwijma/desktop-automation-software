@@ -1,10 +1,22 @@
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { dirname } from "node:path";
+import { z } from "zod";
 import type {
   AIConnection,
   AppSettings,
   FlowDefinition,
+  FlowSaveOptions,
+  FlowSaveResult,
   RunRecord,
   Schedule,
   TargetDescriptor,
@@ -14,6 +26,164 @@ import {
   defaultSettings,
   defaultTargets,
 } from "../shared/seed";
+import { migrateFlow, prepareFlowSave } from "../shared/flow-persistence";
+import {
+  connectionSchema,
+  jsonSchema,
+  scheduleSchema,
+  settingsSchema,
+  targetSchema,
+} from "../shared/validation";
+
+const STORAGE_VERSION = 2;
+const TABLES = ["entities", "metadata", "credentials"];
+const CREATE_TABLES =
+  "CREATE TABLE IF NOT EXISTS entities (collection TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(collection,id)); CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS credentials (id TEXT PRIMARY KEY, value TEXT NOT NULL);";
+const timestamp = z
+  .string()
+  .refine(
+    (value) => Number.isFinite(Date.parse(value)),
+    "Invalid history timestamp",
+  );
+const runSchema = z.object({
+  id: z.string().min(1),
+  flowId: z.string().min(1),
+  flowName: z.string(),
+  revision: z.number().int().positive(),
+  parentId: z.string().optional(),
+  rootId: z.string().min(1),
+  status: z.enum([
+    "queued",
+    "running",
+    "paused",
+    "succeeded",
+    "failed",
+    "cancelled",
+    "interrupted",
+    "skipped",
+  ]),
+  trigger: z.enum(["manual", "hotkey", "schedule", "child"]),
+  inputs: z.record(z.string(), jsonSchema),
+  outputs: z.record(z.string(), jsonSchema),
+  createdAt: timestamp,
+  startedAt: timestamp.optional(),
+  finishedAt: timestamp.optional(),
+  currentNodeId: z.string().optional(),
+  error: z.string().optional(),
+  events: z.array(
+    z.object({
+      id: z.string(),
+      runId: z.string(),
+      at: timestamp,
+      type: z.enum(["run", "node", "log", "error"]),
+      nodeId: z.string().optional(),
+      status: z.string().optional(),
+      message: z.string(),
+      data: jsonSchema.optional(),
+    }),
+  ),
+  childIds: z.array(z.string()),
+});
+
+function inspectDatabase(db: DatabaseSync) {
+  const version = (
+    db.prepare("PRAGMA user_version").get() as {
+      user_version: number;
+    }
+  ).user_version;
+  if (![0, 1, STORAGE_VERSION].includes(version))
+    throw new Error(
+      `This database uses storage schema ${version}, which this version of Relay cannot open.`,
+    );
+  const tables = new Set(
+    (
+      db.prepare("SELECT name FROM sqlite_schema WHERE type='table'").all() as {
+        name: string;
+      }[]
+    ).map((row) => row.name),
+  );
+  if (tables.size && !tables.has("entities"))
+    throw new Error("This is not a recognized Relay database.");
+  const rows = tables.has("entities")
+    ? (db.prepare("SELECT collection, id, value FROM entities").all() as {
+        collection: string;
+        id: string;
+        value: string;
+      }[])
+    : [];
+  const flows: { flow: FlowDefinition; changed: boolean }[] = [];
+  for (const row of rows) {
+    const original: unknown = JSON.parse(row.value);
+    if (row.collection === "flows") {
+      const migrated = migrateFlow(original);
+      if (migrated.id !== row.id)
+        throw new Error(`Workflow ${row.id} has an inconsistent stored ID.`);
+      flows.push({
+        flow: migrated,
+        changed: (original as { schemaVersion: number }).schemaVersion !== 2,
+      });
+    } else {
+      const schema =
+        row.collection === "runs"
+          ? runSchema
+          : row.collection === "targets"
+            ? targetSchema
+            : row.collection === "connections"
+              ? connectionSchema
+              : row.collection === "schedules"
+                ? scheduleSchema
+                : undefined;
+      if (schema && schema.parse(original).id !== row.id)
+        throw new Error(
+          `Stored ${row.collection} entry ${row.id} has an inconsistent ID.`,
+        );
+    }
+  }
+  const initialized = tables.has("metadata")
+    ? (db
+        .prepare("SELECT value FROM metadata WHERE key='initialized'")
+        .get() as { value: string } | undefined)
+    : undefined;
+  const initialize =
+    !initialized || !z.boolean().parse(JSON.parse(initialized.value));
+  const settings = tables.has("metadata")
+    ? (db.prepare("SELECT value FROM metadata WHERE key='settings'").get() as
+        { value: string } | undefined)
+    : undefined;
+  const storedSettings = settings
+    ? z.record(z.string(), z.unknown()).parse(JSON.parse(settings.value))
+    : {};
+  settingsSchema.parse({ ...defaultSettings, ...storedSettings });
+  return {
+    flows,
+    initialize,
+    needsMigration:
+      version < STORAGE_VERSION ||
+      TABLES.some((table) => !tables.has(table)) ||
+      flows.some((item) => item.changed) ||
+      initialize,
+  };
+}
+
+function backupDatabase(source: DatabaseSync, path: string): string {
+  const backupPath = `${path}.backup-${Date.now()}-${randomUUID()}.sqlite`;
+  // VACUUM INTO accepts an empty file and produces a self-contained snapshot,
+  // including committed pages still in the source WAL.
+  closeSync(openSync(backupPath, "wx", 0o600));
+  try {
+    source.prepare("VACUUM INTO ?").run(backupPath);
+    const handle = openSync(backupPath, "r+");
+    try {
+      fsyncSync(handle);
+    } finally {
+      closeSync(handle);
+    }
+    return backupPath;
+  } catch (error) {
+    rmSync(backupPath, { force: true });
+    throw error;
+  }
+}
 
 type Collections = {
   flows: FlowDefinition;
@@ -24,31 +194,82 @@ type Collections = {
 };
 export class Storage {
   private db: DatabaseSync;
+  private backupPath?: string;
+  get migrationBackupPath(): string | undefined {
+    return this.backupPath;
+  }
   constructor(path: string) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-    this.db = new DatabaseSync(path);
-    this.db.exec(
-      "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; CREATE TABLE IF NOT EXISTS entities (collection TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(collection,id)); CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS credentials (id TEXT PRIMARY KEY, value TEXT NOT NULL);",
-    );
-    if (!this.meta("initialized")) {
+    let source: DatabaseSync | undefined;
+    let opened: DatabaseSync | undefined;
+    try {
+      if (path !== ":memory:" && existsSync(path) && statSync(path).size > 0) {
+        source = new DatabaseSync(path, { readOnly: true });
+        // Reject unknown versions before any writable connection, schema setup,
+        // run recovery, or journal-mode changes can modify an existing database.
+        inspectDatabase(source);
+      }
+      this.db = opened = new DatabaseSync(path);
+      this.db.exec("PRAGMA foreign_keys=ON;");
+      // Keep an existing database's journal mode: changing it after COMMIT can
+      // fail independently and would report a failed startup after migration.
+      if (!source) this.db.exec("PRAGMA journal_mode=WAL;");
       this.transaction(() => {
-        createSeedFlows().forEach((f) => this.put("flows", f));
-        defaultTargets.forEach((t) => this.put("targets", t));
-        this.setMeta("settings", defaultSettings);
-        this.setMeta("initialized", true);
+        const state = inspectDatabase(this.db);
+        if (state.needsMigration) {
+          // BEGIN IMMEDIATE prevents another writer from changing the source
+          // between this snapshot and the migration commit.
+          if (source) this.backupPath = backupDatabase(source, path);
+          this.db.exec(CREATE_TABLES);
+          for (const item of state.flows)
+            if (item.changed) this.put("flows", item.flow);
+          if (state.initialize) {
+            if (!state.flows.length)
+              createSeedFlows().forEach((flow) =>
+                this.put("flows", migrateFlow(flow)),
+              );
+            for (const target of defaultTargets)
+              if (!this.get("targets", target.id)) this.put("targets", target);
+            if (!this.meta("settings"))
+              this.setMeta("settings", defaultSettings);
+            this.setMeta("initialized", true);
+          }
+          this.db.exec(`PRAGMA user_version=${STORAGE_VERSION}`);
+        }
+        for (const run of this.list("runs")) {
+          if (["running", "paused", "queued"].includes(run.status))
+            this.put("runs", {
+              ...run,
+              status: "interrupted",
+              error:
+                "The application stopped before this run completed. Review it before running again.",
+              finishedAt: new Date().toISOString(),
+            });
+        }
+        this.pruneHistoryRows(this.settings().historyRetentionDays);
       });
+    } catch (error) {
+      opened?.close();
+      throw error;
+    } finally {
+      source?.close();
     }
-    for (const run of this.list("runs")) {
-      if (["running", "paused", "queued"].includes(run.status))
-        this.put("runs", {
-          ...run,
-          status: "interrupted",
-          error:
-            "The application stopped before this run completed. Review it before running again.",
-          finishedAt: new Date().toISOString(),
-        });
-    }
-    this.pruneHistory(this.settings().historyRetentionDays);
+  }
+  saveFlow(flow: FlowDefinition, options: FlowSaveOptions): FlowSaveResult {
+    return this.transaction(() => {
+      const now = new Date().toISOString();
+      const result = prepareFlowSave(
+        {
+          ...flow,
+          createdAt: options.expectedRevision === null ? now : flow.createdAt,
+          updatedAt: now,
+        },
+        this.get("flows", flow.id),
+        options.expectedRevision,
+      );
+      if (result.status === "saved") this.put("flows", result.flow);
+      return result;
+    });
   }
   list<K extends keyof Collections>(collection: K): Collections[K][] {
     return (
@@ -121,11 +342,18 @@ export class Storage {
       this.db.exec("COMMIT");
       return result;
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Preserve the original failure if SQLite already rolled back.
+      }
       throw error;
     }
   }
   pruneHistory(days: number) {
+    this.transaction(() => this.pruneHistoryRows(days));
+  }
+  private pruneHistoryRows(days: number) {
     const cutoff = Date.now() - days * 86_400_000;
     const trees = new Map<string, RunRecord[]>();
     for (const run of this.list("runs")) {
@@ -133,20 +361,18 @@ export class Storage {
       tree.push(run);
       trees.set(run.rootId, tree);
     }
-    this.transaction(() => {
-      for (const tree of trees.values()) {
-        if (
-          tree.every(
-            (run) =>
-              run.finishedAt &&
-              Date.parse(run.finishedAt) < cutoff &&
-              !["running", "paused", "queued"].includes(run.status),
-          )
-        ) {
-          for (const run of tree) this.delete("runs", run.id);
-        }
+    for (const tree of trees.values()) {
+      if (
+        tree.every(
+          (run) =>
+            run.finishedAt &&
+            Date.parse(run.finishedAt) < cutoff &&
+            !["running", "paused", "queued"].includes(run.status),
+        )
+      ) {
+        for (const run of tree) this.delete("runs", run.id);
       }
-    });
+    }
   }
   close() {
     this.db.close();

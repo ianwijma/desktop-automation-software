@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Json } from "./types";
+import { nodeKinds } from "./node-definitions";
 
 export const jsonSchema: z.ZodType<Json> = z.lazy(() =>
   z.union([
@@ -21,35 +22,9 @@ export const jsonSchema: z.ZodType<Json> = z.lazy(() =>
 );
 const configSchema = z.record(z.string(), jsonSchema);
 const id = z.string().min(1).max(200);
-const nodeKind = z.enum([
-  "start",
-  "end",
-  "launch",
-  "attach",
-  "focus",
-  "close",
-  "click",
-  "move",
-  "drag",
-  "scroll",
-  "type",
-  "key",
-  "navigate",
-  "read",
-  "select",
-  "tab",
-  "screenshot",
-  "detect",
-  "wait",
-  "condition",
-  "set",
-  "loop",
-  "ai",
-  "call",
-  "group",
-]);
+const nodeKind = z.enum(nodeKinds);
 export const flowSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.union([z.literal(1), z.literal(2)]),
   id,
   name: z.string().min(1).max(160),
   description: z.string().max(4000),
@@ -82,6 +57,9 @@ export const flowSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   hotkey: z.string().max(100).optional(),
+});
+export const flowSaveOptionsSchema = z.object({
+  expectedRevision: z.number().int().positive().nullable(),
 });
 export const connectionSchema = z.object({
   id,

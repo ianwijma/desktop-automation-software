@@ -1,0 +1,348 @@
+{
+  "format": "relay",
+  "version": 1,
+  "rootId": "batch-starter",
+  "flows": [
+    {
+      "schemaVersion": 1,
+      "id": "welcome",
+      "name": "Your first workflow",
+      "description": "A safe, runnable introduction to variables, decisions, and execution history. No application access required.",
+      "folder": "Getting started",
+      "revision": 1,
+      "nodes": [
+        {
+          "id": "start",
+          "kind": "start",
+          "label": "Start here",
+          "position": {
+            "x": 60,
+            "y": 160
+          },
+          "config": {}
+        },
+        {
+          "id": "greeting",
+          "kind": "set",
+          "label": "Set a greeting",
+          "position": {
+            "x": 350,
+            "y": 160
+          },
+          "config": {
+            "variable": "message",
+            "value": "Hello from Relay"
+          }
+        },
+        {
+          "id": "pause",
+          "kind": "wait",
+          "label": "Wait a moment",
+          "position": {
+            "x": 640,
+            "y": 160
+          },
+          "config": {
+            "durationMs": 750
+          }
+        },
+        {
+          "id": "check",
+          "kind": "condition",
+          "label": "Check the message",
+          "position": {
+            "x": 930,
+            "y": 160
+          },
+          "config": {
+            "left": "${vars.message}",
+            "operator": "contains",
+            "right": "Relay"
+          }
+        },
+        {
+          "id": "done",
+          "kind": "end",
+          "label": "Ready to automate",
+          "position": {
+            "x": 1220,
+            "y": 80
+          },
+          "config": {
+            "outputs": {
+              "message": "${vars.message}"
+            }
+          }
+        },
+        {
+          "id": "other",
+          "kind": "end",
+          "label": "Try another message",
+          "position": {
+            "x": 1220,
+            "y": 280
+          },
+          "config": {}
+        }
+      ],
+      "edges": [
+        {
+          "id": "w1",
+          "source": "start",
+          "target": "greeting"
+        },
+        {
+          "id": "w2",
+          "source": "greeting",
+          "target": "pause"
+        },
+        {
+          "id": "w3",
+          "source": "pause",
+          "target": "check"
+        },
+        {
+          "id": "w4",
+          "source": "check",
+          "target": "done",
+          "port": "true"
+        },
+        {
+          "id": "w5",
+          "source": "check",
+          "target": "other",
+          "port": "false"
+        }
+      ],
+      "inputs": {},
+      "outputs": {},
+      "createdAt": "2026-10-21T00:00:00.000Z",
+      "updatedAt": "2026-10-21T00:00:00.000Z"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "browser-starter",
+      "name": "Explore a website",
+      "description": "Open an isolated browser, navigate, and read a page. Install the Chromium browser when prompted.",
+      "folder": "Templates",
+      "revision": 1,
+      "nodes": [
+        {
+          "id": "start",
+          "kind": "start",
+          "label": "Start",
+          "position": {
+            "x": 60,
+            "y": 160
+          },
+          "config": {}
+        },
+        {
+          "id": "open",
+          "kind": "navigate",
+          "label": "Open example.com",
+          "position": {
+            "x": 350,
+            "y": 160
+          },
+          "config": {
+            "targetId": "browser-research",
+            "url": "https://example.com"
+          }
+        },
+        {
+          "id": "read",
+          "kind": "read",
+          "label": "Read the heading",
+          "position": {
+            "x": 640,
+            "y": 160
+          },
+          "config": {
+            "targetId": "browser-research",
+            "selector": "h1"
+          }
+        },
+        {
+          "id": "done",
+          "kind": "end",
+          "label": "Finish",
+          "position": {
+            "x": 930,
+            "y": 160
+          },
+          "config": {
+            "outputs": {
+              "heading": "${nodes.read}"
+            }
+          }
+        }
+      ],
+      "edges": [
+        {
+          "id": "browser-starter-e0",
+          "source": "start",
+          "target": "open"
+        },
+        {
+          "id": "browser-starter-e1",
+          "source": "open",
+          "target": "read"
+        },
+        {
+          "id": "browser-starter-e2",
+          "source": "read",
+          "target": "done"
+        }
+      ],
+      "inputs": {},
+      "outputs": {},
+      "createdAt": "2026-10-21T00:00:00.000Z",
+      "updatedAt": "2026-10-21T00:00:00.000Z"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "batch-starter",
+      "name": "Orchestrate a batch",
+      "description": "Run twelve safe child workflows in four batches of three. Switch to a rolling pool or sequence in the inspector.",
+      "folder": "Templates",
+      "revision": 1,
+      "nodes": [
+        {
+          "id": "start",
+          "kind": "start",
+          "label": "Start",
+          "position": {
+            "x": 60,
+            "y": 160
+          },
+          "config": {}
+        },
+        {
+          "id": "batch",
+          "kind": "group",
+          "label": "Four batches of three",
+          "position": {
+            "x": 350,
+            "y": 160
+          },
+          "config": {
+            "mode": "batches",
+            "concurrency": 3,
+            "children": [
+              {
+                "flowId": "welcome",
+                "inputs": {
+                  "item": 1
+                }
+              },
+              {
+                "flowId": "welcome",
+                "inputs": {
+                  "item": 2
+                }
+              },
+              {
+                "flowId": "welcome",
+                "inputs": {
+                  "item": 3
+                }
+              },
+              {
+                "flowId": "welcome",
+                "inputs": {
+                  "item": 4
+                }
+              },
+              {
+                "flowId": "welcome",
+                "inputs": {
+                  "item": 5
+                }
+              },
+              {
+                "flowId": "welcome",
+                "inputs": {
+                  "item": 6
+                }
+              },
+              {
+                "flowId": "welcome",
+                "inputs": {
+                  "item": 7
+                }
+              },
+              {
+                "flowId": "welcome",
+                "inputs": {
+                  "item": 8
+                }
+              },
+              {
+                "flowId": "welcome",
+                "inputs": {
+                  "item": 9
+                }
+              },
+              {
+                "flowId": "welcome",
+                "inputs": {
+                  "item": 10
+                }
+              },
+              {
+                "flowId": "welcome",
+                "inputs": {
+                  "item": 11
+                }
+              },
+              {
+                "flowId": "welcome",
+                "inputs": {
+                  "item": 12
+                }
+              }
+            ],
+            "continueOnError": false
+          }
+        },
+        {
+          "id": "done",
+          "kind": "end",
+          "label": "All workflows complete",
+          "position": {
+            "x": 680,
+            "y": 160
+          },
+          "config": {}
+        }
+      ],
+      "edges": [
+        {
+          "id": "batch-starter-e0",
+          "source": "start",
+          "target": "batch"
+        },
+        {
+          "id": "batch-starter-e1",
+          "source": "batch",
+          "target": "done"
+        }
+      ],
+      "inputs": {},
+      "outputs": {},
+      "createdAt": "2026-10-21T00:00:00.000Z",
+      "updatedAt": "2026-10-21T00:00:00.000Z"
+    }
+  ],
+  "targets": [
+    {
+      "id": "browser-research",
+      "name": "Research browser",
+      "kind": "browser",
+      "browserMode": "managed",
+      "profile": "research",
+      "url": "https://example.com"
+    }
+  ]
+}

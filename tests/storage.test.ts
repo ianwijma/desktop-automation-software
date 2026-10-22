@@ -50,6 +50,77 @@ describe("durable local storage", () => {
     second.close();
   });
 
+  it("atomically saves complete graphs and returns conflicts without overwriting them", () => {
+    const store = new Storage(":memory:");
+    const original = store.list("flows")[0];
+    const created = store.saveFlow(
+      { ...original, id: "new-flow", revision: 99 },
+      { expectedRevision: null },
+    );
+    expect(created.status).toBe("saved");
+    if (created.status !== "saved") throw new Error("Expected a new flow");
+    expect(created.flow).toMatchObject({ schemaVersion: 2, revision: 1 });
+    const edited = {
+      ...created.flow,
+      name: "First editor",
+      nodes: created.flow.nodes.map((node) => ({
+        ...node,
+        label: `${node.label} changed`,
+      })),
+      edges: created.flow.edges.map((edge) => ({
+        ...edge,
+        id: `new-${edge.id}`,
+      })),
+    };
+    const saved = store.saveFlow(edited, { expectedRevision: 1 });
+    expect(saved.status).toBe("saved");
+    expect(store.get("flows", edited.id)).toMatchObject({
+      name: "First editor",
+      revision: 2,
+      nodes: edited.nodes,
+      edges: edited.edges,
+    });
+    const stale = store.saveFlow(
+      { ...created.flow, name: "Stale editor" },
+      { expectedRevision: 1 },
+    );
+    expect(stale).toMatchObject({
+      status: "conflict",
+      current: { name: "First editor", revision: 2 },
+    });
+    const duplicate = store.saveFlow(created.flow, { expectedRevision: null });
+    expect(duplicate.status).toBe("conflict");
+    expect(store.get("flows", edited.id)).toEqual(
+      saved.status === "saved" ? saved.flow : undefined,
+    );
+    store.delete("flows", edited.id);
+    expect(store.saveFlow(edited, { expectedRevision: 2 })).toMatchObject({
+      status: "conflict",
+    });
+    expect(store.get("flows", edited.id)).toBeUndefined();
+    store.close();
+  });
+
+  it("detects edits made through a second database connection", () => {
+    const path = database();
+    const first = new Storage(path);
+    const second = new Storage(path);
+    const current = first.list("flows")[0];
+    const updated = second.saveFlow(
+      { ...current, name: "Other window" },
+      { expectedRevision: current.revision },
+    );
+    expect(updated.status).toBe("saved");
+    expect(
+      first.saveFlow(
+        { ...current, name: "Stale window" },
+        { expectedRevision: current.revision },
+      ),
+    ).toMatchObject({ status: "conflict", current: { name: "Other window" } });
+    first.close();
+    second.close();
+  });
+
   it("marks queued/running/paused runs interrupted after a crash without replaying them", () => {
     const path = database();
     const first = new Storage(path);
