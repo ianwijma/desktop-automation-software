@@ -3,10 +3,14 @@ import type {
   WorkspaceState,
   AppEvent,
   FlowDefinition,
-  ValidationIssue,
   Json,
 } from "../shared/types";
-import { flowSchema, targetSchema } from "../shared/validation";
+import {
+  migrateFlow,
+  parseFlowBundle,
+  prepareFlowSave,
+} from "../shared/flow-persistence";
+import { validateFlow } from "../engine/validation";
 import {
   createSeedFlows,
   defaultSettings,
@@ -44,111 +48,125 @@ function load(): WorkspaceState {
     recording: { active: false, mode: "guided", actions: [] },
     desktop: false,
   };
-  try {
-    const saved = localStorage.getItem(KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved) as Partial<WorkspaceState>;
-      if (Array.isArray(parsed.flows)) state.flows = parsed.flows;
-      if (Array.isArray(parsed.targets)) state.targets = parsed.targets;
-      if (Array.isArray(parsed.connections))
-        state.connections = parsed.connections.map((c) => ({
-          ...c,
-          hasKey: false,
-        }));
-      if (Array.isArray(parsed.schedules)) state.schedules = parsed.schedules;
-      if (parsed.settings)
-        state.settings = { ...state.settings, ...parsed.settings };
+  const saved = localStorage.getItem(KEY);
+  if (saved) {
+    let parsed: Partial<WorkspaceState>;
+    try {
+      parsed = JSON.parse(saved) as Partial<WorkspaceState>;
+    } catch {
+      throw new Error(
+        "The saved browser workspace is not valid JSON. Its original data has been preserved.",
+      );
     }
-  } catch {
-    /* A corrupt preview cache must not prevent the workspace opening. */
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.flows))
+      throw new Error(
+        "The saved browser workspace has an invalid format. Its original data has been preserved.",
+      );
+    state.flows = parsed.flows.map(migrateFlow);
+    if (Array.isArray(parsed.targets)) state.targets = parsed.targets;
+    if (Array.isArray(parsed.connections))
+      state.connections = parsed.connections.map((c) => ({
+        ...c,
+        hasKey: false,
+      }));
+    if (Array.isArray(parsed.schedules)) state.schedules = parsed.schedules;
+    if (parsed.settings)
+      state.settings = { ...state.settings, ...parsed.settings };
   }
   return state;
 }
-let state = load();
 const copy = <T>(value: T): T => structuredClone(value);
-function persist() {
-  localStorage.setItem(KEY, JSON.stringify({ ...state, runs: [] }));
+function notify() {
   listeners.forEach((fn) => fn({ type: "workspace" }));
+}
+async function locked<T>(operation: () => T): Promise<T> {
+  if (!globalThis.navigator?.locks)
+    throw new Error(
+      "Saving the preview requires a browser with Web Locks support. Use a current browser on localhost or HTTPS.",
+    );
+  return navigator.locks.request(KEY, operation);
+}
+async function mutate<T>(
+  operation: (state: WorkspaceState) => T,
+  shouldSave: (result: T) => boolean = () => true,
+): Promise<T> {
+  return locked(() => {
+    const latest = load();
+    const result = operation(latest);
+    if (shouldSave(result)) {
+      localStorage.setItem(KEY, JSON.stringify({ ...latest, runs: [] }));
+      notify();
+    }
+    return copy(result);
+  });
 }
 function upsert<T extends { id: string }>(list: T[], item: T) {
   const index = list.findIndex((x) => x.id === item.id);
   if (index < 0) list.push(copy(item));
   else list[index] = copy(item);
 }
-function validate(flow: FlowDefinition): ValidationIssue[] {
-  const issues: ValidationIssue[] = [];
-  if (!flow.name.trim())
-    issues.push({ severity: "error", message: "Give this flow a name." });
-  if (flow.nodes.filter((n) => n.kind === "start").length !== 1)
-    issues.push({
-      severity: "error",
-      message: "A flow needs exactly one Start node.",
-    });
-  const ids = new Set(flow.nodes.map((n) => n.id));
-  for (const edge of flow.edges)
-    if (!ids.has(edge.source) || !ids.has(edge.target))
-      issues.push({
-        severity: "error",
-        message: "A connection refers to a missing node.",
-      });
-  for (const node of flow.nodes) {
-    if (node.kind !== "start" && !flow.edges.some((e) => e.target === node.id))
-      issues.push({
-        nodeId: node.id,
-        severity: "warning",
-        message: `${node.label} is not connected to a previous step.`,
-      });
-    if (node.kind === "ai" && !node.config.connectionId)
-      issues.push({
-        nodeId: node.id,
-        severity: "error",
-        message: `Choose an AI connection for ${node.label}.`,
-      });
-    if (
-      ["launch", "attach", "click", "navigate", "detect"].includes(node.kind) &&
-      !node.config.targetId
-    )
-      issues.push({
-        nodeId: node.id,
-        severity: "error",
-        message: `Choose a target for ${node.label}.`,
-      });
-  }
-  return issues;
-}
 export const previewAPI: RelayAPI = {
   async bootstrap() {
-    return copy(state);
-  },
-  async saveFlow(flow) {
-    const next = {
-      ...copy(flow),
-      revision: flow.revision + 1,
-      updatedAt: new Date().toISOString(),
-    };
-    upsert(state.flows, next);
-    persist();
-    return copy(next);
-  },
-  async deleteFlow(id) {
+    const state = load();
+    const saved = localStorage.getItem(KEY);
     if (
-      state.flows.some(
-        (f) =>
-          f.id !== id &&
-          f.nodes.some((n) =>
-            JSON.stringify(n.config).includes(JSON.stringify(id)),
-          ),
+      saved &&
+      (JSON.parse(saved) as { flows: { schemaVersion: number }[] }).flows.some(
+        (flow) => flow.schemaVersion === 1,
       )
     )
-      throw new Error(
-        "Another flow calls this flow. Remove that reference first.",
-      );
-    state.flows = state.flows.filter((f) => f.id !== id);
-    state.schedules = state.schedules.filter((item) => item.flowId !== id);
-    persist();
+      return locked(() => {
+        const latest = load();
+        localStorage.setItem(KEY, JSON.stringify({ ...latest, runs: [] }));
+        return copy(latest);
+      });
+    return copy(state);
+  },
+  async saveFlow(flow, { expectedRevision }) {
+    return mutate(
+      (state) => {
+        const result = prepareFlowSave(
+          { ...flow, updatedAt: new Date().toISOString() },
+          state.flows.find((item) => item.id === flow.id),
+          expectedRevision,
+        );
+        if (result.status === "saved") upsert(state.flows, result.flow);
+        return result;
+      },
+      (result) => result.status === "saved",
+    );
+  },
+  async deleteFlow(id) {
+    return mutate((state) => {
+      if (
+        state.flows.some(
+          (f) =>
+            f.id !== id &&
+            f.nodes.some((n) =>
+              JSON.stringify(n.config).includes(JSON.stringify(id)),
+            ),
+        )
+      )
+        throw new Error(
+          "Another flow calls this flow. Remove that reference first.",
+        );
+      state.flows = state.flows.filter((f) => f.id !== id);
+      state.schedules = state.schedules.filter((item) => item.flowId !== id);
+    });
   },
   async validateFlow(flow) {
-    return validate(flow);
+    const state = load();
+    return validateFlow(
+      flow,
+      state.flows
+        .map((item) => (item.id === flow.id ? flow : item))
+        .concat(state.flows.some((item) => item.id === flow.id) ? [] : [flow]),
+      {
+        targets: state.targets,
+        connections: state.connections,
+        settings: state.settings,
+      },
+    );
   },
   async runFlow() {
     return unavailable("Running flows");
@@ -157,9 +175,10 @@ export const previewAPI: RelayAPI = {
     unavailable("Run control");
   },
   async saveSettings(settings) {
-    state.settings = copy(settings);
-    persist();
-    return copy(settings);
+    return mutate((state) => {
+      state.settings = copy(settings);
+      return settings;
+    });
   },
   async saveConnection(connection, apiKey) {
     if (apiKey)
@@ -167,37 +186,43 @@ export const previewAPI: RelayAPI = {
         "API keys cannot be saved in the web preview. Add your key in the desktop application.",
       );
     const next = { ...connection, hasKey: false };
-    upsert(state.connections, next);
-    persist();
-    return copy(next);
+    return mutate((state) => {
+      upsert(state.connections, next);
+      return next;
+    });
   },
   async deleteConnection(id) {
-    state.connections = state.connections.filter((x) => x.id !== id);
-    persist();
+    return mutate((state) => {
+      state.connections = state.connections.filter((x) => x.id !== id);
+    });
   },
   async testConnection() {
     return unavailable("Testing AI connections");
   },
   async saveTarget(target) {
-    upsert(state.targets, target);
-    persist();
-    return copy(target);
+    return mutate((state) => {
+      upsert(state.targets, target);
+      return target;
+    });
   },
   async deleteTarget(id) {
-    state.targets = state.targets.filter((x) => x.id !== id);
-    persist();
+    return mutate((state) => {
+      state.targets = state.targets.filter((x) => x.id !== id);
+    });
   },
   async saveSchedule(schedule) {
-    upsert(state.schedules, schedule);
-    persist();
-    return copy(schedule);
+    return mutate((state) => {
+      upsert(state.schedules, schedule);
+      return schedule;
+    });
   },
   async deleteSchedule(id) {
-    state.schedules = state.schedules.filter((x) => x.id !== id);
-    persist();
+    return mutate((state) => {
+      state.schedules = state.schedules.filter((x) => x.id !== id);
+    });
   },
   async getCapabilities() {
-    return copy(state.capabilities);
+    return copy(load().capabilities);
   },
   async capture() {
     return unavailable("Window capture");
@@ -212,7 +237,7 @@ export const previewAPI: RelayAPI = {
     return unavailable("Recording");
   },
   async stopRecording() {
-    return copy(state.recording);
+    return copy(load().recording);
   },
   async importFlow() {
     return new Promise((resolve, reject) => {
@@ -232,19 +257,9 @@ export const previewAPI: RelayAPI = {
         }
         void file
           .text()
-          .then((text) => {
-            const data = JSON.parse(text) as {
-              flows?: unknown[];
-              targets?: unknown[];
-              rootId?: string;
-            };
-            const flows = (data.flows ?? [data]).map((item) =>
-              flowSchema.parse(item),
-            );
-            if (!flows.length || flows.length > 200)
-              throw new Error("A bundle must contain between 1 and 200 flows.");
-            const targets = (data.targets ?? []).map((item) =>
-              targetSchema.parse(item),
+          .then(async (text) => {
+            const { flows, targets, rootId } = parseFlowBundle(
+              JSON.parse(text),
             );
             const flowIds = new Map(
               flows.map((flow) => [flow.id, crypto.randomUUID()]),
@@ -280,19 +295,19 @@ export const previewAPI: RelayAPI = {
               createdAt: new Date().toISOString(),
               updatedAt: new Date().toISOString(),
             }));
-            targets.forEach((target) =>
-              upsert(state.targets, {
-                ...target,
-                id: targetIds.get(target.id)!,
-              }),
-            );
-            imported.forEach((flow) => upsert(state.flows, flow));
-            persist();
+            await mutate((state) => {
+              targets.forEach((target) =>
+                upsert(state.targets, {
+                  ...target,
+                  id: targetIds.get(target.id)!,
+                }),
+              );
+              imported.forEach((flow) => upsert(state.flows, flow));
+            });
             resolve(
               copy(
-                imported.find(
-                  (flow) => flow.id === flowIds.get(data.rootId ?? flows[0].id),
-                ) ?? imported[0],
+                imported.find((flow) => flow.id === flowIds.get(rootId)) ??
+                  imported[0],
               ),
             );
           })
@@ -302,6 +317,7 @@ export const previewAPI: RelayAPI = {
     });
   },
   async exportFlow(id) {
+    const state = load();
     const flows: FlowDefinition[] = [];
     const visited = new Set<string>();
     function visit(flowId: string) {
@@ -332,7 +348,7 @@ export const previewAPI: RelayAPI = {
     );
     const bundle = {
       format: "relay",
-      version: 1,
+      version: 2,
       rootId: id,
       flows,
       targets: state.targets.filter((target) => targetIds.has(target.id)),
@@ -357,6 +373,14 @@ export const previewAPI: RelayAPI = {
   },
   onEvent(listener) {
     listeners.add(listener);
-    return () => listeners.delete(listener);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === KEY || event.key === null)
+        listener({ type: "workspace" });
+    };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      listeners.delete(listener);
+      window.removeEventListener("storage", onStorage);
+    };
   },
 };

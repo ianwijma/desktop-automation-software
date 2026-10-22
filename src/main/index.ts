@@ -17,6 +17,12 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { Storage } from "./storage";
+import { syncSavedFlow } from "./flow-sync";
+import {
+  migrateFlow,
+  parseFlowBundle,
+  prepareFlowSave,
+} from "../shared/flow-persistence";
 import { setLinuxAutostart } from "./autostart";
 import { validateFlow } from "../engine/validation";
 import { nextRunAt } from "../engine/scheduler";
@@ -25,6 +31,7 @@ import {
   boundedJson,
   connectionSchema,
   flowSchema,
+  flowSaveOptionsSchema,
   jsonSchema,
   scheduleSchema,
   settingsSchema,
@@ -210,21 +217,7 @@ async function importBundle(): Promise<FlowDefinition | null> {
   const raw = await readFile(choice.filePaths[0], "utf8");
   if (raw.length > 12_000_000)
     throw new Error("Workflow bundle exceeds 12 MB.");
-  const data = JSON.parse(raw) as {
-    flows?: unknown[];
-    targets?: unknown[];
-    rootId?: string;
-    format?: string;
-  };
-  const parsed = z
-    .array(flowSchema)
-    .min(1)
-    .max(200)
-    .parse(data.flows ?? [data]);
-  const targets = z
-    .array(targetSchema)
-    .max(200)
-    .parse(data.targets ?? []);
+  const { flows: parsed, targets, rootId } = parseFlowBundle(JSON.parse(raw));
   const mapping = new Map(
     parsed.map((f) => [f.id, store.get("flows", f.id) ? randomUUID() : f.id]),
   );
@@ -270,10 +263,7 @@ async function importBundle(): Promise<FlowDefinition | null> {
     flows.forEach((f) => store.put("flows", f));
   });
   await sync();
-  return (
-    flows.find((f) => f.id === mapping.get(data.rootId ?? parsed[0].id)) ??
-    flows[0]
-  );
+  return flows.find((f) => f.id === mapping.get(rootId))!;
 }
 async function exportBundle(id: string): Promise<boolean> {
   const flows: FlowDefinition[] = [];
@@ -314,7 +304,7 @@ async function exportBundle(id: string): Promise<boolean> {
     JSON.stringify(
       {
         format: "relay",
-        version: 1,
+        version: 2,
         rootId: id,
         flows,
         targets: store.list("targets").filter((t) => targetIds.has(t.id)),
@@ -350,8 +340,15 @@ async function request(
       };
     }
     case "saveFlow": {
-      const flow = flowSchema.parse(args[0]);
+      const flow = migrateFlow(args[0]);
+      const options = flowSaveOptionsSchema.parse(args[1]);
       const previous = store.get("flows", flow.id);
+      const preliminary = prepareFlowSave(
+        flow,
+        previous,
+        options.expectedRevision,
+      );
+      if (preliminary.status === "conflict") return preliminary;
       if (
         flow.hotkey &&
         (flow.hotkey === store.settings().stopHotkey ||
@@ -367,14 +364,14 @@ async function request(
           [...store.list("flows").filter((f) => f.id !== flow.id), flow],
           true,
         );
-      const result = store.put("flows", {
-        ...flow,
-        revision: (previous?.revision ?? 0) + 1,
-        updatedAt: new Date().toISOString(),
-      });
-      registerShortcuts();
-      await sync();
-      return result;
+      try {
+        const result = store.saveFlow(flow, options);
+        registerShortcuts();
+        return await syncSavedFlow(result, sync);
+      } catch (error) {
+        registerShortcuts();
+        throw error;
+      }
     }
     case "deleteFlow": {
       const flowId = id();
@@ -402,13 +399,20 @@ async function request(
       return;
     }
     case "validateFlow":
-      return validateFlow(flowSchema.parse(args[0]), store.list("flows"));
-    case "runFlow":
+      return validateFlow(flowSchema.parse(args[0]), store.list("flows"), {
+        targets: store.list("targets"),
+        connections: store.list("connections"),
+        settings: store.settings(),
+      });
+    case "runFlow": {
+      // A prior save may have committed while the runner was unavailable.
+      await sync();
       return rpc(
         "runFlow",
         id(),
         z.record(z.string(), jsonSchema).parse(args[1] ?? {}),
       );
+    }
     case "controlRun":
       return rpc(
         "controlRun",
@@ -619,137 +623,150 @@ else {
     win?.show();
     win?.focus();
   });
-  void app.whenReady().then(async () => {
-    store = new Storage(join(dataDir, "relay.sqlite"));
-    setInterval(
-      () => store.pruneHistory(store.settings().historyRetentionDays),
-      3600000,
-    ).unref();
-    runner = utilityProcess.fork(join(__dirname, "runner.cjs"), [], {
-      serviceName: "Relay automation",
-      stdio: "pipe",
-    });
-    runnerAlive = true;
-    runner.on("message", (message: RunnerResponse) => {
-      if ("id" in message) {
-        const item = pending.get(message.id);
-        if (!item) return;
-        clearTimeout(item.timer);
-        pending.delete(message.id);
-        if (message.error) item.reject(new Error(message.error));
-        else item.resolve(message.result);
-      } else if ("event" in message) {
-        if (message.event.type === "run") store.put("runs", message.event.run);
-        broadcast(message.event);
-      } else if (
-        "scheduleUpdates" in message &&
-        message.generation === workspaceGeneration
-      ) {
-        for (const cursor of message.scheduleUpdates) {
-          const saved = store.get("schedules", cursor.id);
-          if (saved) store.put("schedules", { ...saved, ...cursor });
+  void app
+    .whenReady()
+    .then(async () => {
+      store = new Storage(join(dataDir, "relay.sqlite"));
+      setInterval(
+        () => store.pruneHistory(store.settings().historyRetentionDays),
+        3600000,
+      ).unref();
+      runner = utilityProcess.fork(join(__dirname, "runner.cjs"), [], {
+        serviceName: "Relay automation",
+        stdio: "pipe",
+      });
+      runnerAlive = true;
+      runner.on("message", (message: RunnerResponse) => {
+        if ("id" in message) {
+          const item = pending.get(message.id);
+          if (!item) return;
+          clearTimeout(item.timer);
+          pending.delete(message.id);
+          if (message.error) item.reject(new Error(message.error));
+          else item.resolve(message.result);
+        } else if ("event" in message) {
+          if (message.event.type === "run")
+            store.put("runs", message.event.run);
+          broadcast(message.event);
+        } else if (
+          "scheduleUpdates" in message &&
+          message.generation === workspaceGeneration
+        ) {
+          for (const cursor of message.scheduleUpdates) {
+            const saved = store.get("schedules", cursor.id);
+            if (saved) store.put("schedules", { ...saved, ...cursor });
+          }
+          broadcast({ type: "workspace" });
         }
-        broadcast({ type: "workspace" });
-      }
-    });
-    runner.on("exit", () => {
-      runnerAlive = false;
-      for (const p of pending.values()) {
-        clearTimeout(p.timer);
-        p.reject(
-          new Error(
-            "The automation service stopped. Restart Relay to continue.",
-          ),
-        );
-      }
-      pending.clear();
-      for (const run of store.list("runs"))
-        if (["queued", "running", "paused"].includes(run.status)) {
-          const interrupted: RunRecord = {
-            ...run,
-            status: "interrupted",
-            error: "Automation service stopped.",
-            finishedAt: new Date().toISOString(),
-          };
-          store.put("runs", interrupted);
-          broadcast({ type: "run", run: interrupted });
+      });
+      runner.on("exit", () => {
+        runnerAlive = false;
+        for (const p of pending.values()) {
+          clearTimeout(p.timer);
+          p.reject(
+            new Error(
+              "The automation service stopped. Restart Relay to continue.",
+            ),
+          );
         }
-    });
-    runner.stderr?.on("data", (data) => {
-      if (process.env.RELAY_TEST_MODE) process.stderr.write(data);
-    });
-    const binaryPath = app.isPackaged
-      ? join(
-          process.resourcesPath,
-          "native",
-          process.platform === "win32" ? "relay-native.exe" : "relay-native",
-        )
-      : join(
-          app.getAppPath(),
-          "native/target/release",
-          process.platform === "win32" ? "relay-native.exe" : "relay-native",
+        pending.clear();
+        for (const run of store.list("runs"))
+          if (["queued", "running", "paused"].includes(run.status)) {
+            const interrupted: RunRecord = {
+              ...run,
+              status: "interrupted",
+              error: "Automation service stopped.",
+              finishedAt: new Date().toISOString(),
+            };
+            store.put("runs", interrupted);
+            broadcast({ type: "run", run: interrupted });
+          }
+      });
+      runner.stderr?.on("data", (data) => {
+        if (process.env.RELAY_TEST_MODE) process.stderr.write(data);
+      });
+      const binaryPath = app.isPackaged
+        ? join(
+            process.resourcesPath,
+            "native",
+            process.platform === "win32" ? "relay-native.exe" : "relay-native",
+          )
+        : join(
+            app.getAppPath(),
+            "native/target/release",
+            process.platform === "win32" ? "relay-native.exe" : "relay-native",
+          );
+      ready = rpc("init", {
+        dataDir,
+        binaryPath,
+        workspace: workspace(),
+      } satisfies RunnerInit);
+      ready.catch((error) => {
+        if (process.env.RELAY_TEST_MODE) {
+          console.error("Automation service failed:", error);
+          return;
+        }
+        void dialog.showErrorBox(
+          "Automation service failed",
+          String(error.message),
         );
-    ready = rpc("init", {
-      dataDir,
-      binaryPath,
-      workspace: workspace(),
-    } satisfies RunnerInit);
-    ready.catch((error) => {
-      if (process.env.RELAY_TEST_MODE) {
-        console.error("Automation service failed:", error);
-        return;
-      }
-      void dialog.showErrorBox(
-        "Automation service failed",
-        String(error.message),
+      });
+      ipcMain.handle(
+        "relay:request",
+        async (event, method: keyof RelayAPI, args: unknown[]) => {
+          if (
+            !win ||
+            event.sender !== win.webContents ||
+            event.senderFrame !== win.webContents.mainFrame
+          )
+            throw new Error("Untrusted request.");
+          return request(method, args);
+        },
       );
-    });
-    ipcMain.handle(
-      "relay:request",
-      async (event, method: keyof RelayAPI, args: unknown[]) => {
-        if (
-          !win ||
-          event.sender !== win.webContents ||
-          event.senderFrame !== win.webContents.mainFrame
-        )
-          throw new Error("Untrusted request.");
-        return request(method, args);
-      },
-    );
-    registerShortcuts();
-    createWindow();
-    if (!process.env.RELAY_TEST_MODE) {
-      const icon = nativeImage
-        .createFromDataURL(
-          "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==",
-        )
-        .resize({ width: 20, height: 20 });
-      try {
-        tray = new Tray(icon);
-        tray.setToolTip("Relay — Desktop automation");
-        tray.setContextMenu(
-          Menu.buildFromTemplate([
-            { label: "Open Relay", click: () => win?.show() },
-            {
-              label: "Stop all workflows",
-              click: () => {
-                void rpc("stopAll").catch(() => {});
+      registerShortcuts();
+      createWindow();
+      if (!process.env.RELAY_TEST_MODE) {
+        const icon = nativeImage
+          .createFromDataURL(
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==",
+          )
+          .resize({ width: 20, height: 20 });
+        try {
+          tray = new Tray(icon);
+          tray.setToolTip("Relay — Desktop automation");
+          tray.setContextMenu(
+            Menu.buildFromTemplate([
+              { label: "Open Relay", click: () => win?.show() },
+              {
+                label: "Stop all workflows",
+                click: () => {
+                  void rpc("stopAll").catch(() => {});
+                },
               },
-            },
-            { type: "separator" },
-            { label: "Quit Relay", click: () => app.quit() },
-          ]),
-        );
-        tray.on("click", () => win?.show());
-      } catch {
-        tray = null;
+              { type: "separator" },
+              { label: "Quit Relay", click: () => app.quit() },
+            ]),
+          );
+          tray.on("click", () => win?.show());
+        } catch {
+          tray = null;
+        }
       }
-    }
-    app.on("activate", () => {
-      if (!win) createWindow();
-      else win.show();
+      app.on("activate", () => {
+        if (!win) createWindow();
+        else win.show();
+      });
+    })
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      if (process.env.RELAY_TEST_MODE) console.error(message);
+      else dialog.showErrorBox("Relay could not open this workspace", message);
+      // Do not reset an incompatible or damaged database to make startup succeed.
+      quitting = true;
+      runner?.kill();
+      store?.close();
+      app.exit(1);
     });
-  });
   app.on("before-quit", (event) => {
     if (quitting) return;
     event.preventDefault();

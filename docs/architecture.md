@@ -23,6 +23,14 @@ The utility process receives selected provider keys from the main process. Keys 
 
 SQLite stores versioned JSON entities for flows, targets, schedules, and run records, plus settings and encrypted credential bytes. Workflow exports contain the root and its referenced child flows, target definitions, and embedded template images. Import resolves ID collisions and never executes a flow automatically.
 
+Workflow schema 2 preserves version-1 node configurations and references. Existing version-1 databases are checked before writable initialization, backed up beside `relay.sqlite` as `relay.sqlite.backup-<timestamp>-<id>.sqlite`, and migrated transactionally. Backups include committed WAL data. Unknown future versions stop startup with an error; they are never reset to an empty workspace. New exports use version 2 and cannot be opened by the PR #1 application. Keep the pre-migration backup when testing upgrades.
+
+`saveFlow` requires an expected revision: `null` creates a new ID, and a positive revision updates only that exact version. The storage transaction returns either the saved graph or a conflict containing the current graph when it still exists. Stale writes never recreate a deleted flow. The renderer retains its local draft on conflict; the browser preview applies the same rules under a cross-tab Web Lock. This full-graph atomic update is the persistence boundary for later recorder and chat work.
+
+A committed save remains acknowledged if the runner cannot refresh; the result includes a warning and the editor does not continue into Run. A subsequent manual Run synchronizes the workspace before dispatching. Import parses the entire bundle before writing and rejects unknown versions, duplicate IDs, and missing roots.
+
+Shared node definitions provide defaults, inspector fields, ports, output metadata, requirements, and configuration validation. The editor and execution preflight use the same graph validator. Runtime validation repeats after references resolve, before adapter execution. Incomplete drafts may be saved, but cannot run until errors are resolved. Advanced configuration fields are retained. Validation of injected test adapters may omit external workspace context; the desktop runner always provides the actual target/connection/default settings context.
+
 Run events include redacted input/output and error evidence. Captures are held in a bounded in-memory cache; template crops explicitly selected by the user are persisted in node configuration. Continuous video is not stored. On restart, unfinished runs become interrupted, preserving evidence without replaying side effects.
 
 ## Resource ownership

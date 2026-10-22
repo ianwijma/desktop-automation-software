@@ -47,7 +47,7 @@ function makeFlow(
 ): FlowDefinition {
   const now = new Date().toISOString();
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id,
     name,
     description,

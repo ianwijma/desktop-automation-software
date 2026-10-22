@@ -41,7 +41,7 @@ export interface FlowEdge {
   port?: string;
 }
 export interface FlowDefinition {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   id: string;
   name: string;
   description: string;
@@ -214,6 +214,13 @@ export interface ValidationIssue {
   message: string;
   severity: "error" | "warning";
 }
+export interface FlowSaveOptions {
+  /** null creates a new flow; a revision updates only that exact saved version. */
+  expectedRevision: number | null;
+}
+export type FlowSaveResult =
+  | { status: "saved"; flow: FlowDefinition; warning?: string }
+  | { status: "conflict"; current?: FlowDefinition; reason: string };
 export type AppEvent =
   | { type: "run"; run: RunRecord }
   | { type: "recording"; recording: RecordingState }
@@ -221,7 +228,10 @@ export type AppEvent =
   | { type: "workspace" };
 export interface RelayAPI {
   bootstrap(): Promise<WorkspaceState>;
-  saveFlow(flow: FlowDefinition): Promise<FlowDefinition>;
+  saveFlow(
+    flow: FlowDefinition,
+    options: FlowSaveOptions,
+  ): Promise<FlowSaveResult>;
   deleteFlow(id: string): Promise<void>;
   validateFlow(flow: FlowDefinition): Promise<ValidationIssue[]>;
   runFlow(id: string, inputs?: Record<string, Json>): Promise<RunRecord>;

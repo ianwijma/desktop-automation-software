@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import {
+  nodeDefinitions,
+  type ValidationContext,
+} from "../shared/node-definitions";
 import type {
   FlowDefinition,
   FlowNode,
@@ -43,6 +47,7 @@ export interface NodeExecutionResult {
 export interface EngineOptions {
   getFlows(): FlowDefinition[];
   getTargets(): TargetDescriptor[];
+  validationContext?(): ValidationContext;
   /** Adapters must check signal before every side effect, and stop/release held input on abort. */
   executeNode(
     node: FlowNode,
@@ -102,7 +107,11 @@ export class WorkflowEngine {
     inputs: Record<string, Json> = {},
     trigger: RunRecord["trigger"] = "manual",
   ): RunRecord {
-    const tree = freezeFlowTree(flowId, this.options.getFlows());
+    const tree = freezeFlowTree(
+      flowId,
+      this.options.getFlows(),
+      this.options.validationContext?.(),
+    );
     const state = this.create(
       tree.get(flowId)!,
       tree,
@@ -543,8 +552,6 @@ export class WorkflowEngine {
   ): Promise<NodeExecutionResult> {
     const controller = new AbortController();
     const abort = () => controller.abort(state.controller.signal.reason);
-    state.controller.signal.addEventListener("abort", abort, { once: true });
-    if (state.controller.signal.aborted) abort();
     let timer: ReturnType<typeof setTimeout> | undefined;
     // Loop input templates may reference the item/index introduced by each iteration.
     const { inputs: loopInputs, ...rest } = node.config;
@@ -553,6 +560,23 @@ export class WorkflowEngine {
         ? { ...resolve(rest, state.scope), inputs: loopInputs ?? {} }
         : resolve(node.config, state.scope);
     this.rememberSecrets(state, config);
+    const validationContext = this.options.validationContext?.();
+    const configIssues = nodeDefinitions[node.kind]
+      .validateConfig(
+        config,
+        validationContext
+          ? { ...validationContext, targets: state.targets }
+          : undefined,
+        { resolved: true },
+      )
+      .filter((issue) => issue.severity === "error");
+    if (configIssues.length) {
+      throw new Error(
+        `${node.label}: ${configIssues.map((issue) => issue.message).join("; ")}`,
+      );
+    }
+    state.controller.signal.addEventListener("abort", abort, { once: true });
+    if (state.controller.signal.aborted) abort();
     const timeout = Number(
       config.timeoutMs ?? (node.kind === "wait" && config.detector ? 30000 : 0),
     );
@@ -691,6 +715,12 @@ export class WorkflowEngine {
             (raw.config.inputs ?? {}) as Record<string, Json>,
             { ...state.scope, item, index },
           );
+          if (
+            !childInputs ||
+            typeof childInputs !== "object" ||
+            Array.isArray(childInputs)
+          )
+            throw new Error("Loop child inputs must resolve to an object");
           results.push(
             await this.child(
               state,

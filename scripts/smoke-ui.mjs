@@ -18,7 +18,7 @@ try {
   if (!url) {
     server = await createServer({
       logLevel: "error",
-      server: { host: "127.0.0.1", port: 0, strictPort: false },
+      server: { host: "127.0.0.1", port: 0, strictPort: false, hmr: false },
     });
     await server.listen();
     const address = server.httpServer?.address();
@@ -27,9 +27,10 @@ try {
     url = `http://127.0.0.1:${address.port}`;
   }
   browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({
+  const context = await browser.newContext({
     viewport: { width: 1440, height: 960 },
   });
+  const page = await context.newPage();
   page.setDefaultTimeout(10000);
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -46,6 +47,11 @@ try {
   );
 
   await page.getByRole("button", { name: /New workflow/ }).click();
+  await page.waitForFunction(() =>
+    Array.from(document.querySelectorAll("input")).some(
+      (input) => input.value === "Untitled flow",
+    ),
+  );
   await page
     .getByLabel("Flow name", { exact: true })
     .fill("Renderer QA workflow");
@@ -214,6 +220,7 @@ try {
   await page
     .getByRole("button", { name: "Save schedule", exact: true })
     .click();
+  await page.getByRole("dialog").waitFor({ state: "hidden" });
   await page
     .getByRole("heading", { name: "Renderer daily check", exact: true })
     .waitFor();
@@ -246,6 +253,158 @@ try {
     .waitFor();
   await page.getByRole("button", { name: "Run flow", exact: true }).isEnabled();
   assert.equal(errors.length, 0, errors.join("\n"));
+  const beforeSave = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem("relay.preview.v1")).flows.find(
+      (flow) => flow.id === "welcome",
+    ),
+  );
+  await page.getByLabel("Flow name", { exact: true }).fill("Saved then undone");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByText("All changes saved", { exact: true }).waitFor();
+  await page.getByText("Flow overview", { exact: true }).click();
+  await page.keyboard.press("Control+z");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page.getByText("All changes saved", { exact: true }).waitFor();
+  const afterUndo = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem("relay.preview.v1")).flows.find(
+      (flow) => flow.id === "welcome",
+    ),
+  );
+  assert.equal(afterUndo.name, beforeSave.name);
+  assert.equal(afterUndo.revision, beforeSave.revision + 2);
+  assert.equal(afterUndo.schemaVersion, 2);
+
+  const peer = await page.context().newPage();
+  await peer.goto(url);
+  await peer.getByLabel("Flow name", { exact: true }).waitFor();
+  await page
+    .getByLabel("Flow name", { exact: true })
+    .fill("Local unsaved draft");
+  await peer.getByLabel("Flow name", { exact: true }).fill("Other tab winner");
+  await peer.getByRole("button", { name: "Save", exact: true }).click();
+  await peer.getByText("All changes saved", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page
+    .getByRole("heading", { name: "This flow changed elsewhere" })
+    .waitFor();
+  assert.equal(
+    await page.getByLabel("Flow name", { exact: true }).inputValue(),
+    "Local unsaved draft",
+  );
+  const winner = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem("relay.preview.v1")).flows.find(
+      (flow) => flow.id === "welcome",
+    ),
+  );
+  assert.equal(winner.name, "Other tab winner");
+  await page.getByRole("button", { name: "Keep editing", exact: true }).click();
+  assert.equal(
+    await page.getByLabel("Flow name", { exact: true }).inputValue(),
+    "Local unsaved draft",
+  );
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await page
+    .getByRole("button", {
+      name: "Reload latest and discard edits",
+      exact: true,
+    })
+    .click();
+  await page.getByText("All changes saved", { exact: true }).waitFor();
+  assert.equal(
+    await page.getByLabel("Flow name", { exact: true }).inputValue(),
+    "Other tab winner",
+  );
+  await peer.close();
+
+  const futurePage = await browser.newPage();
+  const futureState = JSON.stringify({
+    ...saved,
+    flows: [{ ...saved.flows[0], schemaVersion: 99 }],
+  });
+  await futurePage.addInitScript(
+    (raw) => localStorage.setItem("relay.preview.v1", raw),
+    futureState,
+  );
+  await futurePage.goto(url);
+  await futurePage
+    .getByRole("heading", { name: "Relay couldn’t open your workspace" })
+    .waitFor();
+  await futurePage.getByText(/Unsupported workflow schema version/).waitFor();
+  assert.equal(
+    await futurePage.evaluate(() => localStorage.getItem("relay.preview.v1")),
+    futureState,
+  );
+  await futurePage.close();
+
+  const warningPage = await browser.newPage();
+  await warningPage.addInitScript((fixture) => {
+    const state = structuredClone(fixture);
+    let failRefresh = false;
+    let warnOnce = true;
+    window.__saveTest = { runs: 0, expectedRevisions: [] };
+    window.relay = {
+      bootstrap: async () => {
+        if (failRefresh) {
+          failRefresh = false;
+          throw new Error("The runner is unavailable.");
+        }
+        return structuredClone(state);
+      },
+      onEvent: () => () => {},
+      validateFlow: async () => [],
+      saveFlow: async (flow, { expectedRevision }) => {
+        const current = state.flows.find((item) => item.id === flow.id);
+        window.__saveTest.expectedRevisions.push(expectedRevision);
+        if (current.revision !== expectedRevision)
+          return {
+            status: "conflict",
+            current,
+            reason: "Stale fixture revision",
+          };
+        const next = { ...flow, revision: current.revision + 1 };
+        state.flows = state.flows.map((item) =>
+          item.id === next.id ? next : item,
+        );
+        if (warnOnce) {
+          warnOnce = false;
+          failRefresh = true;
+          return {
+            status: "saved",
+            flow: next,
+            warning: "The runner could not synchronize.",
+          };
+        }
+        return { status: "saved", flow: next };
+      },
+      runFlow: async () => {
+        window.__saveTest.runs++;
+        throw new Error("Unexpected run after save warning");
+      },
+    };
+  }, saved);
+  await warningPage.goto(url);
+  await warningPage
+    .getByLabel("Flow name", { exact: true })
+    .fill("Committed with warning");
+  await warningPage
+    .getByRole("button", { name: "Run flow", exact: true })
+    .click();
+  await warningPage
+    .getByText(/Flow saved\. The runner could not synchronize/)
+    .waitFor();
+  await warningPage.getByText("All changes saved", { exact: true }).waitFor();
+  assert.equal(await warningPage.evaluate(() => window.__saveTest.runs), 0);
+  await warningPage
+    .getByLabel("Flow name", { exact: true })
+    .fill("Edited after warning");
+  await warningPage.getByRole("button", { name: "Save", exact: true }).click();
+  await warningPage.getByText("All changes saved", { exact: true }).waitFor();
+  const expectations = await warningPage.evaluate(
+    () => window.__saveTest.expectedRevisions,
+  );
+  assert.equal(expectations.length, 2);
+  assert.equal(expectations[1], expectations[0] + 1);
+  await warningPage.close();
   await mkdir("test-results", { recursive: true });
   await page
     .getByRole("button", { name: "Dismiss notification" })
@@ -260,7 +419,7 @@ try {
   );
   await page.screenshot({ path: "test-results/relay-ui-dark.png" });
   console.log(
-    "PASS: readable graph and minimap; palette search; add/edit/save; undo/redo; copy/paste; detected-click reference authoring; canonical child group editing; theme/accent persistence; OpenRouter configuration persistence; schedule create/reload; honest preview execution rejection; no page errors.",
+    "PASS: editor and references; undo/redo across revisions; child groups; theme/OpenRouter persistence; schedules; preview rejection; cross-tab conflicts; future-schema preservation; committed-save warning recovery with no automatic run; no page errors.",
   );
 } finally {
   await browser?.close();

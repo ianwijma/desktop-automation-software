@@ -42,6 +42,7 @@ import type {
   ValidationIssue,
   RecordedAction,
   Json,
+  FlowSaveResult,
 } from "../shared/types";
 import { previewAPI } from "./preview-api";
 import { catalog, blankFlow, uid } from "./catalog";
@@ -73,6 +74,12 @@ function App() {
   const [undo, setUndo] = useState<FlowDefinition[]>([]);
   const [redo, setRedo] = useState<FlowDefinition[]>([]);
   const [runInputs, setRunInputs] = useState<Record<string, Json> | null>(null);
+  const [saveConflict, setSaveConflict] = useState<
+    | (Extract<FlowSaveResult, { status: "conflict" }> & { flowId: string })
+    | null
+  >(null);
+  const baseRevisions = useRef(new Map<string, number>());
+  const saving = useRef<Promise<FlowDefinition | null> | null>(null);
   const clipboard = useRef<FlowNode | null>(null);
   const draftRef = useRef(draft);
   draftRef.current = draft;
@@ -95,6 +102,7 @@ function App() {
     if (!draftRef.current && next.flows.length) {
       setDraft(next.flows[0]);
       draftRef.current = next.flows[0];
+      baseRevisions.current.set(next.flows[0].id, next.flows[0].revision);
     }
   }, []);
   useEffect(() => {
@@ -162,31 +170,84 @@ function App() {
     setRedo([]);
     setDirty(true);
   }, []);
+  const rememberSaved = useCallback((flow: FlowDefinition) => {
+    baseRevisions.current.set(flow.id, flow.revision);
+    setWorkspace((current) =>
+      current
+        ? {
+            ...current,
+            flows: current.flows.some((item) => item.id === flow.id)
+              ? current.flows.map((item) => (item.id === flow.id ? flow : item))
+              : [...current.flows, flow],
+          }
+        : current,
+    );
+  }, []);
+  const finishSaved = useCallback(
+    async (result: Extract<FlowSaveResult, { status: "saved" }>) => {
+      let warning = result.warning;
+      try {
+        await refresh();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        warning = [warning, `The workspace could not refresh: ${message}`]
+          .filter(Boolean)
+          .join(" ");
+      }
+      toast(
+        warning ? `Flow saved. ${warning}` : "Flow saved.",
+        Boolean(warning),
+      );
+      return !warning;
+    },
+    [refresh, toast],
+  );
   const save = useCallback(async () => {
+    if (saving.current) return saving.current;
     const current = draftRef.current;
     if (!current) return null;
-    setBusy("save");
-    try {
-      const result = await api.saveFlow(current);
-      if (draftRef.current === current) {
-        setDraft(result);
-        draftRef.current = result;
-        setDirty(false);
-      } else {
-        setDraft((latest) =>
-          latest ? { ...latest, revision: result.revision } : latest,
-        );
+    const operation = (async () => {
+      setBusy("save");
+      try {
+        const result = await api.saveFlow(current, {
+          expectedRevision:
+            baseRevisions.current.get(current.id) ?? current.revision,
+        });
+        if (result.status === "conflict") {
+          setSaveConflict({ ...result, flowId: current.id });
+          await refresh();
+          return null;
+        }
+        const saved = result.flow;
+        rememberSaved(saved);
+        if (draftRef.current?.id === current.id) {
+          if (draftRef.current === current) {
+            draftRef.current = saved;
+            setDraft(saved);
+            setDirty(false);
+          } else {
+            const latest = {
+              ...draftRef.current,
+              revision: saved.revision,
+              updatedAt: saved.updatedAt,
+            };
+            draftRef.current = latest;
+            setDraft(latest);
+          }
+        }
+        setSaveConflict(null);
+        return (await finishSaved(result)) ? saved : null;
+      } catch (error) {
+        onError(error);
+        return null;
+      } finally {
+        setBusy(null);
+        saving.current = null;
       }
-      await refresh();
-      toast("Flow saved.");
-      return result;
-    } catch (error) {
-      onError(error);
-      return null;
-    } finally {
-      setBusy(null);
-    }
-  }, [refresh, toast, onError]);
+    })();
+    saving.current = operation;
+    return operation;
+  }, [refresh, finishSaved, rememberSaved, onError]);
   const chooseFlow = (id: string) => {
     if (
       dirty &&
@@ -197,7 +258,11 @@ function App() {
       return;
     const next = workspace?.flows.find((f) => f.id === id);
     if (next) {
-      setDraft(structuredClone(next));
+      const opened = structuredClone(next);
+      draftRef.current = opened;
+      setDraft(opened);
+      baseRevisions.current.set(next.id, next.revision);
+      setSaveConflict(null);
       setDirty(false);
       setSelected(null);
       setIssues([]);
@@ -214,15 +279,22 @@ function App() {
     )
       return;
     try {
-      const flow = await api.saveFlow(blankFlow());
-      await refresh();
+      const result = await api.saveFlow(blankFlow(), {
+        expectedRevision: null,
+      });
+      if (result.status === "conflict") throw new Error(result.reason);
+      const flow = result.flow;
+      draftRef.current = flow;
       setDraft(flow);
+      rememberSaved(flow);
+      setSaveConflict(null);
       setSelected(null);
       setDirty(false);
       setPage("flows");
       setFlowTab("flow");
       setUndo([]);
       setRedo([]);
+      await finishSaved(result);
     } catch (error) {
       onError(error);
     }
@@ -382,9 +454,16 @@ function App() {
       }
       let flow = draft;
       if (dirty) {
-        flow = await api.saveFlow(draft);
-        setDraft(flow);
-        setDirty(false);
+        const saved = await save();
+        if (!saved) return;
+        flow = saved;
+        setBusy("run");
+        const savedIssues = await api.validateFlow(flow);
+        setIssues(savedIssues);
+        if (savedIssues.some((issue) => issue.severity === "error")) {
+          setShowValidation(true);
+          return;
+        }
       }
       const resultRun = await api.runFlow(flow.id, inputs ?? flow.inputs);
       setWorkspace((w) =>
@@ -448,11 +527,18 @@ function App() {
     toast(`${actions.length} recorded steps added.`);
   };
   const importFlow = async () => {
+    if (dirty && !window.confirm("Discard unsaved changes and import a flow?"))
+      return;
     try {
       const flow = await api.importFlow();
       if (flow) {
         await refresh();
         setDraft(flow);
+        draftRef.current = flow;
+        baseRevisions.current.set(flow.id, flow.revision);
+        setSaveConflict(null);
+        setUndo([]);
+        setRedo([]);
         setDirty(false);
         setPage("flows");
         setFlowTab("flow");
@@ -683,13 +769,22 @@ function App() {
                           id: uid(),
                           name: `${draft.name} copy`,
                           revision: 1,
+                          createdAt: new Date().toISOString(),
+                          updatedAt: new Date().toISOString(),
                         };
                         void api
-                          .saveFlow(copy)
+                          .saveFlow(copy, { expectedRevision: null })
                           .then(async (result) => {
-                            await refresh();
-                            setDraft(result);
+                            if (result.status === "conflict")
+                              throw new Error(result.reason);
+                            draftRef.current = result.flow;
+                            setDraft(result.flow);
+                            rememberSaved(result.flow);
+                            setSaveConflict(null);
+                            setUndo([]);
+                            setRedo([]);
                             setDirty(false);
+                            await finishSaved(result);
                           })
                           .catch(onError);
                       }}
@@ -1012,6 +1107,55 @@ function App() {
         )}
         <div className="modal-actions">
           <Button onClick={() => setShowValidation(false)}>Back to flow</Button>
+        </div>
+      </Modal>
+      <Modal
+        open={saveConflict !== null}
+        onClose={() => setSaveConflict(null)}
+        title="This flow changed elsewhere"
+        description="Your local edits are still here. Nothing was overwritten."
+      >
+        <p>{saveConflict?.reason}</p>
+        <p className="muted small">
+          {saveConflict?.current
+            ? "Keep editing to preserve your draft, or reload the latest saved flow to discard your local changes. You can also keep your changes using Duplicate flow."
+            : "This flow is no longer saved. Keep your draft and use Duplicate flow to save it as a new workflow."}
+        </p>
+        <div className="modal-actions">
+          <Button onClick={() => setSaveConflict(null)}>Keep editing</Button>
+          {saveConflict?.current ? (
+            <Button
+              variant="primary"
+              busy={busy === "reload"}
+              onClick={() => {
+                const id = saveConflict.flowId;
+                setBusy("reload");
+                void api
+                  .bootstrap()
+                  .then((latest) => {
+                    const flow = latest.flows.find((item) => item.id === id);
+                    setWorkspace(latest);
+                    if (!flow)
+                      throw new Error(
+                        "The flow was deleted. Your local draft is still available.",
+                      );
+                    draftRef.current = flow;
+                    setDraft(flow);
+                    baseRevisions.current.set(flow.id, flow.revision);
+                    setDirty(false);
+                    setSelected(null);
+                    setIssues([]);
+                    setUndo([]);
+                    setRedo([]);
+                    setSaveConflict(null);
+                  })
+                  .catch(onError)
+                  .finally(() => setBusy(null));
+              }}
+            >
+              Reload latest and discard edits
+            </Button>
+          ) : null}
         </div>
       </Modal>
       <Modal

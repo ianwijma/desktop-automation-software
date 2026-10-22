@@ -4,6 +4,13 @@ import type {
   Json,
   ValidationIssue,
 } from "../shared/types";
+import {
+  hasReference,
+  nodeDefinitions,
+  nodeOutputPorts,
+  type ValidationContext,
+} from "../shared/node-definitions";
+export type { ValidationContext } from "../shared/node-definitions";
 
 export interface ChildSpec {
   flowId: string;
@@ -46,13 +53,17 @@ export function childSpecs(node: FlowNode): ChildSpec[] {
 export function validateFlow(
   flow: FlowDefinition,
   flows: FlowDefinition[] = [flow],
+  context?: ValidationContext,
 ): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const error = (message: string, nodeId?: string) =>
     issues.push({ severity: "error", message, ...(nodeId ? { nodeId } : {}) });
-  if (flow.schemaVersion !== 1) error("Unsupported workflow schema version");
-  if (flow.nodes.length > 10000)
-    error("A workflow cannot contain more than 10000 nodes");
+  if (![1, 2].includes(flow.schemaVersion))
+    error("Unsupported workflow schema version");
+  if (flow.nodes.length > 2000)
+    error("A workflow cannot contain more than 2000 nodes");
+  if (flow.edges.length > 4000)
+    error("A workflow cannot contain more than 4000 edges");
   const nodes = new Map(flow.nodes.map((node) => [node.id, node]));
   if (nodes.size !== flow.nodes.length) error("Node IDs must be unique");
   if (new Set(flow.edges.map((edge) => edge.id)).size !== flow.edges.length)
@@ -69,12 +80,9 @@ export function validateFlow(
     }
     const from = nodes.get(edge.source)!;
     const port = edge.port || "next";
-    const allowed =
-      from.kind === "condition"
-        ? ["true", "false", "error"]
-        : from.kind === "detect"
-          ? ["match", "no-match", "uncertain", "next", "error"]
-          : ["next", "error"];
+    const allowed = Object.hasOwn(nodeDefinitions, from.kind)
+      ? nodeOutputPorts(from.kind)
+      : [];
     if (!allowed.includes(port))
       error(`Unsupported ${from.kind} output port: ${port}`, from.id);
     if (from.kind === "end")
@@ -90,6 +98,46 @@ export function validateFlow(
     outgoing.get(edge.source)!.set(port, edge.target);
   }
   for (const node of flow.nodes) {
+    if (!Object.hasOwn(nodeDefinitions, node.kind)) {
+      error(`Unknown node kind: ${node.kind}`, node.id);
+      continue;
+    }
+    if (
+      !node.config ||
+      typeof node.config !== "object" ||
+      Array.isArray(node.config)
+    ) {
+      error("Node configuration must be an object", node.id);
+      continue;
+    }
+    for (const issue of nodeDefinitions[node.kind].validateConfig(
+      node.config,
+      context,
+    ))
+      issues.push({ ...issue, nodeId: node.id });
+    validateReferences(
+      node.config,
+      nodes,
+      (message) => error(message, node.id),
+      node.kind === "loop",
+    );
+    const detection =
+      typeof node.config.detection === "string"
+        ? /^\$\{nodes\.([^.{}]+)\}$/.exec(node.config.detection)
+        : null;
+    if (detection && ["click", "move"].includes(node.kind)) {
+      const source = nodes.get(detection[1]);
+      const sourceTarget = source?.config?.targetId;
+      const target = node.config.targetId;
+      if (
+        sourceTarget &&
+        target &&
+        !hasReference(sourceTarget) &&
+        !hasReference(target) &&
+        sourceTarget !== target
+      )
+        error("Detected location and action must use the same target", node.id);
+    }
     const ports = outgoing.get(node.id);
     if (node.kind !== "end" && !ports?.size)
       error("Node needs an outgoing connection", node.id);
@@ -129,9 +177,10 @@ export function validateFlow(
           if (!flows.some((candidate) => candidate.id === spec.flowId))
             error(`Child workflow not found: ${spec.flowId}`, node.id);
           if (
-            !spec.inputs ||
-            Array.isArray(spec.inputs) ||
-            typeof spec.inputs !== "object"
+            !hasReference(spec.inputs) &&
+            (!spec.inputs ||
+              Array.isArray(spec.inputs) ||
+              typeof spec.inputs !== "object")
           )
             error("Child inputs must be an object", node.id);
         }
@@ -139,51 +188,8 @@ export function validateFlow(
         error((cause as Error).message, node.id);
       }
     }
-    if (node.kind === "group") {
-      if (
-        node.config.mode !== undefined &&
-        !["sequence", "pool", "batches"].includes(String(node.config.mode))
-      )
-        error("Unknown group execution mode", node.id);
-      const count = node.config.concurrency ?? 3;
-      if (
-        typeof count !== "number" ||
-        !Number.isInteger(count) ||
-        count < 1 ||
-        count > 64
-      )
-        error("Concurrency must be between 1 and 64", node.id);
-    }
-    if (node.kind === "loop") {
-      const limit = node.config.maxIterations ?? 1000;
-      if (
-        typeof limit !== "number" ||
-        !Number.isInteger(limit) ||
-        limit < 1 ||
-        limit > 10000
-      )
-        error("Loop maxIterations must be between 1 and 10000", node.id);
-      if (node.config.items === undefined && node.config.count === undefined)
-        error("Loop requires count or items", node.id);
-      const count = node.config.count;
-      if (
-        count !== undefined &&
-        typeof count !== "string" &&
-        (typeof count !== "number" ||
-          !Number.isInteger(count) ||
-          count < 0 ||
-          count > Number(limit))
-      )
-        error("Loop count exceeds its bound", node.id);
-    }
-    if (
-      node.config.timeoutMs !== undefined &&
-      (typeof node.config.timeoutMs !== "number" ||
-        node.config.timeoutMs <= 0 ||
-        !Number.isFinite(node.config.timeoutMs))
-    )
-      error("Timeout must be positive milliseconds", node.id);
   }
+  validateReferences(flow.outputs, nodes, error);
   const reached = new Set<string>();
   const stack = new Set<string>();
   const walk = (id: string) => {
@@ -228,6 +234,7 @@ export function validateFlow(
 export function freezeFlowTree(
   flowId: string,
   available: FlowDefinition[],
+  context?: ValidationContext,
 ): ReadonlyMap<string, FlowDefinition> {
   const all = new Map(available.map((flow) => [flow.id, flow]));
   const selected = new Map<string, FlowDefinition>();
@@ -235,7 +242,7 @@ export function freezeFlowTree(
     if (selected.has(id)) return;
     const flow = all.get(id);
     if (!flow) throw new Error(`Workflow not found: ${id}`);
-    const errors = validateFlow(flow, available).filter(
+    const errors = validateFlow(flow, available, context).filter(
       (issue) => issue.severity === "error",
     );
     if (errors.length)
@@ -248,6 +255,54 @@ export function freezeFlowTree(
   };
   visit(flowId);
   return selected;
+}
+
+function validateReferences(
+  value: Json,
+  nodes: ReadonlyMap<string, FlowNode>,
+  error: (message: string) => void,
+  loop = false,
+  path: string[] = [],
+): void {
+  if (typeof value === "string") {
+    const pattern = /\$\{([^{}]+)\}/g;
+    for (const match of value.matchAll(pattern)) {
+      const parts = match[1].trim().split(".");
+      if (
+        parts.some(
+          (part) =>
+            !part || ["__proto__", "prototype", "constructor"].includes(part),
+        )
+      ) {
+        error(`Unsafe or invalid reference: ${match[1]}`);
+        continue;
+      }
+      const root = parts[0];
+      if (!["inputs", "vars", "nodes", "item", "index"].includes(root))
+        error(`Unknown reference root: ${root}`);
+      else if (root === "nodes" && parts[1] && !nodes.has(parts[1]))
+        error(`Reference points to a missing node: ${parts[1]}`);
+      else if (
+        (root === "item" || root === "index") &&
+        !(loop && path[0] === "inputs")
+      )
+        error(
+          `${root} references are only available in Loop inputs; use inputs.${root} inside the child flow`,
+        );
+      else if (root === "index" && parts.length !== 1)
+        error("Loop index is a number and cannot have a property path");
+    }
+    if (value.replace(pattern, "").includes("${"))
+      error(
+        "Malformed reference; use ${inputs.name}, ${vars.name} or ${nodes.nodeId}",
+      );
+  } else if (value && typeof value === "object") {
+    for (const [key, child] of Object.entries(value)) {
+      if (["__proto__", "prototype", "constructor"].includes(key))
+        error(`Unsafe property: ${key}`);
+      validateReferences(child, nodes, error, loop, [...path, key]);
+    }
+  }
 }
 
 function deepFreeze<T>(value: T): T {

@@ -27,6 +27,43 @@ try {
   assert.equal(initial.flows.length, 3);
   assert.equal(initial.connections.length, 0);
   assert.equal(initial.keys, undefined);
+  const revisionFixture = {
+    ...initial.flows[0],
+    id: "revision-conflict-smoke",
+    name: "Revision fixture",
+  };
+  const createdFlow = await page.evaluate(
+    (flow) => window.relay.saveFlow(flow, { expectedRevision: null }),
+    revisionFixture,
+  );
+  assert.equal(createdFlow.status, "saved");
+  assert.equal(createdFlow.flow.schemaVersion, 2);
+  const updatedFlow = await page.evaluate(
+    (flow) =>
+      window.relay.saveFlow(
+        { ...flow, name: "Saved revision" },
+        { expectedRevision: flow.revision },
+      ),
+    createdFlow.flow,
+  );
+  assert.equal(updatedFlow.status, "saved");
+  const conflict = await page.evaluate(
+    (flow) =>
+      window.relay.saveFlow(
+        { ...flow, name: "Stale edit" },
+        { expectedRevision: flow.revision },
+      ),
+    createdFlow.flow,
+  );
+  assert.equal(conflict.status, "conflict");
+  assert.equal(conflict.current.name, "Saved revision");
+  await page.evaluate(() => window.relay.deleteFlow("revision-conflict-smoke"));
+  const deletedConflict = await page.evaluate(
+    (flow) => window.relay.saveFlow(flow, { expectedRevision: flow.revision }),
+    updatedFlow.flow,
+  );
+  assert.equal(deletedConflict.status, "conflict");
+  assert.equal(deletedConflict.current, undefined);
   const aiFixture = {
     id: "provider-switch-smoke",
     name: "Provider switch fixture",
@@ -228,7 +265,11 @@ try {
         { id: "two", source: "click", target: "end" },
       ],
     };
-    await page.evaluate((flow) => window.relay.saveFlow(flow), detectedClick);
+    const savedClick = await page.evaluate(
+      (flow) => window.relay.saveFlow(flow, { expectedRevision: null }),
+      detectedClick,
+    );
+    assert.equal(savedClick.status, "saved");
     await waitRun(
       (await page.evaluate(() => window.relay.runFlow("detected-click-smoke")))
         .id,
@@ -306,6 +347,7 @@ try {
           "IPC isolation",
           "SQLite bootstrap",
           "provider credential isolation",
+          "revision conflicts and deleted-flow protection",
           "real welcome execution",
           "12-child fixed batch",
           "theme switching",
