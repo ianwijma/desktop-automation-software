@@ -375,6 +375,11 @@ function App() {
   };
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
+      if (
+        event.target instanceof HTMLElement &&
+        event.target.closest('[role="dialog"]')
+      )
+        return;
       const editing =
         event.target instanceof HTMLElement &&
         (event.target.matches("input,textarea,select") ||

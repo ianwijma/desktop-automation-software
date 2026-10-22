@@ -3,6 +3,7 @@ import {
   useState,
   type ReactNode,
   type ButtonHTMLAttributes,
+  type RefObject,
 } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
@@ -42,7 +43,7 @@ export function IconButton({
   return (
     <button
       {...props}
-      type="button"
+      type={props.type ?? "button"}
       className={`icon-button ${props.className ?? ""}`}
       title={label}
       aria-label={label}
@@ -58,6 +59,7 @@ export function Modal({
   description,
   children,
   wide = false,
+  returnFocusRef,
 }: {
   open: boolean;
   onClose: () => void;
@@ -65,6 +67,7 @@ export function Modal({
   description?: string;
   children: ReactNode;
   wide?: boolean;
+  returnFocusRef?: RefObject<HTMLElement | null>;
 }) {
   return (
     <Dialog.Root
@@ -78,6 +81,15 @@ export function Modal({
         <Dialog.Content
           className={`modal ${wide ? "wide" : ""}`}
           aria-describedby={description ? "modal-description" : undefined}
+          onKeyDown={(event) => event.stopPropagation()}
+          onCloseAutoFocus={
+            returnFocusRef
+              ? (event) => {
+                  event.preventDefault();
+                  returnFocusRef.current?.focus();
+                }
+              : undefined
+          }
         >
           <div className="modal-heading">
             <div>

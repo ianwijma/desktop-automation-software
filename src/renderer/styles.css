@@ -3076,3 +3076,246 @@ kbd {
 .child-inputs textarea {
   min-height: 85px;
 }
+
+.value-field {
+  min-width: 0;
+  margin-bottom: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.value-field-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+}
+.value-field-heading .field-label {
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+.value-source-button,
+.value-literal-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  padding: 2px 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: 10px;
+  line-height: 1.4;
+  text-align: left;
+}
+.value-literal-button {
+  color: var(--muted);
+}
+.value-source-button:hover,
+.value-literal-button:hover {
+  color: var(--text);
+}
+.value-type-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.value-type-row .select-wrap {
+  flex: 1;
+  min-width: 0;
+}
+.value-type-row select {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.value-boolean {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.value-boolean input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.value-null {
+  padding: 9px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 5px;
+  color: var(--muted);
+  font: 11px monospace;
+}
+.value-null span {
+  margin-left: 9px;
+  font:
+    10px "DM Sans",
+    sans-serif;
+  color: var(--faint);
+}
+.reference-summary {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  color: var(--accent);
+  font-size: 10px;
+}
+.reference-summary > span:first-of-type {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+.reference-type {
+  display: inline-block;
+  flex-shrink: 0;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--surface-hover);
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 400;
+}
+.reference-warning {
+  display: block;
+  color: var(--warning);
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.structured-value {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  border-left: 2px solid var(--border);
+  padding-left: 9px;
+  min-width: 0;
+}
+.structured-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 3px;
+  min-width: 0;
+}
+.structured-entry > .value-field {
+  flex: 1;
+  margin-bottom: 6px;
+}
+.structured-entry > .icon-button {
+  flex: none;
+  width: 18px;
+  height: 20px;
+  margin-top: -2px;
+  color: var(--faint);
+}
+.structured-new-property {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.structured-new-property input {
+  min-width: 0;
+}
+.structured-new-property .icon-button {
+  flex: none;
+  width: 25px;
+  height: 29px;
+  background: var(--surface-raised);
+  color: var(--accent);
+}
+.structured-add {
+  align-self: flex-start;
+  min-height: 26px;
+  padding: 5px 8px;
+  font-size: 10px;
+}
+.structured-value .field {
+  margin: 0;
+}
+.node-reference {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: -3px 0 15px;
+}
+.node-reference code {
+  font-size: 10px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+  user-select: all;
+}
+.reference-search {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 15px;
+  color: var(--muted);
+}
+.reference-search input {
+  flex: 1;
+  min-width: 0;
+}
+.reference-results {
+  max-height: min(52vh, 520px);
+  overflow-y: auto;
+  margin: 0 -8px 12px;
+  padding: 0 8px;
+}
+.reference-results section + section {
+  margin-top: 20px;
+}
+.reference-results h4 {
+  margin: 5px 0 9px;
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.reference-option {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  padding: 11px 12px;
+  margin: 6px 0;
+  text-align: left;
+}
+.reference-option:hover,
+.reference-option:focus-visible {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.reference-option-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.reference-option-title strong {
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 500;
+}
+.reference-option code {
+  font-size: 10px;
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+.reference-option small {
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.reference-empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 24px 12px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.value-field [aria-invalid="true"] {
+  border-color: var(--error);
+}

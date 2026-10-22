@@ -27,6 +27,19 @@ try {
   assert.equal(initial.flows.length, 3);
   assert.equal(initial.connections.length, 0);
   assert.equal(initial.keys, undefined);
+  const referenceNode = initial.flows[0].nodes[0];
+  await page
+    .locator(`.react-flow__node[data-id="${referenceNode.id}"]`)
+    .click();
+  await page
+    .getByRole("button", { name: "Copy node reference", exact: true })
+    .click();
+  await page.getByText("Reference copied.", { exact: true }).waitFor();
+  assert.equal(
+    await app.evaluate(({ clipboard }) => clipboard.readText()),
+    "${nodes." + referenceNode.id + "}",
+    "Copy node reference must work in the sandboxed Electron renderer",
+  );
   const revisionFixture = {
     ...initial.flows[0],
     id: "revision-conflict-smoke",
@@ -348,6 +361,7 @@ try {
           "SQLite bootstrap",
           "provider credential isolation",
           "revision conflicts and deleted-flow protection",
+          "node reference clipboard",
           "real welcome execution",
           "12-child fixed batch",
           "theme switching",

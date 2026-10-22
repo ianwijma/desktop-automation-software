@@ -10,6 +10,7 @@ import { mkdir } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
 import { createServer } from "vite";
+import { runReferencePickerSmoke } from "./reference-picker-smoke.mjs";
 
 let url = process.env.RELAY_WEB_URL;
 let server;
@@ -94,9 +95,6 @@ try {
     .getByPlaceholder("Search actions, detectors, logic…")
     .fill("click");
   await page.locator(".palette-item").filter({ hasText: "Click" }).click();
-  await page
-    .getByLabel("Detected result (optional)")
-    .fill("${nodes.detectorId}");
   await page.getByRole("button", { name: "Advanced configuration" }).click();
   const referencedClick = {
     targetId: "",
@@ -141,9 +139,13 @@ try {
   assert.equal(await page.locator(".child-entry").count(), 12);
   await page.locator(".child-inputs summary").first().click();
   await page
-    .locator(".child-entry")
-    .first()
-    .locator("textarea")
+    .getByRole("button", {
+      name: "Edit Inputs for child 1 as JSON",
+      exact: true,
+    })
+    .click();
+  await page
+    .getByLabel("JSON for Inputs for child 1", { exact: true })
     .fill('{"item":42}');
   await page.getByText("Node properties", { exact: true }).click();
   await page.getByRole("button", { name: "Save", exact: true }).click();
@@ -418,6 +420,7 @@ try {
     () => document.documentElement.dataset.theme === "dark",
   );
   await page.screenshot({ path: "test-results/relay-ui-dark.png" });
+  await runReferencePickerSmoke({ browser, url });
   console.log(
     "PASS: editor and references; undo/redo across revisions; child groups; theme/OpenRouter persistence; schedules; preview rejection; cross-tab conflicts; future-schema preservation; committed-save warning recovery with no automatic run; no page errors.",
   );
