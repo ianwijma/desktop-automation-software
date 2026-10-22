@@ -2,6 +2,8 @@
 
 A local desktop automation workbench. Build node graphs, teach actions through a window preview, add visual or AI detectors, and coordinate reusable workflows in sequences, rolling pools, or fixed batches.
 
+The agreed [beta implementation roadmap](docs/beta-roadmap.md) tracks follow-up PRs, including image-capable chat authoring and offline installers. See the [verification matrix](docs/platform-support.md) for implemented capabilities versus tested support.
+
 ## Run locally
 
 Use Node.js 24 or later and a current Rust toolchain.
