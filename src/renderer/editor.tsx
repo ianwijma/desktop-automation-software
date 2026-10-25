@@ -35,6 +35,7 @@ import type {
 } from "../shared/types";
 import { nodeOutputPorts } from "../shared/node-definitions";
 import { catalog, uid, type FieldSpec } from "./catalog";
+import { RecordingWarning } from "./recording-warning";
 import { ValueField } from "./value-field";
 import { ChildInputs, isRecord } from "./child-inputs";
 import { SchemaField } from "./schema-field";
@@ -958,6 +959,10 @@ export function Inspector({
                   references={references}
                 />
               ))}
+            <RecordingWarning
+              config={node.config}
+              onChange={(config) => update({ config })}
+            />
             {supportsBrowserLocator(node.kind, node.config, workspace) ? (
               <BrowserLocatorField
                 kind={node.kind}

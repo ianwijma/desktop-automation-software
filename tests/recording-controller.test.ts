@@ -587,3 +587,62 @@ describe("recording lifecycle", () => {
     );
   });
 });
+
+describe("browser recording flush boundaries", () => {
+  it("persists the owned Stop tail after fencing callbacks, before Pause/Review acknowledges", async () => {
+    const tail = observed("pending text");
+    const f = fixture({ stopDirect: vi.fn(async () => [tail]) });
+    const state = await f.controller.start({
+      ...start,
+      mode: "direct",
+      targetId: "browser",
+    });
+    f.callbacks[0](observed("accepted earlier"));
+    const pending = f.controller.pause(state.sessionId!);
+    f.callbacks[0](observed("late callback"));
+    const paused = await pending;
+    expect(paused.actions.map((action) => action.label)).toEqual([
+      "accepted earlier",
+      "pending text",
+    ]);
+    expect(
+      paused.actions.every((action) => action.config.targetId === "browser"),
+    ).toBe(true);
+    expect(f.saved.at(-1)).toEqual(paused);
+    vi.mocked(f.options.stopDirect).mockResolvedValue([]);
+    await f.controller.resume(state.sessionId!);
+    f.callbacks[0](observed("obsolete epoch"));
+    const reviewed = await f.controller.stop(state.sessionId!);
+    expect(reviewed.actions.map((action) => action.label)).toEqual([
+      "accepted earlier",
+      "pending text",
+    ]);
+  });
+  it("keeps flushed text through a release failure without duplicating it on cleanup retry", async () => {
+    const release = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("release unavailable"))
+      .mockResolvedValue(undefined);
+    const stop = vi
+      .fn()
+      .mockResolvedValueOnce([observed("last unblurred edit")])
+      .mockResolvedValue([]);
+    const f = fixture({ stopDirect: stop, releaseInputs: release });
+    const state = await f.controller.start({
+      ...start,
+      mode: "direct",
+      targetId: "browser",
+    });
+    await expect(f.controller.stop(state.sessionId!)).rejects.toThrow(
+      "cleanup failed",
+    );
+    expect(
+      f.controller.getState().actions.map((action) => action.label),
+    ).toEqual(["last unblurred edit"]);
+    const reviewed = await f.controller.stop(state.sessionId!);
+    expect(reviewed.phase).toBe("review");
+    expect(reviewed.actions.map((action) => action.label)).toEqual([
+      "last unblurred edit",
+    ]);
+  });
+});

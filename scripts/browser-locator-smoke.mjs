@@ -272,9 +272,61 @@ export async function runBrowserLocatorSmoke({
       ).version,
       99,
     );
+    await page.evaluate(() => {
+      const node = window.__locatorQA.flows[0].nodes.find(
+        (node) => node.id === "action",
+      );
+      node.kind = "type";
+      node.config = {
+        targetId: "web",
+        selector: "input",
+        text: "",
+        secret: true,
+        requiresConfiguration: true,
+        recordingWarning:
+          "Password values are omitted. Configure a value before running.",
+      };
+      sessionStorage.setItem(
+        "relay.locator.ui",
+        JSON.stringify(window.__locatorQA),
+      );
+    });
+    await page.reload();
+    await page.locator('.react-flow__node[data-id="action"]').click();
+    await page.getByText("Configure before running", { exact: true }).waitFor();
+    assert.equal(
+      await page
+        .getByRole("button", { name: "Mark as configured", exact: true })
+        .isDisabled(),
+      true,
+    );
+    await page.screenshot({
+      path: join(outputDir, "relay-recording-warning.png"),
+      animations: "disabled",
+    });
+    await fill("Text", "explicitly configured fixture value");
+    await page
+      .getByRole("button", { name: "Mark as configured", exact: true })
+      .click();
+    await save();
+    assert.equal(
+      await page.evaluate(
+        () =>
+          window.__locatorQA.flows[0].nodes.find((node) => node.id === "action")
+            .config.requiresConfiguration,
+      ),
+      false,
+    );
+    assert.deepEqual(
+      await target.evaluate(() => ({
+        focus: document.activeElement?.tagName,
+        value: document.querySelector("input").value,
+      })),
+      initialTarget,
+    );
     assert.deepEqual(errors, []);
     console.log(
-      "PASS: structured locator controls; read-only unique/missing/ambiguous inspection; suggested locator; frame/shadow paths; save/reload; stale-response rejection; unresolved references and future-version preservation.",
+      "PASS: structured locator controls; read-only unique/missing/ambiguous inspection; suggested locator; frame/shadow paths; save/reload; stale-response rejection; unresolved references and future-version preservation; recording configuration warning and explicit acknowledgement without input.",
     );
   } catch (error) {
     await mkdir(outputDir, { recursive: true });

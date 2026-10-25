@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright";
+import { browserRuntime } from "../extension/browser-runtime.js";
 import { BrowserAdapter } from "../src/integrations/browser";
 import type {
   BrowserLocator,
@@ -40,8 +41,14 @@ for (const mode of ["managed", "extension"] as const)
     beforeAll(async () => {
       directory = await mkdtemp(path.join(tmpdir(), "relay-locators-"));
       let port = 0;
+      const coverageHtml = await readFile(
+        new URL("./fixtures/browser-recording.html", import.meta.url),
+        "utf8",
+      );
       server = createServer((request, response) => {
         response.setHeader("Content-Type", "text/html");
+        if (request.url?.startsWith("/coverage"))
+          return response.end(coverageHtml);
         if (request.url?.startsWith("/frame"))
           return response.end(
             '<!doctype html><button onclick="document.body.dataset.clicked=\'yes\'">Frame action</button><label>Frame name<input id="frame-name"></label><div id="inner-host"></div><script>document.querySelector("#inner-host").attachShadow({mode:"open"}).innerHTML=`<label>Deep name<input data-qa="deep-input"></label>`</script>',
@@ -448,5 +455,429 @@ for (const mode of ["managed", "extension"] as const)
         .click();
       await page.waitForTimeout(100);
       expect(actions).toHaveLength(8);
+    });
+    it("records and replays the broader interaction fixture with equivalent normalized actions", async () => {
+      await adapter.execute(
+        "navigate",
+        { url: `${new URL(target.url!).origin}/coverage` },
+        target,
+      );
+      await page.bringToFront();
+      const actions: RecordedAction[] = [];
+      await adapter.startRecording(target, (action) => actions.push(action));
+      await page.locator("#text").pressSequentially("first");
+      await page
+        .locator("#text")
+        .press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+      await page.locator("#text").pressSequentially("replacement");
+      await page
+        .context()
+        .grantPermissions(["clipboard-read", "clipboard-write"]);
+      await page.evaluate(() => navigator.clipboard.writeText(" pasted"));
+      await page
+        .locator("#text")
+        .press(process.platform === "darwin" ? "Meta+V" : "Control+V");
+      await page.locator("#multi").fill("line one\nline two");
+      await page.locator("#rich").fill("Rich content");
+      await page.locator("#ime").focus();
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send("Input.imeSetComposition", {
+        text: "に",
+        selectionStart: 1,
+        selectionEnd: 1,
+      });
+      await cdp.send("Input.imeSetComposition", {
+        text: "日本",
+        selectionStart: 2,
+        selectionEnd: 2,
+      });
+      await cdp.send("Input.insertText", { text: "日本語" });
+      await cdp.detach();
+      await page.locator("#enabled").check();
+      await page.locator("#second").check();
+      await page.locator('#options option[value="a"]').click();
+      await page.locator('#options option[value="c"]').click({
+        modifiers: [process.platform === "darwin" ? "Meta" : "Control"],
+      });
+      await page.locator("#double").dblclick();
+      await page.locator("#right").click({ button: "right" });
+      await page.locator("#middle").click({ button: "middle" });
+      await page.locator("#modified").click({ modifiers: ["Control"] });
+      await page.locator("#modified").focus();
+      await page.keyboard.down("Control");
+      await page.keyboard.down("Shift");
+      await page.keyboard.down("K");
+      await page.keyboard.up("K");
+      await page.keyboard.up("Shift");
+      await page.keyboard.up("Control");
+      await page.locator("#scrollbox").hover();
+      await page.mouse.wheel(0, 200);
+      await expect
+        .poll(() =>
+          page.locator("#scrollbox").evaluate((element) => element.scrollTop),
+        )
+        .toBeGreaterThan(0);
+      const source = (await page.locator("#source").boundingBox())!,
+        drop = (await page.locator("#drop").boundingBox())!;
+      await page.mouse.move(
+        source.x + source.width / 2,
+        source.y + source.height / 2,
+      );
+      await page.mouse.down();
+      await page.mouse.move(drop.x + drop.width / 2, drop.y + drop.height / 2, {
+        steps: 12,
+      });
+      await page.mouse.up();
+      actions.push(...(await adapter.stopRecording()));
+      const expected = await page.evaluate(() => (window as any).snapshot());
+      expect(expected).toMatchObject({
+        text: "replacement pasted",
+        ime: "日本語",
+        enabled: true,
+        choice: "second",
+        selected: ["a", "c"],
+        double: 1,
+        right: 1,
+        middle: 1,
+        modified: 1,
+        shortcut: 1,
+        keyHeld: false,
+        drag: 1,
+      });
+      const types = actions.filter((action) => action.kind === "type");
+      expect(types).toHaveLength(4);
+      expect(types.map((action) => action.config.text)).toEqual([
+        "replacement pasted",
+        "line one\nline two",
+        "Rich content",
+        "日本語",
+      ]);
+      expect(
+        actions.filter(
+          (action) =>
+            action.kind === "click" && action.config.checked !== undefined,
+        ),
+      ).toHaveLength(2);
+      expect(
+        actions.filter((action) => action.config.clickCount === 2),
+      ).toHaveLength(1);
+      expect(actions.filter((action) => action.kind === "drag")).toHaveLength(
+        1,
+      );
+      expect(
+        actions.some((action) => action.config.requiresConfiguration),
+      ).toBe(false);
+      const normalized = actions.map(({ kind, config }) => ({
+        kind,
+        config: Object.fromEntries(
+          Object.entries(config).filter(
+            ([key]) =>
+              !["targetId", "durationMs", "fromOffset", "toOffset"].includes(
+                key,
+              ),
+          ),
+        ),
+      }));
+      recordedByMode.set(`${mode}-coverage`, normalized);
+      if (mode === "extension")
+        expect(normalized).toEqual(recordedByMode.get("managed-coverage"));
+      await page.reload();
+      for (const action of actions)
+        await adapter.execute(action.kind, action.config, target);
+      await expect
+        .poll(() => page.evaluate(() => (window as any).snapshot()))
+        .toEqual(expected);
+      // Checked-state replay is idempotent, rather than a second toggle.
+      for (const action of actions.filter(
+        (action) => action.config.checked !== undefined,
+      ))
+        await adapter.execute(action.kind, action.config, target);
+      expect(await page.locator("#enabled").isChecked()).toBe(true);
+      await page
+        .locator("#enabled")
+        .evaluate((element) =>
+          element.addEventListener("click", (event) => event.preventDefault()),
+        );
+      await expect(
+        adapter.execute(
+          "click",
+          {
+            locator: locator({ kind: "id", value: "enabled" }),
+            checked: false,
+            timeoutMs: 150,
+          },
+          target,
+        ),
+      ).rejects.toThrow(/checked|state/i);
+      expect(await page.locator("#enabled").isChecked()).toBe(true);
+    }, 30000);
+    it("returns pending text and held-key releases on Stop without retaining passwords or files", async () => {
+      await adapter.execute(
+        "navigate",
+        { url: `${new URL(target.url!).origin}/coverage` },
+        target,
+      );
+      const actions: RecordedAction[] = [];
+      await adapter.startRecording(target, (action) => actions.push(action));
+      await page.locator("#private").fill("private-value-never-export");
+      const chooser = page.waitForEvent("filechooser");
+      await page.locator("#file").click();
+      await (
+        await chooser
+      ).setFiles({
+        name: "private-file.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from("private-file-bytes"),
+      });
+      await page.locator("#text").pressSequentially("last edit without blur");
+      actions.push(...(await adapter.stopRecording()));
+      expect(actions.at(-1)).toMatchObject({
+        kind: "type",
+        config: { text: "last edit without blur" },
+      });
+      expect(JSON.stringify(actions)).not.toMatch(
+        /private-value-never-export|private-file-bytes|private-file.txt/,
+      );
+      const blocked = actions.filter(
+        (action) => action.config.requiresConfiguration,
+      );
+      expect(blocked).toHaveLength(2);
+      for (const action of blocked)
+        await expect(
+          adapter.execute(action.kind, action.config, target),
+        ).rejects.toThrow(/omitted|not recorded/);
+      const count = actions.length;
+      await page.locator("#text").fill("after stop");
+      expect(actions).toHaveLength(count);
+    });
+    it("records and replays document navigation and an owned popup without duplicate navigation or closing the return tab", async () => {
+      const url = `${new URL(target.url!).origin}/coverage`;
+      await adapter.execute("navigate", { url }, target);
+      const actions: RecordedAction[] = [];
+      await adapter.startRecording(target, (action) => actions.push(action));
+      const sessionId = (adapter as any).installedRecording.id;
+      const ready = async (candidate: Page) => {
+        await expect
+          .poll(
+            async () => {
+              if (mode === "managed")
+                return candidate
+                  .evaluate(
+                    (id) => (window as any).__relayRecorder?.recordingId === id,
+                    sessionId,
+                  )
+                  .catch(() => false);
+              return context!.serviceWorkers()[0].evaluate(
+                async ({ url, id }) => {
+                  const api = (globalThis as any).chrome;
+                  const tabs = (await api.tabs.query({})).filter(
+                    (tab: any) => tab.url === url,
+                  );
+                  if (tabs.length !== 1) return false;
+                  try {
+                    const source = { tabId: tabs[0].id };
+                    const tree = await api.debugger.sendCommand(
+                      source,
+                      "Page.getFrameTree",
+                    );
+                    const world = await api.debugger.sendCommand(
+                      source,
+                      "Page.createIsolatedWorld",
+                      {
+                        frameId: tree.frameTree.frame.id,
+                        worldName: "Relay locator inspection",
+                      },
+                    );
+                    const result = await api.debugger.sendCommand(
+                      source,
+                      "Runtime.evaluate",
+                      {
+                        contextId: world.executionContextId,
+                        expression: `window.__relayRecorder?.recordingId === ${JSON.stringify(id)}`,
+                        returnByValue: true,
+                      },
+                    );
+                    return Boolean(result.result.value);
+                  } catch {
+                    return false;
+                  }
+                },
+                { url: candidate.url(), id: sessionId },
+              );
+            },
+            { timeout: 10000 },
+          )
+          .toBe(true);
+      };
+      await page.locator("#text").fill("before navigation");
+      await page.locator("#navigate").click();
+      await page.waitForURL(`${url}?next=1`);
+      await ready(page);
+      await page.locator("#text").fill("popup parent");
+      const created = page.waitForEvent("popup");
+      await page.locator("#popup").click();
+      const child = await created;
+      await child.waitForLoadState();
+      await ready(child);
+      await child.locator("#text").fill("child value");
+      await page.bringToFront();
+      await page.locator("#text").fill("parent while popup open");
+      await expect
+        .poll(
+          () =>
+            actions.filter(
+              (action) =>
+                action.kind === "tab" && action.config.action === "switch",
+            ).length,
+        )
+        .toBe(2);
+      await child.bringToFront();
+      await child.locator("#close").focus();
+      await expect
+        .poll(
+          () =>
+            actions.filter(
+              (action) =>
+                action.kind === "tab" && action.config.action === "switch",
+            ).length,
+        )
+        .toBe(3);
+      await child.locator("#close").click();
+      await expect.poll(() => child.isClosed()).toBe(true);
+      await ready(page);
+      await page.locator("#text").fill("after popup");
+      actions.push(...(await adapter.stopRecording()));
+      expect(
+        actions
+          .filter((action) => action.kind === "type")
+          .map((action) => action.config.text),
+      ).toEqual([
+        "before navigation",
+        "popup parent",
+        "child value",
+        "parent while popup open",
+        "after popup",
+      ]);
+      expect(
+        actions.filter((action) => action.kind === "navigate"),
+      ).toHaveLength(1);
+      expect(
+        actions.filter(
+          (action) =>
+            action.kind === "tab" && action.config.action === "switch",
+        ),
+      ).toHaveLength(3);
+      expect(
+        actions.filter(
+          (action) => action.kind === "tab" && action.config.action === "close",
+        ),
+      ).toHaveLength(1);
+      expect(actions.at(-1)).toMatchObject({
+        kind: "type",
+        config: { text: "after popup" },
+      });
+      const normalized = actions.map(({ kind, config }) => ({
+        kind,
+        config: JSON.parse(
+          JSON.stringify(config).replaceAll(new URL(url).origin, "ORIGIN"),
+        ),
+      }));
+      recordedByMode.set(`${mode}-navigation`, normalized);
+      if (mode === "extension")
+        expect(normalized).toEqual(recordedByMode.get("managed-navigation"));
+      await page.goto(url);
+      for (const action of actions)
+        await adapter.execute(action.kind, action.config, target);
+      expect(page.isClosed()).toBe(false);
+      expect(await page.locator("#text").inputValue()).toBe("after popup");
+      expect(
+        page
+          .context()
+          .pages()
+          .filter((candidate) => candidate.url().includes("popup=1")),
+      ).toHaveLength(0);
+    }, 30000);
+    it("flushes text before same-document navigation and releases held keys in the Stop tail", async () => {
+      const url = `${new URL(target.url!).origin}/coverage`;
+      await adapter.execute("navigate", { url }, target);
+      const actions: RecordedAction[] = [];
+      await adapter.startRecording(target, (action) => actions.push(action));
+      await page.locator("#text").fill("before history");
+      await page.locator("#history").click();
+      await expect
+        .poll(() => actions.some((action) => action.kind === "navigate"))
+        .toBe(true);
+      expect(actions.slice(0, 3).map((action) => action.kind)).toEqual([
+        "type",
+        "click",
+        "navigate",
+      ]);
+      await page.locator("#modified").focus();
+      await page.keyboard.down("Control");
+      await page.keyboard.down("Shift");
+      await page.keyboard.down("K");
+      actions.push(...(await adapter.stopRecording()));
+      await page.keyboard.up("K");
+      await page.keyboard.up("Shift");
+      await page.keyboard.up("Control");
+      expect(actions.slice(-2).map((action) => action.config.action)).toEqual([
+        "down",
+        "up",
+      ]);
+      await page.goto(url);
+      for (const action of actions)
+        await adapter.execute(action.kind, action.config, target);
+      expect(page.url()).toBe(`${url}?history=1`);
+      expect(await page.locator("#text").inputValue()).toBe("before history");
+      expect(
+        await page.evaluate(() => (window as any).snapshot().keyHeld),
+      ).toBe(false);
+    });
+    it("recovers a lost Stop reply and flags composition interrupted by Stop", async () => {
+      const url = `${new URL(target.url!).origin}/coverage`;
+      await adapter.execute("navigate", { url }, target);
+      const actions: RecordedAction[] = [];
+      await adapter.startRecording(target, (action) => actions.push(action));
+      await page.locator("#text").fill("pending receipt");
+      const id = (adapter as any).installedRecording.id;
+      const lost =
+        mode === "managed"
+          ? await page.evaluate(browserRuntime, {
+              operation: "record",
+              recordingId: null,
+              expectedRecordingId: id,
+            })
+          : await (adapter as any).extension("recordStop", target, undefined, {
+              recordingId: id,
+            });
+      expect(lost).toHaveLength(1);
+      const retried = await adapter.stopRecording();
+      expect(retried).toHaveLength(1);
+      expect(retried[0].id).toBe(lost[0].id);
+      expect(retried[0].config.text).toBe("pending receipt");
+      expect(await adapter.stopRecording()).toEqual([]);
+      await adapter.startRecording(target, (action) => actions.push(action));
+      await page.locator("#ime").focus();
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send("Input.imeSetComposition", {
+        text: "編集中",
+        selectionStart: 3,
+        selectionEnd: 3,
+      });
+      const interrupted = await adapter.stopRecording();
+      expect(interrupted).toHaveLength(1);
+      expect(interrupted[0]).toMatchObject({
+        kind: "type",
+        config: { requiresConfiguration: true, text: "編集中" },
+      });
+      await expect(
+        adapter.execute(interrupted[0].kind, interrupted[0].config, target),
+      ).rejects.toThrow(/Composition/);
+      await cdp.send("Input.imeSetComposition", {
+        text: "",
+        selectionStart: 0,
+        selectionEnd: 0,
+      });
+      await cdp.detach();
     });
   });

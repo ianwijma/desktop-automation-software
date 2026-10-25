@@ -456,7 +456,22 @@ export class NativeAdapter {
       if (kind === "close") this.bindings.delete(target.id);
       return result;
     }
-    if (config.selector || config.locator)
+    if (config.requiresConfiguration)
+      throw new Error(
+        String(
+          config.recordingWarning ??
+            "Configure this recorded step before running",
+        ),
+      );
+    if (
+      config.selector ||
+      config.locator ||
+      config.toLocator ||
+      config.checked !== undefined ||
+      config.scrollTop !== undefined ||
+      config.scrollLeft !== undefined ||
+      config.modifiers
+    )
       throw new Error(
         "Native accessibility selectors are not implemented; use a visual detector or window-relative coordinates",
       );

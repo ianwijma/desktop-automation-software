@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { browserLocatorSchema } from "../src/shared/browser-locators";
 import { nodeDefinitions } from "../src/shared/node-definitions";
 import { setWaitMode, updateNodeConfig } from "../src/shared/node-authoring";
-import type { BrowserLocator } from "../src/shared/types";
+import type { BrowserLocator, Json, NodeKind } from "../src/shared/types";
 const locator: BrowserLocator = {
   version: 1,
   selector: { kind: "role", role: "button", name: "Save" },
@@ -96,5 +96,70 @@ describe("browser locator contracts", () => {
     expect(changed.locator).toBeUndefined();
     expect(changed.custom).toEqual({ keep: true });
     expect(config.locator).toEqual(locator);
+  });
+  it("validates replay states and destination locators while retaining typed multi-select values", () => {
+    const cases: [NodeKind, Record<string, Json>][] = [
+      [
+        "click",
+        { locator, checked: true, modifiers: ["Shift"], clickCount: 2 },
+      ],
+      [
+        "drag",
+        {
+          locator,
+          toLocator: locator,
+          fromOffset: { x: 0.5, y: 0.5 },
+          toOffset: { x: 0.25, y: 0.75 },
+        },
+      ],
+      ["scroll", { locator, scrollTop: 240, scrollLeft: 0 }],
+      ["select", { locator, value: ["a", "b"] }],
+    ];
+    for (const [kind, config] of cases)
+      expect(
+        nodeDefinitions[kind]
+          .validateConfig({ ...config, targetId: "browser" }, context)
+          .filter((issue) => issue.severity === "error"),
+      ).toEqual([]);
+    const invalid: Record<string, Json>[] = [
+      { checked: "yes" },
+      { checked: true },
+      { modifiers: ["Other"] },
+      { toLocator: { version: 99 } },
+      { fromOffset: { x: 2, y: 0 } },
+    ];
+    for (const config of invalid)
+      expect(
+        nodeDefinitions.click
+          .validateConfig(config)
+          .some((issue) => issue.severity === "error"),
+      ).toBe(true);
+    expect(
+      nodeDefinitions.select
+        .validateConfig({ value: [5] })
+        .some((issue) => issue.severity === "error"),
+    ).toBe(true);
+  });
+  it("blocks manual-configuration markers until explicitly acknowledged", () => {
+    const config = {
+      targetId: "browser",
+      locator,
+      text: "",
+      requiresConfiguration: true,
+      recordingWarning: "Configure omitted password",
+    };
+    expect(
+      nodeDefinitions.type
+        .validateConfig(config, context)
+        .some((issue) => issue.message.includes("omitted password")),
+    ).toBe(true);
+    expect(
+      nodeDefinitions.type
+        .validateConfig(
+          { ...config, text: "configured", requiresConfiguration: false },
+          context,
+        )
+        .filter((issue) => issue.severity === "error"),
+    ).toEqual([]);
   });
 });

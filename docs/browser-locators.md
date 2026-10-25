@@ -22,7 +22,7 @@ Names use normalized whitespace and common HTML sources: `aria-labelledby`, `ari
 
 Recording tries unique test attributes, role/name, labels, IDs, then a unique CSS path. It stores explicit frame and shadow scopes. A test attribute or meaningful label remains stable when CSS classes change; a generated positional CSS path can break when the DOM structure changes. Review the locator and test it before running the flow. Password text is omitted and must be configured separately.
 
-B01 shares the existing basic click, change-to-text/select, and Enter/Tab/Escape extraction. It does not complete the broader event coverage in B02: composition/paste flushing, click variants, checkbox/radio state normalization, drag/scroll recording, navigation/tab changes, and shortcut coalescing still need their own acceptance work. Guided preview coordinates remain coordinate actions.
+B02 extends the shared extractor with coalesced text/paste/composition, stateful controls, click variants, shortcuts, scrolls, ordinary pointer drags, main-document navigation, and owned popup tabs. See [browser recording coverage](browser-recording.md) for supported interactions and limits. Guided preview coordinates remain coordinate actions.
 
 ## Stored representation and compatibility
 

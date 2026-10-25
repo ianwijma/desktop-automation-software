@@ -19,6 +19,7 @@ export const recordableKinds = [
   "navigate",
   "read",
   "select",
+  "tab",
 ] as const;
 
 export const emptyRecording = (): RecordingState => ({

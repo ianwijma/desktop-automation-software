@@ -629,10 +629,23 @@ try {
     path: "test-results/relay-recording-inserted.png",
   });
   // B01 checks the actual locator inspection IPC and graph preflight/runtime path.
-  locatorServer = createServer((_request, response) => {
+  const browserCommands = [];
+  let browserInputAcks = 0;
+  locatorServer = createServer((request, response) => {
+    const url = new URL(request.url, "http://127.0.0.1");
+    if (url.pathname === "/record-command") {
+      response.setHeader("Content-Type", "application/json");
+      response.end(JSON.stringify(browserCommands.shift() ?? null));
+      return;
+    }
+    if (url.pathname === "/record-ack") {
+      browserInputAcks++;
+      response.end("ok");
+      return;
+    }
     response.setHeader("Content-Type", "text/html");
     response.end(
-      `<!doctype html><button data-testid="run">Run task</button><button>Other</button><iframe id="pane" srcdoc="<button data-testid=run onclick=&quot;document.querySelector('#result').textContent='Clicked'&quot;>Run task</button><p id=result>waiting</p>"></iframe>`,
+      `<!doctype html><button data-testid="run">Run task</button><button>Other</button><label>Recorded text<input id="record-text"></label><script>setInterval(async()=>{const command=await(await fetch('/record-command')).json();if(command){const input=document.querySelector('#record-text');input.focus();input.setSelectionRange(input.value.length,input.value.length);document.execCommand('insertText',false,command.text);await fetch('/record-ack');}},50)</script><iframe id="pane" srcdoc="<button data-testid=run onclick=&quot;document.querySelector('#result').textContent='Clicked'&quot;>Run task</button><p id=result>waiting</p>"></iframe>`,
     );
   });
   await new Promise((resolve) => locatorServer.listen(0, "127.0.0.1", resolve));
@@ -767,6 +780,50 @@ try {
     (await waitRun(locatorRun.id, insertionPage)).outputs.result,
     "Clicked",
   );
+  // B02 observes real browser editing events and flushes without blur through IPC/SQLite.
+  const browserSession = await insertionPage.evaluate(
+    ({ flow, targetId }) =>
+      window.relay.startRecording({
+        flowId: flow.id,
+        flowRevision: flow.revision,
+        targetId,
+        mode: "direct",
+      }),
+    { flow: savedLocator.flow, targetId: browserTarget.id },
+  );
+  browserCommands.push({ text: "pending at pause" });
+  await expect.poll(() => browserInputAcks, { timeout: 10000 }).toBe(1);
+  const browserPaused = await insertionPage.evaluate(
+    (id) => window.relay.pauseRecording(id),
+    browserSession.sessionId,
+  );
+  assert.equal(browserPaused.phase, "paused");
+  assert.equal(browserPaused.actions.length, 1);
+  assert.equal(browserPaused.actions[0].config.text, "pending at pause");
+  await insertionPage.evaluate(
+    (id) => window.relay.resumeRecording(id),
+    browserSession.sessionId,
+  );
+  browserCommands.push({ text: " after resume" });
+  await expect.poll(() => browserInputAcks, { timeout: 10000 }).toBe(2);
+  const browserReviewed = await insertionPage.evaluate(
+    (id) => window.relay.stopRecording(id),
+    browserSession.sessionId,
+  );
+  assert.equal(browserReviewed.phase, "review");
+  assert.deepEqual(
+    browserReviewed.actions.map((action) => action.config.text),
+    ["pending at pause", "pending at pause after resume"],
+  );
+  assert.deepEqual(
+    (await insertionPage.evaluate(() => window.relay.bootstrap())).recording
+      .actions,
+    browserReviewed.actions,
+  );
+  await insertionPage.evaluate(
+    (state) => window.relay.discardRecording(state.sessionId, state.revision),
+    browserReviewed,
+  );
   assert.deepEqual(errors, [], "Renderer errors");
   console.log(
     JSON.stringify(
@@ -785,6 +842,7 @@ try {
           "theme switching",
           "read-only browser locator inspection IPC",
           "structured frame locators validate, persist and run through the engine",
+          "direct browser pending text flushes on Pause and Stop through IPC/SQLite",
           "recording branch insertion preserves successor and other branch",
           "inserted branch executes through the real engine",
           "recording graph undo/redo saves through revision checks",

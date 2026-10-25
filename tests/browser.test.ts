@@ -76,7 +76,7 @@ describe("managed browser actions", () => {
     const actions: RecordedAction[] = [];
     await browser.startRecording(target, (action) => actions.push(action));
     await browser.execute("click", { selector: "#submit" }, target);
-    await browser.stopRecording();
+    actions.push(...(await browser.stopRecording()));
     expect(
       actions.some(
         (action) =>

@@ -99,11 +99,15 @@ export class BrowserAdapter {
     target: TargetDescriptor;
     callback: (action: RecordedAction) => void;
     page?: Page;
+    pages: Set<Page>;
+    seen: Set<string>;
+    stopTail: Map<string, RecordedAction>;
+    delivery: Promise<unknown>;
   };
   private installedRecording?: BrowserAdapter["recording"];
   private recordingGeneration = 0;
-  private recordingOperation: Promise<void> = Promise.resolve();
-  private recordingInstalls = new Set<Promise<void>>();
+  private recordingOperation: Promise<unknown> = Promise.resolve();
+  private recordingInstalls = new Set<Promise<unknown>>();
   private server?: Server;
   private token = randomBytes(32).toString("hex");
   private port = 0;
@@ -237,19 +241,27 @@ export class BrowserAdapter {
       }
       if (result.action) {
         const recording = this.recording;
+        let accepted = false;
         if (
           recording?.target.browserMode === "extension" &&
           result.recordingId === recording.id
-        )
-          recording.callback({
-            ...result.action,
-            config: {
-              ...result.action.config,
-              targetId: recording.target.id,
-            },
-            id: randomUUID(),
-            at: Date.now(),
-          });
+        ) {
+          accepted = recording.seen.has(result.action.id);
+          if (!accepted) {
+            accepted =
+              (recording.callback({
+                ...result.action,
+                config: {
+                  ...result.action.config,
+                  targetId: recording.target.id,
+                },
+                id: randomUUID(),
+              }) as unknown) !== false;
+            if (accepted) recording.seen.add(result.action.id);
+          }
+        }
+        this.reply(response, 200, { ok: true, accepted });
+        return;
       } else if (result.id) {
         this.cancelled.delete(result.id);
         const pending = this.pending.get(result.id);
@@ -335,24 +347,75 @@ export class BrowserAdapter {
       });
       await context.exposeBinding(
         "relayRecordEvent",
-        (
-          source,
-          event: Omit<RecordedAction, "id"> & { recordingId?: string },
-        ) => {
-          if (
-            this.recording &&
-            this.recording.page === source.page &&
-            event.recordingId === this.recording.id
-          )
-            this.recording.callback({
-              kind: event.kind,
-              label: event.label,
-              at: event.at,
-              config: { ...event.config, targetId: this.recording.target.id },
-              id: randomUUID(),
-            });
+        (source, event: RecordedAction & { recordingId?: string }) => {
+          const recording = this.recording;
+          if (!recording) return false;
+          return this.queueRecordingEvent(recording, async () => {
+            if (
+              this.recording !== recording ||
+              event.recordingId !== recording.id ||
+              !recording.pages.has(source.page)
+            )
+              return false;
+            if (event.kind === "tab") {
+              if (recording.page === source.page || recording.page?.isClosed())
+                return true;
+              if (recording.page)
+                await this.drainManagedRecorder(recording.page, recording);
+              if (this.recording !== recording) return false;
+              recording.page = source.page;
+              this.pages.set(recording.target.id, source.page);
+              event.config = {
+                action: "switch",
+                url: source.page.url(),
+                exact: true,
+                waitForExisting: true,
+              };
+            }
+            if (recording.page !== source.page) return true;
+            if (recording.seen.has(event.id)) return true;
+            const accepted =
+              (recording.callback({
+                kind: event.kind,
+                label: event.label,
+                at: event.at,
+                config: { ...event.config, targetId: recording.target.id },
+                id: randomUUID(),
+              }) as unknown) !== false;
+            if (accepted) recording.seen.add(event.id);
+            return accepted;
+          });
         },
       );
+      context.on("page", (child) => {
+        const recording = this.recording;
+        if (!recording || recording.target.browserMode === "extension") return;
+        void (async () => {
+          const opener = await child.opener();
+          if (
+            !opener ||
+            !recording.pages.has(opener) ||
+            this.recording !== recording
+          )
+            return;
+          recording.pages.add(child);
+          this.watchRecordingPage(child);
+          await this.drainManagedRecorder(opener, recording);
+          await child.waitForLoadState("domcontentloaded");
+          if (this.recording !== recording || child.isClosed()) return;
+          recording.page = child;
+          this.pages.set(recording.target.id, child);
+          recording.callback(
+            this.observedBrowserAction(recording, "tab", "Switch browser tab", {
+              action: "switch",
+              url: child.url(),
+              exact: true,
+              waitForExisting: true,
+            }),
+          );
+          await this.installManagedRecorder(child, recording);
+        })().catch(() => {});
+      });
       this.contexts.set(profileKey, context);
       context.on("close", () => {
         this.contexts.delete(profileKey);
@@ -364,6 +427,67 @@ export class BrowserAdapter {
         .find((page) => ![...this.pages.values()].includes(page)) ??
       (await context.newPage());
     this.pages.set(target.id, page);
+    this.watchRecordingPage(page);
+    if (target.url && page.url() === "about:blank") await page.goto(target.url);
+    return page;
+  }
+  private queueRecordingEvent<T>(
+    recording: NonNullable<BrowserAdapter["recording"]>,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const work = recording.delivery.then(operation);
+    recording.delivery = work.catch(() => {});
+    this.recordingInstalls.add(work);
+    void work
+      .catch(() => {})
+      .finally(() => this.recordingInstalls.delete(work));
+    return work;
+  }
+  private observedBrowserAction(
+    recording: NonNullable<BrowserAdapter["recording"]>,
+    kind: NodeKind,
+    label: string,
+    config: Record<string, Json>,
+  ): RecordedAction {
+    return {
+      id: randomUUID(),
+      at: Date.now(),
+      kind,
+      label,
+      config: { ...config, targetId: recording.target.id },
+    };
+  }
+  private async drainManagedRecorder(
+    page: Page,
+    recording: NonNullable<BrowserAdapter["recording"]>,
+  ) {
+    const operation = (async () => {
+      for (const frame of page.frames()) {
+        const tail = await frame
+          .evaluate(browserRuntime, { operation: "recordFlush" })
+          .catch(() => []);
+        for (const action of tail as RecordedAction[]) {
+          if (recording.seen.has(action.id)) continue;
+          if (
+            this.recording !== recording ||
+            (recording.callback({
+              ...action,
+              config: { ...action.config, targetId: recording.target.id },
+            }) as unknown) === false
+          )
+            recording.stopTail.set(action.id, action);
+          else recording.seen.add(action.id);
+        }
+      }
+    })();
+    this.recordingInstalls.add(operation);
+    try {
+      await operation;
+    } finally {
+      this.recordingInstalls.delete(operation);
+    }
+  }
+  private watchRecordingPage(page: Page) {
     page.on("domcontentloaded", () => {
       const recording = this.recording;
       if (recording?.page === page)
@@ -371,13 +495,48 @@ export class BrowserAdapter {
     });
     page.on("framenavigated", (frame) => {
       const recording = this.recording;
-      if (recording?.page === page && frame !== page.mainFrame())
+      if (recording?.page !== page) return;
+      if (frame !== page.mainFrame())
         void this.installManagedRecorder(page, recording, frame).catch(
           () => {},
         );
+      else if (/^https?:|^file:/.test(frame.url())) {
+        const action = this.observedBrowserAction(
+          recording,
+          "navigate",
+          "Navigate browser",
+          { url: frame.url(), action: "ensure" },
+        );
+        const operation = (async () => {
+          await this.drainManagedRecorder(page, recording);
+          if (this.recording === recording) recording.callback(action);
+        })();
+        this.recordingInstalls.add(operation);
+        void operation
+          .catch(() => {})
+          .finally(() => this.recordingInstalls.delete(operation));
+      }
     });
-    if (target.url && page.url() === "about:blank") await page.goto(target.url);
-    return page;
+    page.on("close", () => {
+      const recording = this.recording;
+      if (!recording?.pages.has(page)) return;
+      void this.queueRecordingEvent(recording, async () => {
+        recording.pages.delete(page);
+        if (this.recording !== recording || recording.page !== page) return;
+        const next = [...recording.pages].find(
+          (candidate) => !candidate.isClosed(),
+        );
+        recording.callback(
+          this.observedBrowserAction(recording, "tab", "Close browser tab", {
+            action: "close",
+            closedUrl: page.url(),
+            ...(next ? { returnUrl: next.url() } : {}),
+          }),
+        );
+        recording.page = next;
+        if (next) this.pages.set(recording.target.id, next);
+      }).catch(() => {});
+    });
   }
   async capture(
     target: TargetDescriptor,
@@ -467,10 +626,12 @@ export class BrowserAdapter {
   }
   private async domPoint(
     scope: Awaited<ReturnType<BrowserAdapter["domScope"]>>,
+    offset?: Json,
   ) {
     const point = await scope.frame.evaluate(browserRuntime, {
       operation: "point",
       ...scope.query,
+      offset: offset as unknown,
     });
     for (const owner of [...scope.owners].reverse()) {
       const geometry = await owner.frame.evaluate(browserRuntime, {
@@ -496,6 +657,14 @@ export class BrowserAdapter {
     ownerId = "interactive",
   ): Promise<Json> {
     if (signal?.aborted) throw new Error("Cancelled");
+    if (config.requiresConfiguration)
+      throw new Error(
+        String(
+          config.recordingWarning ??
+            "Configure this recorded step before running",
+        ),
+      );
+    if (config.toLocator) browserLocatorSchema.parse(config.toLocator);
     if (config.locator) {
       browserLocatorSchema.parse(config.locator);
       if (config.selector)
@@ -558,6 +727,25 @@ export class BrowserAdapter {
         this.held.get(ownerId)?.get(target.id)?.keys.delete(String(config.key));
       return result;
     }
+    if (kind === "tab" && config.action === "close" && config.closedUrl) {
+      const pages = [...this.contexts.values()].flatMap((context) =>
+        context.pages(),
+      );
+      const closing = pages.filter(
+        (candidate) => candidate.url() === config.closedUrl,
+      );
+      if (closing.length > 1) throw new Error("The closing tab is ambiguous");
+      if (!closing.length) {
+        const returns = config.returnUrl
+          ? pages.filter((candidate) => candidate.url() === config.returnUrl)
+          : [];
+        if (config.returnUrl && returns.length !== 1)
+          throw new Error("The return tab is missing or ambiguous");
+        if (returns[0]) this.pages.set(target.id, returns[0]);
+        return true;
+      }
+      this.pages.set(target.id, closing[0]);
+    }
     const page = await this.page(target);
     const abort = () => {
       void page.close().catch(() => {});
@@ -602,11 +790,19 @@ export class BrowserAdapter {
       switch (kind) {
         case "launch":
         case "navigate":
-          if (config.url || target.url)
-            await page.goto(String(config.url ?? target.url), {
-              timeout,
-              waitUntil: "domcontentloaded",
-            });
+          if (config.url || target.url) {
+            const url = String(config.url ?? target.url);
+            if (config.action === "ensure" && page.url() !== url)
+              await page
+                .waitForURL(url, {
+                  timeout: Math.min(timeout, 1000),
+                  waitUntil: "domcontentloaded",
+                })
+                .catch(() => {});
+            if (config.action !== "ensure" || page.url() !== url)
+              await page.goto(url, { timeout, waitUntil: "domcontentloaded" });
+            else await page.waitForLoadState("domcontentloaded", { timeout });
+          }
           return { url: page.url() };
         case "attach":
           return { url: page.url(), title: await page.title() };
@@ -617,36 +813,100 @@ export class BrowserAdapter {
           await page.close();
           this.pages.delete(target.id);
           return true;
-        case "click":
-          if (selector)
-            await selector.click({
-              button,
-              clickCount: Number(config.clickCount ?? 1),
-              timeout,
-            });
-          else
-            await page.mouse.click(x, y, {
-              button,
-              clickCount: Number(config.clickCount ?? 1),
-            });
+        case "click": {
+          const modifiers = Array.isArray(config.modifiers)
+            ? config.modifiers.map(String)
+            : [];
+          try {
+            for (const modifier of modifiers)
+              await page.keyboard.down(modifier);
+            if (typeof config.checked === "boolean") {
+              if (!selector)
+                throw new Error("Checked state requires a browser locator");
+              await frame.evaluate(browserRuntime, {
+                operation: "checked",
+                ...query,
+                checked: config.checked,
+              });
+              await selector.setChecked(config.checked, { timeout });
+            } else if (selector)
+              await selector.click({
+                button,
+                clickCount: Number(config.clickCount ?? 1),
+                timeout,
+              });
+            else
+              await page.mouse.click(x, y, {
+                button,
+                clickCount: Number(config.clickCount ?? 1),
+              });
+          } finally {
+            for (const modifier of [...modifiers].reverse())
+              await page.keyboard.up(modifier).catch(() => {});
+          }
           return true;
+        }
         case "move":
           if (selector) await selector.hover({ timeout });
           else await page.mouse.move(x, y);
           return true;
-        case "drag":
-          const start = selector ? await this.domPoint(scope) : { x, y };
+        case "drag": {
+          const start = selector
+            ? await this.domPoint(scope, config.fromOffset)
+            : { x, y };
+          let end = { x: Number(config.toX), y: Number(config.toY) };
+          if (config.toLocator) {
+            const destination = await this.domScope(page, {
+              locator: config.toLocator,
+            });
+            try {
+              end = await this.domPoint(destination, config.toOffset);
+            } finally {
+              await Promise.all(
+                destination.owners.map((owner) =>
+                  owner.element.dispose().catch(() => {}),
+                ),
+              );
+            }
+            const current = await this.domPoint(scope, config.fromOffset);
+            if (
+              Math.abs(current.x - start.x) > 1 ||
+              Math.abs(current.y - start.y) > 1
+            )
+              throw new Error(
+                "Both drag endpoints must remain visible in the viewport",
+              );
+          }
           await page.mouse.move(start.x, start.y);
           await page.mouse.down({ button });
           try {
-            await page.mouse.move(Number(config.toX), Number(config.toY), {
-              steps: 20,
-            });
+            const duration = Math.min(120000, Number(config.durationMs ?? 200));
+            for (let step = 1; step <= 20; step++) {
+              await page.mouse.move(
+                start.x + ((end.x - start.x) * step) / 20,
+                start.y + ((end.y - start.y) * step) / 20,
+              );
+              if (duration) await sleep(duration / 20, signal);
+            }
           } finally {
             await page.mouse.up({ button });
           }
           return true;
+        }
         case "scroll":
+          if (
+            config.scrollTop !== undefined ||
+            config.scrollLeft !== undefined
+          ) {
+            if (!selector)
+              throw new Error("Absolute scrolling requires a browser locator");
+            return await frame.evaluate(browserRuntime, {
+              operation: "scroll",
+              ...query,
+              scrollTop: config.scrollTop as unknown,
+              scrollLeft: config.scrollLeft as unknown,
+            });
+          }
           if (selector) {
             const start = await this.domPoint(scope);
             await page.mouse.move(start.x, start.y);
@@ -704,9 +964,14 @@ export class BrowserAdapter {
           });
         case "select":
           if (!selector) throw new Error("Select requires a selector");
-          return await selector.selectOption(String(config.value ?? ""), {
-            timeout,
-          });
+          return await selector.selectOption(
+            Array.isArray(config.value)
+              ? config.value.map(String)
+              : String(config.value ?? ""),
+            {
+              timeout,
+            },
+          );
         case "tab": {
           if (config.action === "new") {
             const next = await page.context().newPage();
@@ -715,16 +980,40 @@ export class BrowserAdapter {
             return { url: next.url() };
           }
           if (config.action === "close") {
+            const matches = config.returnUrl
+              ? page
+                  .context()
+                  .pages()
+                  .filter(
+                    (candidate) =>
+                      candidate !== page &&
+                      candidate.url() === config.returnUrl,
+                  )
+              : [];
+            if (config.returnUrl && matches.length !== 1)
+              throw new Error("The return tab is missing or ambiguous");
             await page.close();
-            this.pages.delete(target.id);
+            if (matches[0]) this.pages.set(target.id, matches[0]);
+            else this.pages.delete(target.id);
             return true;
           }
-          const matches = page
-            .context()
-            .pages()
-            .filter((candidate) =>
-              config.url ? candidate.url().includes(String(config.url)) : true,
-            );
+          const matching = () =>
+            page
+              .context()
+              .pages()
+              .filter((candidate) =>
+                config.url
+                  ? config.exact
+                    ? candidate.url() === config.url
+                    : candidate.url().includes(String(config.url))
+                  : true,
+              );
+          if (config.waitForExisting) {
+            const deadline = Date.now() + timeout;
+            while (!matching().length && Date.now() < deadline)
+              await sleep(25, signal);
+          }
+          const matches = matching();
           const next =
             config.index !== undefined
               ? matches[Number(config.index)]
@@ -798,11 +1087,16 @@ export class BrowserAdapter {
           id: randomUUID(),
           target: structuredClone(target),
           callback,
+          pages: new Set(),
+          seen: new Set(),
+          stopTail: new Map(),
+          delivery: Promise.resolve(),
         };
         this.installedRecording = recording;
         try {
           if (target.browserMode !== "extension")
             recording.page = await this.page(target);
+          if (recording.page) recording.pages.add(recording.page);
           if (generation !== this.recordingGeneration) {
             await this.uninstallRecorder();
             return;
@@ -822,7 +1116,7 @@ export class BrowserAdapter {
     this.recordingOperation = operation;
     return operation;
   }
-  async stopRecording(): Promise<void> {
+  async stopRecording(): Promise<RecordedAction[]> {
     this.recordingGeneration++;
     this.recording = undefined;
     const operation = this.recordingOperation
@@ -877,29 +1171,55 @@ export class BrowserAdapter {
       this.recordingInstalls.delete(operation);
     }
   }
-  private async uninstallRecorder(): Promise<void> {
+  private async uninstallRecorder(): Promise<RecordedAction[]> {
     const recording = this.installedRecording;
     await Promise.allSettled([...this.recordingInstalls]);
-    if (!recording) return;
-    if (recording.target.browserMode === "extension")
-      await this.extension("recordStop", recording.target, undefined, {
-        recordingId: recording.id,
-      });
-    else if (recording.page && !recording.page.isClosed())
-      await Promise.all(
-        recording.page.frames().map(async (frame) => {
-          try {
-            await frame.evaluate(browserRuntime, {
-              operation: "record",
-              recordingId: null,
-            });
-          } catch (error) {
-            if (!frame.isDetached()) throw error;
-          }
-        }),
+    if (!recording) return [];
+    let tail: RecordedAction[] = [];
+    if (recording.target.browserMode === "extension") {
+      const result = await this.extension(
+        "recordStop",
+        recording.target,
+        undefined,
+        {
+          recordingId: recording.id,
+        },
       );
+      if (Array.isArray(result)) tail = result as unknown as RecordedAction[];
+    } else
+      tail = (
+        await Promise.all(
+          [...recording.pages]
+            .filter((page) => !page.isClosed())
+            .flatMap((page) => page.frames())
+            .map(async (frame) => {
+              try {
+                const result = (await frame.evaluate(browserRuntime, {
+                  operation: "record",
+                  recordingId: null,
+                })) as RecordedAction[];
+                for (const action of result)
+                  recording.stopTail.set(action.id, action);
+                return result;
+              } catch (error) {
+                if (!frame.isDetached()) throw error;
+                return [];
+              }
+            }),
+        )
+      ).flat();
+    for (const action of tail) recording.stopTail.set(action.id, action);
     if (this.installedRecording === recording)
       this.installedRecording = undefined;
+    return [...recording.stopTail.values()]
+      .filter(
+        (action) =>
+          !recording.seen.has(action.id) && !action.config.recordingActivation,
+      )
+      .map((action) => ({
+        ...action,
+        config: { ...action.config, targetId: recording.target.id },
+      }));
   }
   async releaseAll(ownerId?: string): Promise<void> {
     const owners = ownerId === undefined ? [...this.held.keys()] : [ownerId];

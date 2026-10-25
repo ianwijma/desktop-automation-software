@@ -182,6 +182,13 @@ const definitions: Record<NodeKind, DefinitionMetadata> = {
         type: "select",
         options: ["left", "right", "middle"],
       },
+      { key: "clickCount", label: "Click count (optional)", type: "number" },
+      {
+        key: "checked",
+        label: "Browser checked state (optional)",
+        type: "boolean",
+      },
+      { key: "modifiers", label: "Browser modifiers (optional)", type: "json" },
     ],
   },
   move: {
@@ -200,6 +207,11 @@ const definitions: Record<NodeKind, DefinitionMetadata> = {
       ...xy,
       { key: "toX", label: "End X", type: "number" },
       { key: "toY", label: "End Y", type: "number" },
+      {
+        key: "toLocator",
+        label: "Browser destination locator (optional)",
+        type: "json",
+      },
       { key: "durationMs", label: "Duration (ms)", type: "number" },
     ],
   },
@@ -212,6 +224,16 @@ const definitions: Record<NodeKind, DefinitionMetadata> = {
       target,
       { key: "deltaY", label: "Vertical distance", type: "number" },
       { key: "deltaX", label: "Horizontal distance", type: "number" },
+      {
+        key: "scrollTop",
+        label: "Browser vertical position (optional)",
+        type: "number",
+      },
+      {
+        key: "scrollLeft",
+        label: "Browser horizontal position (optional)",
+        type: "number",
+      },
     ],
   },
   type: {
@@ -269,7 +291,7 @@ const definitions: Record<NodeKind, DefinitionMetadata> = {
     fields: [
       target,
       { key: "selector", label: "Element selector" },
-      { key: "value", label: "Value" },
+      { key: "value", label: "Value", type: "value" },
     ],
   },
   tab: {
@@ -518,7 +540,15 @@ export function nodeRequirements(
     browserKinds.has(kind) ||
     (detector && config.detector === "element") ||
     (!detector &&
-      Boolean(config.selector || config.locator) &&
+      Boolean(
+        config.selector ||
+        config.locator ||
+        config.toLocator ||
+        config.checked !== undefined ||
+        config.scrollTop !== undefined ||
+        config.scrollLeft !== undefined ||
+        config.modifiers !== undefined,
+      ) &&
       (options?.resolved || !hasReference(config.selector ?? config.locator)));
   return {
     target: {
@@ -592,6 +622,71 @@ export function validateNodeConfig(
       error(`${key} must be an object`);
   };
   numeric("timeoutMs", Number.MIN_VALUE);
+  if (config.requiresConfiguration === true)
+    error(
+      typeof config.recordingWarning === "string"
+        ? config.recordingWarning
+        : "This recorded interaction requires manual configuration before running",
+    );
+  for (const key of ["locator", "toLocator"])
+    if (
+      present(config[key]) &&
+      !reference(config[key]) &&
+      !browserLocatorSchema.safeParse(config[key]).success
+    )
+      error(`${key} is invalid; complete its strategy and scope fields`);
+  for (const key of ["fromOffset", "toOffset"])
+    if (present(config[key]) && !reference(config[key])) {
+      const offset = config[key];
+      if (
+        !object(offset) ||
+        typeof offset.x !== "number" ||
+        typeof offset.y !== "number" ||
+        !Number.isFinite(offset.x) ||
+        !Number.isFinite(offset.y) ||
+        offset.x < 0 ||
+        offset.x > 1 ||
+        offset.y < 0 ||
+        offset.y > 1
+      )
+        error(`${key} must contain x/y fractions between 0 and 1`);
+    }
+  if (
+    config.checked !== undefined &&
+    !reference(config.checked) &&
+    typeof config.checked !== "boolean"
+  )
+    error("checked must be a boolean");
+  if (
+    config.modifiers !== undefined &&
+    !reference(config.modifiers) &&
+    (!Array.isArray(config.modifiers) ||
+      config.modifiers.some(
+        (key) => !["Control", "Alt", "Shift", "Meta"].includes(String(key)),
+      ))
+  )
+    error("modifiers must be an array of modifier keys");
+  if (
+    (config.checked !== undefined ||
+      config.scrollTop !== undefined ||
+      config.scrollLeft !== undefined) &&
+    !present(config.locator) &&
+    !present(config.selector)
+  )
+    error("Browser state replay requires a locator or selector");
+  if (kind === "scroll") {
+    numeric("scrollTop", 0);
+    numeric("scrollLeft", 0);
+  }
+  if (
+    kind === "select" &&
+    config.value !== undefined &&
+    !reference(config.value) &&
+    typeof config.value !== "string" &&
+    (!Array.isArray(config.value) ||
+      config.value.some((value) => typeof value !== "string"))
+  )
+    error("Select value must be a string or an array of strings");
   if (present(config.locator)) {
     if (
       !reference(config.locator) &&
@@ -627,7 +722,7 @@ export function validateNodeConfig(
       if (!reference(config.detection) && !object(config.detection))
         error("detection must be a detector result or reference");
     }
-    if (kind === "drag" && context) {
+    if (kind === "drag" && context && !present(config.toLocator)) {
       required("toX");
       required("toY");
     }
