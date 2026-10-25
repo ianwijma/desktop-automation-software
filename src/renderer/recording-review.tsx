@@ -20,7 +20,12 @@ import type {
   RelayAPI,
   WorkspaceState,
 } from "../shared/types";
-import { recordingAnchor } from "../shared/recording";
+import {
+  recordingDestinationAnchor,
+  recordingInsertionPoints,
+  recordingPointKey,
+} from "../shared/recording";
+import { RecordingPointSelect } from "./recording-point";
 import { createReferenceInspector } from "../shared/value-references";
 import { updateNodeConfig } from "../shared/node-authoring";
 import { catalog, blankFlow, uid, type FieldSpec } from "./catalog";
@@ -46,6 +51,7 @@ export interface RecordingReviewCache {
   error: string;
   destination: "new" | "bound";
   name: string;
+  insertionPoint?: string;
   pendingRequest?: Promise<RecordingState>;
 }
 
@@ -90,6 +96,15 @@ export function RecordingReview({
         160,
       ),
   );
+  const bound = workspace.flows.find(
+    (flow) => flow.id === recording.destination?.flowId,
+  );
+  const points = bound ? recordingInsertionPoints(bound) : [];
+  const initialAnchor = bound && recordingDestinationAnchor(bound, recording);
+  const [insertionPoint, setInsertionPoint] = useState(
+    cached?.insertionPoint ??
+      (initialAnchor ? recordingPointKey(initialAnchor) : ""),
+  );
   const revision = useRef(cached?.revision ?? recording.revision);
   const operation = useRef(Boolean(cached?.pendingRequest));
   const pendingRequest = useRef(cached?.pendingRequest);
@@ -104,6 +119,7 @@ export function RecordingReview({
       error,
       destination,
       name,
+      insertionPoint,
       pendingRequest: pendingRequest.current,
     };
   }, [
@@ -116,6 +132,7 @@ export function RecordingReview({
     error,
     destination,
     name,
+    insertionPoint,
     busy,
   ]);
   useEffect(() => {
@@ -148,14 +165,10 @@ export function RecordingReview({
       mounted = false;
     };
   }, [cached, onState]);
-  const bound = workspace.flows.find(
-    (flow) => flow.id === recording.destination?.flowId,
-  );
   const boundAvailable = Boolean(
-    bound &&
-    bound.revision === recording.destination?.flowRevision &&
-    recordingAnchor(bound, recording.destination?.anchorNodeId),
+    bound && bound.revision === recording.destination?.flowRevision,
   );
+  const chosenPoint = points.find((point) => point.key === insertionPoint);
   const stale = recording.revision !== revision.current;
   const persist = async (next: RecordedAction[]) => {
     if (operation.current || !recording.sessionId) return false;
@@ -295,6 +308,9 @@ export function RecordingReview({
       await onInsert(recording.sessionId, revision.current, {
         destination,
         ...(destination === "new" ? { name: name.trim() } : {}),
+        ...(destination === "bound" && chosenPoint
+          ? { anchor: chosenPoint.anchor }
+          : {}),
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -506,11 +522,19 @@ export function RecordingReview({
           >
             <option value="new">A new workflow</option>
             <option value="bound" disabled={!boundAvailable}>
-              {recording.destination?.flowName ?? "Bound workflow"} — selected
-              free next port{!boundAvailable ? " (unavailable)" : ""}
+              {recording.destination?.flowName ?? "Bound workflow"} — choose
+              edge/output{!boundAvailable ? " (unavailable)" : ""}
             </option>
           </Select>
         </Field>
+        {destination === "bound" && boundAvailable ? (
+          <RecordingPointSelect
+            points={points}
+            value={insertionPoint}
+            disabled={blocked}
+            onChange={setInsertionPoint}
+          />
+        ) : null}
         {destination === "new" ? (
           <Field label="New flow name">
             <input
@@ -524,11 +548,9 @@ export function RecordingReview({
         ) : null}
         {!boundAvailable ? (
           <p className="field-help">
-            {!recording.destination?.anchorNodeId
-              ? "This session started without a free next port selected. Create a new workflow to keep its steps connected."
-              : !bound
-                ? "The bound workflow no longer exists. Your recorded steps can still become a new workflow."
-                : "The bound workflow has changed since recording started. Create a new workflow to preserve both versions."}
+            {!bound
+              ? "The bound workflow no longer exists. Your recorded steps can still become a new workflow."
+              : "The bound workflow has changed since recording started. Create a new workflow to preserve both versions."}
           </p>
         ) : (
           <p className="field-help">
@@ -551,7 +573,9 @@ export function RecordingReview({
             disabled={
               blocked ||
               !actions.length ||
-              (destination === "new" ? !name.trim() : !boundAvailable)
+              (destination === "new"
+                ? !name.trim()
+                : !boundAvailable || !chosenPoint)
             }
             onClick={() => void insert()}
           >

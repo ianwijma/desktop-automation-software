@@ -162,16 +162,29 @@ export const recordedActionsSchema = z
       new Set(actions.map((action) => action.id)).size === actions.length,
     "Recorded step IDs must be unique.",
   );
+export const recordingInsertionAnchorSchema = z
+  .object({
+    sourceNodeId: id,
+    port: z.string().min(1).max(80),
+    edgeId: id.optional(),
+    successorNodeId: id.optional(),
+  })
+  .refine(
+    (anchor) => Boolean(anchor.edgeId) === Boolean(anchor.successorNodeId),
+    "An occupied output requires both its edge and successor.",
+  );
 export const recordingStartSchema = z.object({
   targetId: id,
   mode: z.enum(["guided", "direct"]),
   flowId: id,
   flowRevision: z.number().int().positive(),
   anchorNodeId: id.optional(),
+  anchor: recordingInsertionAnchorSchema.optional(),
 });
 export const recordingInsertSchema = z.object({
   destination: z.enum(["new", "bound"]),
   name: z.string().trim().min(1).max(160).optional(),
+  anchor: recordingInsertionAnchorSchema.optional(),
 });
 export const recordingStateSchema = z
   .object({
@@ -187,6 +200,7 @@ export const recordingStateSchema = z
         flowRevision: z.number().int().positive(),
         flowName: z.string().max(160),
         anchorNodeId: id.optional(),
+        anchor: recordingInsertionAnchorSchema.optional(),
       })
       .optional(),
     actions: recordedActionsSchema,

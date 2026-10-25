@@ -31,7 +31,7 @@ Statuses: `planned`, `in progress`, `implemented`, `verified`. `Implemented` mea
 | U01 | Output/reference picker and typed values         | F02                                                 | verified | Keyboard reference picker, typed values, branch warnings; [guide](value-references.md) and [verification](verification/u01-2026-10-22.md).                             |
 | U02 | Structured inspectors and flow interfaces        | U01                                                 | verified | Mode controls, flow interfaces, child mappings, and AI schema builder; [guide](structured-inspectors.md) and [verification](verification/u02-2026-10-22.md).           |
 | R01 | Recording drafts, pause, review                  | F02, U02                                            | verified | Session-bound drafts, pause/target switch, review editing, recovery, and explicit insertion; [guide](recording.md) and [verification](verification/r01-2026-10-25.md). |
-| R02 | Predictable graph insertion                      | R01                                                 | planned  | —                                                                                                                                                                      |
+| R02 | Predictable graph insertion                      | R01                                                 | verified | Explicit edge/output anchors, successor splicing, branch choice, and graph undo/redo; [guide](recording.md) and [verification](verification/r02-2026-10-25.md).        |
 | B01 | Shared browser locators and event extraction     | F02                                                 | planned  | —                                                                                                                                                                      |
 | B02 | Broader browser recording coverage               | B01, R01                                            | planned  | —                                                                                                                                                                      |
 | N01 | Native contracts and real desktop test harness   | F02                                                 | planned  | —                                                                                                                                                                      |
@@ -57,7 +57,7 @@ Statuses: `planned`, `in progress`, `implemented`, `verified`. `Implemented` mea
 
 Intended sequence: land PR #1; complete F01 → F02; start U01/U02, N01, and A01/A02 in parallel; develop recording/browser, native backends, AI diagnostics, and packaging as independent tracks. Chat can begin once schemas and AI checks are stable without waiting for every native enhancement. Finish onboarding after diagnostics/recording stabilize, then qualify actual installers and live models.
 
-PR #1 through PR #4 landed on 2026-10-22. F01/F02, U01, U02, and R01 are implemented and locally verified. The next slice is R02: predictable graph insertion; N01 and A01 can start independently. These statuses do not imply beta completion or new platform qualification.
+PR #1 through PR #4 landed on 2026-10-22, and PR #5 landed on 2026-10-25. F01/F02, U01, U02, R01, and R02 are implemented and locally verified. The next slice is B01: shared browser locators and event extraction; N01 and A01 can start independently. These statuses do not imply beta completion or new platform qualification.
 
 Each item is intended as a focused PR. Larger items may be split into suffixed PRs, such as N02a/N02b, without losing their acceptance criteria. Each implementation PR references IDs and updates this table with evidence. Changes to agreed scope must be recorded here explicitly.
 
@@ -127,7 +127,7 @@ Use **Record → Stop → Review → Insert**, with session IDs and capturing/pa
 
 **Acceptance:** Stop releases listeners/held input before review; Relay navigation cannot change the draft destination; restart does not resume recording; editing performs no application actions; discard leaves the graph unchanged.
 
-**Implemented boundary:** New-flow insertion is the default. R01 also permits insertion at an explicitly selected unused ordinary next output captured when recording starts, provided the bound saved flow revision is unchanged. Stop never inserts automatically. Edge splicing, branch selection, successor preservation, and whole-insertion undo remain R02.
+**R01 delivery boundary:** New-flow insertion is the default. R01 initially permitted only an explicitly selected unused ordinary next output. R02 extends that contract with edge splicing, branch selection, successor preservation, and whole-insertion undo. Stop never inserts automatically.
 
 #### R02 — Predictable graph insertion
 

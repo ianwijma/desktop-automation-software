@@ -40,7 +40,11 @@ import {
   recordingInsertSchema,
   recordedActionsSchema,
 } from "../shared/validation";
-import { recordingAnchor, recoverRecording } from "../shared/recording";
+import {
+  recordingAnchor,
+  recoverRecording,
+  resolveRecordingAnchor,
+} from "../shared/recording";
 import { defaultCapabilities } from "../shared/seed";
 import type {
   AIConnection,
@@ -568,6 +572,7 @@ async function request(
         throw new Error(
           "Select a free next port before starting, or record into a new workflow.",
         );
+      if (options.anchor) resolveRecordingAnchor(flow, options.anchor);
       return rpc("startRecording", options);
     }
     case "recordAction":

@@ -121,10 +121,10 @@ try {
   await page.evaluate(() =>
     window.relay.deleteConnection("provider-switch-smoke"),
   );
-  async function waitRun(id) {
+  async function waitRun(id, sourcePage = page) {
     const deadline = Date.now() + 25000;
     while (Date.now() < deadline) {
-      const current = await page.evaluate(
+      const current = await sourcePage.evaluate(
         async (id) =>
           (await window.relay.bootstrap()).runs.find((r) => r.id === id),
         id,
@@ -488,6 +488,160 @@ try {
       "Inserting a recording must not execute it",
     );
   }
+  // R02 runs through the real preload/main/utility/SQLite boundary on every OS.
+  const insertionPage = await app.firstWindow();
+  const insertionBaseline = await insertionPage.evaluate(() =>
+    window.relay.bootstrap(),
+  );
+  const branchFixture = {
+    ...insertionBaseline.flows[0],
+    id: "recording-branch-smoke",
+    name: "Recording branch fixture",
+    revision: 1,
+    hotkey: undefined,
+    inputs: { flag: true },
+    outputs: {},
+    nodes: [
+      {
+        id: "r-start",
+        kind: "start",
+        label: "Start",
+        config: {},
+        position: { x: 0, y: 0 },
+      },
+      {
+        id: "r-choice",
+        kind: "condition",
+        label: "Choose branch",
+        config: { left: "${inputs.flag}", operator: "truthy" },
+        position: { x: 310, y: 0 },
+      },
+      {
+        id: "r-yes",
+        kind: "end",
+        label: "True finish",
+        config: { outputs: { route: "yes" } },
+        position: { x: 620, y: 0 },
+      },
+      {
+        id: "r-no",
+        kind: "end",
+        label: "False finish",
+        config: { outputs: { route: "no" } },
+        position: { x: 620, y: 220 },
+      },
+    ],
+    edges: [
+      { id: "r-enter", source: "r-start", target: "r-choice", port: "next" },
+      { id: "r-true", source: "r-choice", target: "r-yes", port: "true" },
+      { id: "r-false", source: "r-choice", target: "r-no", port: "false" },
+    ],
+  };
+  const branchSaved = await insertionPage.evaluate(
+    (flow) => window.relay.saveFlow(flow, { expectedRevision: null }),
+    branchFixture,
+  );
+  assert.equal(branchSaved.status, "saved");
+  const branchReview = await insertionPage.evaluate(
+    async ({ flow, targetId }) => {
+      const state = await window.relay.startRecording({
+        flowId: flow.id,
+        flowRevision: flow.revision,
+        targetId,
+        mode: "guided",
+      });
+      await window.relay.recordAction(
+        state.sessionId,
+        {
+          kind: "wait",
+          label: "Recorded branch wait",
+          config: { durationMs: 1 },
+        },
+        false,
+      );
+      return window.relay.stopRecording(state.sessionId);
+    },
+    { flow: branchSaved.flow, targetId: insertionBaseline.targets[0].id },
+  );
+  const runsBeforeInsertion = (
+    await insertionPage.evaluate(() => window.relay.bootstrap())
+  ).runs.length;
+  const branchInserted = await insertionPage.evaluate(
+    ({ state, anchor }) =>
+      window.relay.insertRecording(state.sessionId, state.revision, {
+        destination: "bound",
+        anchor,
+      }),
+    {
+      state: branchReview,
+      anchor: {
+        sourceNodeId: "r-choice",
+        port: "true",
+        edgeId: "r-true",
+        successorNodeId: "r-yes",
+      },
+    },
+  );
+  assert.deepEqual(
+    branchInserted.previousFlow,
+    JSON.parse(JSON.stringify(branchSaved.flow)),
+  );
+  assert.deepEqual(
+    branchInserted.flow.edges.find((edge) => edge.id === "r-false"),
+    branchSaved.flow.edges.find((edge) => edge.id === "r-false"),
+  );
+  assert.equal(
+    (await insertionPage.evaluate(() => window.relay.bootstrap())).runs.length,
+    runsBeforeInsertion,
+    "Insertion must remain separate from Run",
+  );
+  const insertedNode = branchInserted.flow.nodes.find(
+    (node) => node.label === "Recorded branch wait",
+  );
+  for (const flag of [true, false]) {
+    const submitted = await insertionPage.evaluate(
+      ({ id, flag }) => window.relay.runFlow(id, { flag }),
+      { id: branchInserted.flow.id, flag },
+    );
+    const completed = await waitRun(submitted.id, insertionPage);
+    assert.equal(completed.outputs.route, flag ? "yes" : "no");
+    assert.equal(
+      completed.events.some((event) => event.nodeId === insertedNode.id),
+      flag,
+      "Only the chosen branch traverses the recorded sequence",
+    );
+  }
+  const undoneBranch = await insertionPage.evaluate(
+    ({ before, revision }) =>
+      window.relay.saveFlow(before, { expectedRevision: revision }),
+    {
+      before: branchInserted.previousFlow,
+      revision: branchInserted.flow.revision,
+    },
+  );
+  assert.equal(undoneBranch.status, "saved");
+  assert.deepEqual(undoneBranch.flow.nodes, branchSaved.flow.nodes);
+  assert.deepEqual(undoneBranch.flow.edges, branchSaved.flow.edges);
+  const redoneBranch = await insertionPage.evaluate(
+    ({ after, revision }) =>
+      window.relay.saveFlow(after, { expectedRevision: revision }),
+    { after: branchInserted.flow, revision: undoneBranch.flow.revision },
+  );
+  assert.equal(redoneBranch.status, "saved");
+  assert.deepEqual(redoneBranch.flow.nodes, branchInserted.flow.nodes);
+  assert.deepEqual(redoneBranch.flow.edges, branchInserted.flow.edges);
+  await insertionPage.reload();
+  await insertionPage
+    .getByRole("button", { name: "Recording branch fixture", exact: true })
+    .click();
+  assert.equal(await insertionPage.locator(".react-flow__node").count(), 5);
+  await insertionPage
+    .getByRole("button", { name: "Hide properties", exact: true })
+    .click();
+  await insertionPage.locator(".react-flow__controls-fitview").click();
+  await insertionPage.screenshot({
+    path: "test-results/relay-recording-inserted.png",
+  });
   assert.deepEqual(errors, [], "Renderer errors");
   console.log(
     JSON.stringify(
@@ -504,6 +658,9 @@ try {
           "real welcome execution",
           "12-child fixed batch",
           "theme switching",
+          "recording branch insertion preserves successor and other branch",
+          "inserted branch executes through the real engine",
+          "recording graph undo/redo saves through revision checks",
           ...(process.env.RELAY_SMOKE_NATIVE === "1"
             ? [
                 "X11 capture",

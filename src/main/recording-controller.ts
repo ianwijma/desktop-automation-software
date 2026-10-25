@@ -356,6 +356,7 @@ export class RecordingController {
             ...(options.anchorNodeId
               ? { anchorNodeId: options.anchorNodeId }
               : {}),
+            ...(options.anchor ? { anchor: options.anchor } : {}),
           },
           actions: [],
         });

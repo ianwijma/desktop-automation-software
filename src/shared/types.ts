@@ -209,6 +209,14 @@ export interface RecordingDestination {
   flowRevision: number;
   flowName: string;
   anchorNodeId?: string;
+  anchor?: RecordingInsertionAnchor;
+}
+/** Snapshot of one output, including its exact successor when occupied. */
+export interface RecordingInsertionAnchor {
+  sourceNodeId: string;
+  port: string;
+  edgeId?: string;
+  successorNodeId?: string;
 }
 export interface RecordingStartOptions {
   targetId: string;
@@ -216,15 +224,19 @@ export interface RecordingStartOptions {
   flowId: string;
   flowRevision: number;
   anchorNodeId?: string;
+  anchor?: RecordingInsertionAnchor;
 }
 export interface RecordingInsertOptions {
   destination: "new" | "bound";
   name?: string;
+  anchor?: RecordingInsertionAnchor;
 }
 export interface RecordingInsertResult {
   flow: FlowDefinition;
   recording: RecordingState;
   warning?: string;
+  /** Graph before insertion; new flows provide an empty Start → Finish graph. */
+  previousFlow?: FlowDefinition;
 }
 export interface WorkspaceState {
   flows: FlowDefinition[];

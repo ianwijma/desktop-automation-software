@@ -33,6 +33,7 @@ import type {
   ValidationIssue,
   RunRecord,
 } from "../shared/types";
+import { nodeOutputPorts } from "../shared/node-definitions";
 import { catalog, uid, type FieldSpec } from "./catalog";
 import { ValueField } from "./value-field";
 import { ChildInputs, isRecord } from "./child-inputs";
@@ -71,7 +72,7 @@ const FlowCard = memo(function FlowCard({
   const n = data.definition;
   const spec = catalog[n.kind];
   const Icon = spec.icon;
-  const ports = n.kind === "end" ? [] : (spec.ports ?? ["next"]);
+  const ports = nodeOutputPorts(n.kind);
   const summary =
     n.kind === "navigate"
       ? String(n.config.url || "Choose a URL")
@@ -137,10 +138,13 @@ const FlowCard = memo(function FlowCard({
             type="source"
             position={Position.Right}
             id={port}
-            style={{ top: `${ports.length === 1 ? 50 : 28 + i * 28}%` }}
+            style={{ top: `${((i + 1) / (ports.length + 1)) * 100}%` }}
           />
           {ports.length > 1 ? (
-            <span className="port-label" style={{ top: `${28 + i * 28}%` }}>
+            <span
+              className="port-label"
+              style={{ top: `${((i + 1) / (ports.length + 1)) * 100}%` }}
+            >
               {port}
             </span>
           ) : null}
@@ -154,6 +158,8 @@ export function GraphEditor({
   flow,
   workspace,
   selected,
+  selectedEdge,
+  onSelectEdge,
   onSelect,
   onChange,
   onAdd,
@@ -163,6 +169,8 @@ export function GraphEditor({
   flow: FlowDefinition;
   workspace: WorkspaceState;
   selected: string | null;
+  selectedEdge?: string | null;
+  onSelectEdge?: (id: string) => void;
   onSelect: (id: string | null) => void;
   onChange: (flow: FlowDefinition) => void;
   onAdd: () => void;
@@ -220,12 +228,17 @@ export function GraphEditor({
         source: e.source,
         target: e.target,
         sourceHandle: e.port ?? "next",
+        selected: e.id === selectedEdge,
+        ariaLabel: `Connection ${flow.nodes.find((node) => node.id === e.source)?.label ?? e.source} ${e.port ?? "next"} to ${flow.nodes.find((node) => node.id === e.target)?.label ?? e.target}`,
         type: "smoothstep",
         animated: run?.status === "running" && run.currentNodeId === e.target,
-        style: { stroke: "var(--edge)", strokeWidth: 1.6 },
+        style: {
+          stroke: e.id === selectedEdge ? "var(--accent)" : "var(--edge)",
+          strokeWidth: e.id === selectedEdge ? 2.5 : 1.6,
+        },
         label: undefined,
       })),
-    [flow.edges, run],
+    [flow.edges, flow.nodes, run, selectedEdge],
   );
   const selectedNode = flow.nodes.find((node) => node.id === selected);
   useEffect(() => {
@@ -301,6 +314,7 @@ export function GraphEditor({
         }}
         onConnect={connect}
         onNodeClick={(_, n) => onSelect(n.id)}
+        onEdgeClick={(_, edge) => onSelectEdge?.(edge.id)}
         onPaneClick={() => onSelect(null)}
         onNodeDrag={(_, n) =>
           setDragPositions((p) => ({ ...p, [n.id]: n.position }))

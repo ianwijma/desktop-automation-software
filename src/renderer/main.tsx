@@ -42,6 +42,7 @@ import type {
   ValidationIssue,
   RecordingState,
   RecordingInsertOptions,
+  RecordingInsertionAnchor,
   Json,
   FlowSaveResult,
 } from "../shared/types";
@@ -50,7 +51,6 @@ import { catalog, blankFlow, uid } from "./catalog";
 import { GraphEditor, Inspector, NodePalette } from "./editor";
 import { Recorder } from "./recorder";
 import type { RecordingReviewCache } from "./recording-review";
-import { recordingAnchor } from "../shared/recording";
 import { Settings } from "./settings";
 import { Runs, Schedules } from "./runs";
 import { Button, IconButton, Modal, JsonField } from "./components";
@@ -65,6 +65,7 @@ function App() {
   const [page, setPage] = useState<Page>("flows");
   const [flowTab, setFlowTab] = useState<"flow" | "record" | "runs">("flow");
   const [selected, setSelected] = useState<string | null>(null);
+  const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [search, setSearch] = useState("");
   const [palette, setPalette] = useState(false);
@@ -85,8 +86,14 @@ function App() {
   const saving = useRef<Promise<FlowDefinition | null> | null>(null);
   const clipboard = useRef<FlowNode | null>(null);
   const recordingReviewCache = useRef<RecordingReviewCache | null>(null);
+  const insertionHistory = useRef(
+    new Map<string, { revision: number; previous: FlowDefinition }>(),
+  );
   const draftRef = useRef(draft);
   draftRef.current = draft;
+  useEffect(() => {
+    setSelectedEdge(null);
+  }, [draft?.id]);
   const toast = useCallback((message: string, error = false) => {
     const id = uid();
     setToasts((t) => [...t.slice(-3), { id, message, error }]);
@@ -274,7 +281,8 @@ function App() {
       setDirty(false);
       setSelected(null);
       setIssues([]);
-      setUndo([]);
+      const inserted = insertionHistory.current.get(next.id);
+      setUndo(inserted?.revision === next.revision ? [inserted.previous] : []);
       setRedo([]);
       setPage("flows");
       setFlowTab("flow");
@@ -370,14 +378,18 @@ function App() {
   const undoAction = () => {
     if (!draft || !undo.length) return;
     setRedo((values) => [...values, structuredClone(draft)]);
-    setDraft(undo[undo.length - 1]);
+    const restored = undo[undo.length - 1];
+    draftRef.current = restored;
+    setDraft(restored);
     setUndo((values) => values.slice(0, -1));
     setDirty(true);
   };
   const redoAction = () => {
     if (!draft || !redo.length) return;
     setUndo((values) => [...values, structuredClone(draft)]);
-    setDraft(redo[redo.length - 1]);
+    const restored = redo[redo.length - 1];
+    draftRef.current = restored;
+    setDraft(restored);
     setRedo((values) => values.slice(0, -1));
     setDirty(true);
   };
@@ -504,11 +516,11 @@ function App() {
   const startRecording = async (
     targetId: string,
     mode: "guided" | "direct",
+    anchor?: RecordingInsertionAnchor,
   ) => {
     const current = draftRef.current;
     if (!current)
       throw new Error("Open a workflow before starting a recording.");
-    const anchorNodeId = recordingAnchor(current, selected);
     const saved = await save();
     if (!saved)
       throw new Error(
@@ -523,7 +535,7 @@ function App() {
       mode,
       flowId: saved.id,
       flowRevision: saved.revision,
-      anchorNodeId,
+      anchor,
     });
     updateRecordingState(recording);
     return recording;
@@ -542,6 +554,11 @@ function App() {
     }
     const previousDraft = draftRef.current;
     const result = await api.insertRecording(sessionId, revision, options);
+    if (result.previousFlow)
+      insertionHistory.current.set(result.flow.id, {
+        revision: result.flow.revision,
+        previous: result.previousFlow,
+      });
     updateRecordingState(result.recording);
     // A user may navigate or edit while IPC is pending. Never replace that draft.
     const canOpen = draftRef.current === previousDraft;
@@ -563,9 +580,17 @@ function App() {
     }
     if (canOpen) {
       draftRef.current = result.flow;
+      setSelectedEdge(null);
       setDraft(result.flow);
       setSaveConflict(null);
-      setUndo([]);
+      setUndo(
+        result.previousFlow
+          ? [
+              ...(previousDraft?.id === result.flow.id ? undo : []).slice(-59),
+              result.previousFlow,
+            ]
+          : [],
+      );
       setRedo([]);
       setDirty(false);
       setSelected(null);
@@ -997,7 +1022,15 @@ function App() {
                     flow={draft}
                     workspace={workspace}
                     selected={selected}
-                    onSelect={setSelected}
+                    selectedEdge={selectedEdge}
+                    onSelect={(id) => {
+                      setSelected(id);
+                      setSelectedEdge(null);
+                    }}
+                    onSelectEdge={(id) => {
+                      setSelected(null);
+                      setSelectedEdge(id);
+                    }}
                     onChange={change}
                     onAdd={() => setPalette(true)}
                     issues={issues}
@@ -1080,6 +1113,7 @@ function App() {
                 workspace={workspace}
                 currentFlow={draft}
                 selectedNodeId={selected}
+                selectedEdgeId={selectedEdge}
                 onStart={startRecording}
                 onInsert={insertRecording}
                 onState={updateRecordingState}
@@ -1106,6 +1140,7 @@ function App() {
               workspace={workspace}
               currentFlow={null}
               selectedNodeId={null}
+              selectedEdgeId={null}
               onStart={startRecording}
               onInsert={insertRecording}
               onState={updateRecordingState}
