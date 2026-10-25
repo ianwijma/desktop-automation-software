@@ -193,10 +193,38 @@ export interface RecordedAction {
   at: number;
 }
 export interface RecordingState {
+  phase: "idle" | "capturing" | "paused" | "review";
+  sessionId?: string;
+  revision: number;
   active: boolean;
   mode: "guided" | "direct";
   targetId?: string;
+  destination?: RecordingDestination;
   actions: RecordedAction[];
+  recovered?: boolean;
+  error?: string;
+}
+export interface RecordingDestination {
+  flowId: string;
+  flowRevision: number;
+  flowName: string;
+  anchorNodeId?: string;
+}
+export interface RecordingStartOptions {
+  targetId: string;
+  mode: "guided" | "direct";
+  flowId: string;
+  flowRevision: number;
+  anchorNodeId?: string;
+}
+export interface RecordingInsertOptions {
+  destination: "new" | "bound";
+  name?: string;
+}
+export interface RecordingInsertResult {
+  flow: FlowDefinition;
+  recording: RecordingState;
+  warning?: string;
 }
 export interface WorkspaceState {
   flows: FlowDefinition[];
@@ -254,15 +282,33 @@ export interface RelayAPI {
   browserBridge(): Promise<{ port: number; token: string; connected: boolean }>;
   capture(targetId: string): Promise<CaptureFrame>;
   testDetector(config: Record<string, Json>): Promise<DetectionResult>;
-  startRecording(
-    targetId: string,
-    mode: "guided" | "direct",
-  ): Promise<RecordingState>;
+  startRecording(options: RecordingStartOptions): Promise<RecordingState>;
   recordAction(
+    sessionId: string,
     action: Omit<RecordedAction, "id" | "at">,
     perform: boolean,
   ): Promise<RecordingState>;
-  stopRecording(): Promise<RecordingState>;
+  pauseRecording(sessionId: string): Promise<RecordingState>;
+  resumeRecording(sessionId: string): Promise<RecordingState>;
+  setRecordingTarget(
+    sessionId: string,
+    targetId: string,
+  ): Promise<RecordingState>;
+  stopRecording(sessionId: string): Promise<RecordingState>;
+  updateRecording(
+    sessionId: string,
+    expectedRevision: number,
+    actions: RecordedAction[],
+  ): Promise<RecordingState>;
+  discardRecording(
+    sessionId: string,
+    expectedRevision: number,
+  ): Promise<RecordingState>;
+  insertRecording(
+    sessionId: string,
+    expectedRevision: number,
+    options: RecordingInsertOptions,
+  ): Promise<RecordingInsertResult>;
   importFlow(): Promise<FlowDefinition | null>;
   exportFlow(id: string): Promise<boolean>;
   openExternal(url: string): Promise<void>;

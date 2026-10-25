@@ -20,6 +20,9 @@ import type {
   RunRecord,
   Schedule,
   TargetDescriptor,
+  RecordingState,
+  RecordingInsertOptions,
+  RecordingInsertResult,
 } from "../shared/types";
 import {
   createSeedFlows,
@@ -28,12 +31,32 @@ import {
 } from "../shared/seed";
 import { migrateFlow, prepareFlowSave } from "../shared/flow-persistence";
 import {
+  applyRecording,
+  createRecordingFlow,
+  emptyRecording,
+  recoverRecording,
+} from "../shared/recording";
+import {
   connectionSchema,
   jsonSchema,
   scheduleSchema,
   settingsSchema,
   targetSchema,
+  recordingStateSchema,
+  recordingInsertSchema,
+  boundedJson,
 } from "../shared/validation";
+
+const recordingEnvelopeSchema = z.object({
+  version: z.literal(1),
+  state: recordingStateSchema,
+});
+const recordingReceiptSchema = z.object({
+  version: z.literal(1),
+  sessionId: z.string(),
+  revision: z.number().int().positive(),
+  flowId: z.string(),
+});
 
 const STORAGE_VERSION = 2;
 const TABLES = ["entities", "metadata", "credentials"];
@@ -154,6 +177,17 @@ function inspectDatabase(db: DatabaseSync) {
     ? z.record(z.string(), z.unknown()).parse(JSON.parse(settings.value))
     : {};
   settingsSchema.parse({ ...defaultSettings, ...storedSettings });
+  if (tables.has("metadata")) {
+    for (const [key, schema] of [
+      ["recordingDraft", recordingEnvelopeSchema],
+      ["recordingInsertion", recordingReceiptSchema],
+    ] as const) {
+      const row = db
+        .prepare("SELECT value FROM metadata WHERE key=?")
+        .get(key) as { value: string } | undefined;
+      if (row) schema.parse(JSON.parse(row.value));
+    }
+  }
   return {
     flows,
     initialize,
@@ -247,6 +281,12 @@ export class Storage {
             });
         }
         this.pruneHistoryRows(this.settings().historyRetentionDays);
+        const draft = this.recording();
+        if (draft.phase !== "idle")
+          this.setMeta("recordingDraft", {
+            version: 1,
+            state: recoverRecording(draft),
+          });
       });
     } catch (error) {
       opened?.close();
@@ -269,6 +309,113 @@ export class Storage {
       );
       if (result.status === "saved") this.put("flows", result.flow);
       return result;
+    });
+  }
+  recording(): RecordingState {
+    const envelope = this.meta<unknown>("recordingDraft");
+    return envelope === undefined
+      ? emptyRecording()
+      : recordingEnvelopeSchema.parse(envelope).state;
+  }
+  /** The utility process awaits this durable write before acknowledging edits. */
+  saveRecording(candidate: RecordingState): RecordingState {
+    boundedJson(candidate);
+    const state = recordingStateSchema.parse(candidate);
+    return this.transaction(() => {
+      const current = this.recording();
+      const receipt =
+        this.meta<z.infer<typeof recordingReceiptSchema>>("recordingInsertion");
+      if (state.sessionId && receipt?.sessionId === state.sessionId)
+        throw new Error(
+          "This recording has already been inserted. Refresh the workspace to open its workflow.",
+        );
+      if (state.phase !== "idle" && current.phase !== "idle") {
+        if (state.sessionId !== current.sessionId)
+          throw new Error(
+            "Review or discard the existing recording before starting another.",
+          );
+        if (
+          state.revision < current.revision ||
+          (state.revision === current.revision &&
+            JSON.stringify(state) !== JSON.stringify(current))
+        )
+          throw new Error(
+            "The recording changed. Reload its current draft before editing.",
+          );
+        if (
+          JSON.stringify(state.destination) !==
+          JSON.stringify(current.destination)
+        )
+          throw new Error(
+            "The recording destination cannot change during a session.",
+          );
+      }
+      this.setMeta("recordingDraft", { version: 1, state });
+      return state;
+    });
+  }
+  /** Saving the graph, consuming the draft, and the retry receipt commit together. */
+  insertRecording(
+    candidate: RecordingState,
+    options: RecordingInsertOptions,
+  ): RecordingInsertResult {
+    boundedJson(candidate);
+    const state = recordingStateSchema.parse(candidate);
+    const choice = recordingInsertSchema.parse(options);
+    return this.transaction(() => {
+      const receipt =
+        this.meta<z.infer<typeof recordingReceiptSchema>>("recordingInsertion");
+      if (
+        receipt &&
+        receipt.sessionId === state.sessionId &&
+        receipt.revision === state.revision
+      ) {
+        const flow = this.get("flows", receipt.flowId);
+        if (!flow)
+          throw new Error(
+            "This recording was already inserted, but its workflow has since been deleted.",
+          );
+        return { flow, recording: emptyRecording() };
+      }
+      const current = this.recording();
+      if (
+        current.phase !== "review" ||
+        state.phase !== "review" ||
+        current.sessionId !== state.sessionId ||
+        current.revision !== state.revision ||
+        JSON.stringify(state) !== JSON.stringify(current)
+      )
+        throw new Error(
+          "The recording changed. Review the current draft before inserting.",
+        );
+      const existing =
+        choice.destination === "bound"
+          ? this.get("flows", state.destination!.flowId)
+          : undefined;
+      if (choice.destination === "bound" && !existing)
+        throw new Error(
+          "The destination workflow was deleted. Create a new workflow from this recording instead.",
+        );
+      const authored = existing
+        ? applyRecording(existing, state, randomUUID)
+        : createRecordingFlow(state, choice.name, randomUUID);
+      const prepared = prepareFlowSave(
+        authored,
+        existing,
+        existing?.revision ?? null,
+      );
+      if (prepared.status !== "saved") throw new Error(prepared.reason);
+      const flow = { ...prepared.flow, updatedAt: new Date().toISOString() };
+      this.put("flows", flow);
+      const recording = emptyRecording();
+      this.setMeta("recordingDraft", { version: 1, state: recording });
+      this.setMeta("recordingInsertion", {
+        version: 1,
+        sessionId: state.sessionId,
+        revision: state.revision,
+        flowId: flow.id,
+      });
+      return { flow, recording };
     });
   }
   list<K extends keyof Collections>(collection: K): Collections[K][] {

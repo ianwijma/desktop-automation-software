@@ -1,10 +1,96 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { spawn, execFileSync, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import {
+  spawn,
+  spawnSync,
+  execFileSync,
+  type ChildProcess,
+} from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { once } from "node:events";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { NativeAdapter } from "../src/integrations/native";
 import type { RecordedAction, TargetDescriptor } from "../src/shared/types";
+
+describe.skipIf(process.platform === "win32")("native cleanup protocol", () => {
+  it("retains held keys and blocks further input until failed emergency cleanup is explicitly retried", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "relay-native-cleanup-"));
+    const helper = path.join(directory, "service.cjs");
+    const modePath = path.join(directory, "mode");
+    const logPath = path.join(directory, "requests");
+    writeFileSync(modePath, "fail");
+    writeFileSync(
+      helper,
+      `#!${process.execPath}
+const fs = require('node:fs');
+const path = require('node:path');
+const root = process.env.RELAY_NATIVE_MOCK_DIRECTORY;
+require('node:readline').createInterface({input:process.stdin}).on('line', line => {
+  const request = JSON.parse(line);
+  fs.appendFileSync(path.join(root, 'requests'), line + '\\n');
+  if(request.method === 'input' && request.params.kind === 'drag') return;
+  let result = true;
+  if(request.method === 'capabilities') result = {session:'x11'};
+  if(request.method === 'listWindows') result = [{id:'1',title:'Fixture',bounds:{x:0,y:0,width:100,height:100}}];
+  const error = request.id === 'cleanup-keys' && fs.readFileSync(path.join(root,'mode'),'utf8') === 'fail' ? {message:'Mock key release failed'} : undefined;
+  process.stdout.write(JSON.stringify({id:request.id,result,error}) + '\\n');
+});
+`,
+      { mode: 0o700 },
+    );
+    const adapter = new NativeAdapter({
+      binaryPath: helper,
+      env: { RELAY_NATIVE_MOCK_DIRECTORY: directory },
+    });
+    const target: TargetDescriptor = {
+      id: "mock",
+      name: "Fixture",
+      kind: "desktop",
+      windowTitle: "Fixture",
+    };
+    try {
+      await adapter.execute("key", { key: "Shift", action: "down" }, target);
+      const signal = AbortSignal.timeout(100);
+      await expect(
+        adapter.execute("drag", { x: 1, y: 1, toX: 2, toY: 2 }, target, signal),
+      ).rejects.toThrow("Cancelled");
+      await expect(adapter.releaseAll()).rejects.toThrow(
+        "Mock key release failed",
+      );
+      await expect(
+        adapter.execute("move", { x: 1, y: 1 }, target),
+      ).rejects.toThrow("Mock key release failed");
+      writeFileSync(modePath, "ok");
+      await adapter.stopRecording();
+      await adapter.releaseAll();
+      await expect(
+        adapter.execute("move", { x: 1, y: 1 }, target),
+      ).resolves.toBe(true);
+      const releases = readFileSync(logPath, "utf8")
+        .trim()
+        .split("\n")
+        .map(
+          (line) =>
+            JSON.parse(line) as { id: string; params: { keys?: string[] } },
+        )
+        .filter((request) => request.id === "cleanup-keys");
+      expect(releases.length).toBeGreaterThanOrEqual(2);
+      expect(
+        releases.every((request) => request.params.keys?.includes("Shift")),
+      ).toBe(true);
+    } finally {
+      writeFileSync(modePath, "ok");
+      await adapter.dispose();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});
 
 const binary = path.resolve("native/target/debug/relay-native");
 const supported =
@@ -153,6 +239,12 @@ describe.skipIf(!supported)(
       )
         await new Promise((resolve) => setTimeout(resolve, 25));
       await native.stopRecording();
+      const pid = (native as unknown as { child: ChildProcess }).child.pid!;
+      expect(
+        spawnSync("ps", ["--ppid", String(pid), "-o", "comm="], {
+          encoding: "utf8",
+        }).stdout,
+      ).not.toMatch(/xinput|stdbuf/);
       expect(
         actions.find((action) => action.kind === "click")?.config,
       ).toMatchObject({
@@ -160,6 +252,34 @@ describe.skipIf(!supported)(
         expectedWidth: 300,
         expectedHeight: 180,
       });
+    });
+    it("joins each recorder before restarting and never appends stopped-session actions", async () => {
+      const prior: RecordedAction[] = [],
+        current: RecordedAction[] = [];
+      await native.startRecording(target, (action) => prior.push(action));
+      await native.execute("focus", {}, target);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      execFileSync("xdotool", ["mousemove", "80", "90", "click", "1"], { env });
+      await native.stopRecording();
+      const oldCount = prior.length;
+      await native.startRecording(target, (action) => current.push(action));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      execFileSync("xdotool", ["mousemove", "80", "90", "click", "1"], { env });
+      for (
+        let i = 0;
+        i < 40 && !current.some((action) => action.kind === "click");
+        i++
+      )
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      await native.stopRecording();
+      expect(current.filter((action) => action.kind === "click")).toHaveLength(
+        1,
+      );
+      expect(prior).toHaveLength(oldCount);
+      const count = current.length;
+      execFileSync("xdotool", ["mousemove", "80", "90", "click", "1"], { env });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(current).toHaveLength(count);
     });
     it("waits for cancelled native work to release held keys before allowing new input", async () => {
       await native.execute("key", { key: "a", action: "down" }, target);

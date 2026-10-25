@@ -11,12 +11,13 @@ await mkdir("test-results", { recursive: true });
 const env = { ...process.env, RELAY_DATA_DIR: dataDir, RELAY_TEST_MODE: "1" };
 delete env.ELECTRON_RUN_AS_NODE;
 const executablePath = process.env.RELAY_SMOKE_EXECUTABLE;
-const app = await electron.launch({
+const launchOptions = {
   executablePath,
   args: ["--no-sandbox", ...(executablePath ? [] : [resolve(".")])],
   env,
   timeout: 30000,
-});
+};
+let app = await electron.launch(launchOptions);
 const errors = [];
 try {
   const page = await app.firstWindow();
@@ -297,18 +298,31 @@ try {
       ),
       "Clicked",
     );
-    await page.evaluate(() =>
-      window.relay.startRecording("native-smoke", "guided"),
+    const session = await page.evaluate(
+      (flow) =>
+        window.relay.startRecording({
+          targetId: "native-smoke",
+          mode: "guided",
+          flowId: flow.id,
+          flowRevision: flow.revision,
+        }),
+      initial.flows[0],
     );
-    await page.evaluate(() =>
-      window.relay.recordAction(
-        {
-          kind: "click",
-          label: "Click test",
-          config: { x: 80, y: 50, button: "left" },
-        },
-        true,
-      ),
+    assert.equal(session.phase, "capturing");
+    assert.ok(session.sessionId);
+    assert.equal(session.destination.flowId, initial.flows[0].id);
+    await page.evaluate(
+      (sessionId) =>
+        window.relay.recordAction(
+          sessionId,
+          {
+            kind: "click",
+            label: "Click test",
+            config: { x: 80, y: 50, button: "left" },
+          },
+          true,
+        ),
+      session.sessionId,
     );
     const clicked = await app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()
@@ -318,25 +332,31 @@ try {
         ),
     );
     assert.equal(clicked, "Clicked");
-    await page.evaluate(() =>
-      window.relay.recordAction(
-        {
-          kind: "click",
-          label: "Focus textarea",
-          config: { x: 80, y: 160, button: "left" },
-        },
-        true,
-      ),
+    await page.evaluate(
+      (sessionId) =>
+        window.relay.recordAction(
+          sessionId,
+          {
+            kind: "click",
+            label: "Focus textarea",
+            config: { x: 80, y: 160, button: "left" },
+          },
+          true,
+        ),
+      session.sessionId,
     );
-    await page.evaluate(() =>
-      window.relay.recordAction(
-        {
-          kind: "type",
-          label: "Type test",
-          config: { text: "Relay native test" },
-        },
-        true,
-      ),
+    await page.evaluate(
+      (sessionId) =>
+        window.relay.recordAction(
+          sessionId,
+          {
+            kind: "type",
+            label: "Type test",
+            config: { text: "Relay native test" },
+          },
+          true,
+        ),
+      session.sessionId,
     );
     const typed = await app.evaluate(({ BrowserWindow }) =>
       BrowserWindow.getAllWindows()
@@ -346,8 +366,127 @@ try {
         ),
     );
     assert.equal(typed, "Relay native test");
-    const recording = await page.evaluate(() => window.relay.stopRecording());
+    const forbiddenType = async (sessionId) =>
+      page.evaluate(
+        (sessionId) =>
+          window.relay.recordAction(
+            sessionId,
+            {
+              kind: "type",
+              label: "Must not execute",
+              config: { text: "UNEXPECTED INPUT" },
+            },
+            true,
+          ),
+        sessionId,
+      );
+    await assert.rejects(forbiddenType("stale-session-id"));
+    const paused = await page.evaluate(
+      (sessionId) => window.relay.pauseRecording(sessionId),
+      session.sessionId,
+    );
+    assert.equal(paused.phase, "paused");
+    assert.equal(paused.active, false);
+    await assert.rejects(forbiddenType(session.sessionId));
+    const resumed = await page.evaluate(
+      (sessionId) => window.relay.resumeRecording(sessionId),
+      session.sessionId,
+    );
+    assert.equal(resumed.phase, "capturing");
+    assert.equal(resumed.sessionId, session.sessionId);
+    const beforeReview = await page.evaluate(() => window.relay.bootstrap());
+    const recording = await page.evaluate(
+      (sessionId) => window.relay.stopRecording(sessionId),
+      session.sessionId,
+    );
+    assert.equal(recording.phase, "review");
     assert.equal(recording.actions.length, 3);
+    await assert.rejects(forbiddenType(session.sessionId));
+    assert.equal(
+      await app.evaluate(({ BrowserWindow }) =>
+        BrowserWindow.getAllWindows()
+          .find((window) => window.getTitle() === "Relay test target")
+          .webContents.executeJavaScript(
+            'document.querySelector("textarea").value',
+          ),
+      ),
+      "Relay native test",
+      "Stale, paused, and review actions must not reach the target",
+    );
+    const afterReview = await page.evaluate(() => window.relay.bootstrap());
+    assert.deepEqual(
+      afterReview.flows,
+      beforeReview.flows,
+      "Stop enters review without changing a workflow",
+    );
+    assert.deepEqual(
+      afterReview.runs,
+      beforeReview.runs,
+      "Review must not start a workflow",
+    );
+    const edited = await page.evaluate(
+      ({ id, revision, actions }) =>
+        window.relay.updateRecording(id, revision, actions),
+      {
+        id: recording.sessionId,
+        revision: recording.revision,
+        actions: recording.actions.map((action, index) =>
+          index === 0 ? { ...action, label: "Reviewed click" } : action,
+        ),
+      },
+    );
+    assert.equal(edited.actions[0].label, "Reviewed click");
+    await app.close();
+    app = await electron.launch(launchOptions);
+    const reopened = await app.firstWindow();
+    reopened.on("pageerror", (error) => errors.push(error.message));
+    await reopened.waitForFunction(() => Boolean(window.relay));
+    const restored = await reopened.evaluate(() => window.relay.bootstrap());
+    assert.equal(restored.recording.phase, "review");
+    assert.equal(restored.recording.active, false);
+    assert.equal(restored.recording.sessionId, edited.sessionId);
+    assert.deepEqual(restored.recording.actions, edited.actions);
+    assert.deepEqual(restored.recording.destination, edited.destination);
+    assert.deepEqual(restored.flows, afterReview.flows);
+    const inserted = await reopened.evaluate(
+      ({ id, revision }) =>
+        window.relay.insertRecording(id, revision, {
+          destination: "new",
+          name: "Reviewed native recording",
+        }),
+      {
+        id: restored.recording.sessionId,
+        revision: restored.recording.revision,
+      },
+    );
+    assert.equal(inserted.flow.name, "Reviewed native recording");
+    assert.equal(
+      inserted.flow.nodes.filter(
+        (node) => !["start", "end"].includes(node.kind),
+      ).length,
+      3,
+    );
+    assert.equal(inserted.recording.phase, "idle");
+    await assert.rejects(
+      reopened.evaluate(
+        ({ id, revision }) =>
+          window.relay.insertRecording(id, revision, {
+            destination: "new",
+            name: "Duplicate recording",
+          }),
+        {
+          id: restored.recording.sessionId,
+          revision: restored.recording.revision,
+        },
+      ),
+    );
+    const finalState = await reopened.evaluate(() => window.relay.bootstrap());
+    assert.equal(finalState.flows.length, restored.flows.length + 1);
+    assert.equal(
+      finalState.runs.length,
+      restored.runs.length,
+      "Inserting a recording must not execute it",
+    );
   }
   assert.deepEqual(errors, [], "Renderer errors");
   console.log(
@@ -372,6 +511,9 @@ try {
                 "detector-result click",
                 "guided native click",
                 "native typing",
+                "recording session isolation and pause/review input guard",
+                "recording review persists across desktop restart",
+                "recording insertion happens once without execution",
               ]
             : []),
         ],

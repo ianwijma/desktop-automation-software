@@ -12,6 +12,7 @@ import { chromium } from "playwright";
 import { createServer } from "vite";
 import { runReferencePickerSmoke } from "./reference-picker-smoke.mjs";
 import { runStructuredInspectorSmoke } from "./structured-inspector-smoke.mjs";
+import { runRecordingReviewSmoke } from "./recording-review-smoke.mjs";
 
 let url = process.env.RELAY_WEB_URL;
 let server;
@@ -423,6 +424,7 @@ try {
   await page.screenshot({ path: "test-results/relay-ui-dark.png" });
   await runReferencePickerSmoke({ browser, url });
   await runStructuredInspectorSmoke({ browser, url });
+  await runRecordingReviewSmoke({ browser, url });
   console.log(
     "PASS: editor and references; undo/redo across revisions; child groups; theme/OpenRouter persistence; schedules; preview rejection; cross-tab conflicts; future-schema preservation; committed-save warning recovery with no automatic run; no page errors.",
   );

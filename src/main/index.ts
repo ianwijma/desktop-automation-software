@@ -36,7 +36,11 @@ import {
   scheduleSchema,
   settingsSchema,
   targetSchema,
+  recordingStartSchema,
+  recordingInsertSchema,
+  recordedActionsSchema,
 } from "../shared/validation";
+import { recordingAnchor, recoverRecording } from "../shared/recording";
 import { defaultCapabilities } from "../shared/seed";
 import type {
   AIConnection,
@@ -48,6 +52,7 @@ import type {
   RelayAPI,
   RunRecord,
   TargetDescriptor,
+  RecordingInsertResult,
 } from "../shared/types";
 import type { RunnerInit, RunnerResponse, RunnerWorkspace } from "./protocol";
 
@@ -335,7 +340,7 @@ async function request(
           .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
           .slice(0, 500),
         capabilities: await capabilities(),
-        recording: await rpc("recording"),
+        recording: runnerAlive ? await rpc("recording") : store.recording(),
         desktop: true,
       };
     }
@@ -549,20 +554,59 @@ async function request(
         "testDetector",
         z.record(z.string(), jsonSchema).parse(args[0]),
       );
-    case "startRecording":
-      return rpc(
-        "startRecording",
-        id(),
-        z.enum(["guided", "direct"]).parse(args[1]),
-      );
+    case "startRecording": {
+      const options = recordingStartSchema.parse(args[0]);
+      const flow = store.get("flows", options.flowId);
+      if (!flow || flow.revision !== options.flowRevision)
+        throw new Error(
+          "Save and reload the workflow before starting a recording.",
+        );
+      if (
+        options.anchorNodeId &&
+        recordingAnchor(flow, options.anchorNodeId) !== options.anchorNodeId
+      )
+        throw new Error(
+          "Select a free next port before starting, or record into a new workflow.",
+        );
+      return rpc("startRecording", options);
+    }
     case "recordAction":
       return rpc(
         "recordAction",
-        actionSchema.parse(args[0]),
-        z.boolean().parse(args[1]),
+        id(),
+        actionSchema.parse(args[1]),
+        z.boolean().parse(args[2]),
       );
+    case "pauseRecording":
+    case "resumeRecording":
     case "stopRecording":
-      return rpc("stopRecording");
+      return rpc(method, id());
+    case "setRecordingTarget":
+      return rpc(method, id(), z.string().min(1).max(200).parse(args[1]));
+    case "updateRecording":
+      return rpc(
+        method,
+        id(),
+        z.number().int().positive().parse(args[1]),
+        recordedActionsSchema.parse(args[2]),
+      );
+    case "discardRecording":
+      return rpc(method, id(), z.number().int().positive().parse(args[1]));
+    case "insertRecording": {
+      const result = await rpc<RecordingInsertResult>(
+        method,
+        id(),
+        z.number().int().positive().parse(args[1]),
+        recordingInsertSchema.parse(args[2]),
+      );
+      try {
+        await sync();
+      } catch {
+        result.warning =
+          "The recording was inserted, but the automation service could not refresh. Restart Relay before running the workflow.";
+      }
+      return result;
+    }
     case "importFlow":
       return importBundle();
     case "exportFlow":
@@ -637,7 +681,33 @@ else {
       });
       runnerAlive = true;
       runner.on("message", (message: RunnerResponse) => {
-        if ("id" in message) {
+        if ("recordingRequest" in message) {
+          const request = message.recordingRequest;
+          try {
+            const result =
+              request.operation === "save"
+                ? store.saveRecording(request.state)
+                : store.insertRecording(
+                    request.state,
+                    recordingInsertSchema.parse(request.options),
+                  );
+            runner.postMessage({
+              id: request.id,
+              method: "recordingStoreResult",
+              args: [{ result }],
+            });
+          } catch (error) {
+            runner.postMessage({
+              id: request.id,
+              method: "recordingStoreResult",
+              args: [
+                {
+                  error: error instanceof Error ? error.message : String(error),
+                },
+              ],
+            });
+          }
+        } else if ("id" in message) {
           const item = pending.get(message.id);
           if (!item) return;
           clearTimeout(item.timer);
@@ -670,17 +740,40 @@ else {
           );
         }
         pending.clear();
-        for (const run of store.list("runs"))
-          if (["queued", "running", "paused"].includes(run.status)) {
-            const interrupted: RunRecord = {
-              ...run,
-              status: "interrupted",
-              error: "Automation service stopped.",
-              finishedAt: new Date().toISOString(),
-            };
-            store.put("runs", interrupted);
-            broadcast({ type: "run", run: interrupted });
+        let recoveryFailed = false;
+        try {
+          const draft = store.recording();
+          if (draft.phase !== "idle") {
+            const recording = store.saveRecording(recoverRecording(draft));
+            broadcast({ type: "recording", recording });
           }
+        } catch {
+          // Disk errors or an already-closed database must not escape the exit
+          // callback or publish an unsaved recovery state as if it were durable.
+          recoveryFailed = true;
+        }
+        try {
+          for (const run of store.list("runs"))
+            if (["queued", "running", "paused"].includes(run.status)) {
+              const interrupted: RunRecord = {
+                ...run,
+                status: "interrupted",
+                error: "Automation service stopped.",
+                finishedAt: new Date().toISOString(),
+              };
+              store.put("runs", interrupted);
+              broadcast({ type: "run", run: interrupted });
+            }
+        } catch {
+          recoveryFailed = true;
+        }
+        if (recoveryFailed && !quitting) {
+          const message =
+            "The automation service stopped, but Relay could not save its recovery status. The last saved draft and history remain on disk. Restart Relay to recover them.";
+          if (process.env.RELAY_TEST_MODE) console.error(message);
+          else
+            dialog.showErrorBox("Recovery status could not be saved", message);
+        }
       });
       runner.stderr?.on("data", (data) => {
         if (process.env.RELAY_TEST_MODE) process.stderr.write(data);
@@ -700,6 +793,7 @@ else {
         dataDir,
         binaryPath,
         workspace: workspace(),
+        recording: store.recording(),
       } satisfies RunnerInit);
       ready.catch((error) => {
         if (process.env.RELAY_TEST_MODE) {

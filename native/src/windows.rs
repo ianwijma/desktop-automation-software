@@ -44,7 +44,7 @@ pub fn close(p: &Value) -> Result<Value> {
 pub fn release_all() -> Result<Value> {
     call("releaseAll", &json!({}))
 }
-pub fn record(_: Value, _: Arc<AtomicBool>) -> Result<()> {
+pub fn record(_: Value, _: Arc<AtomicBool>) -> Result<thread::JoinHandle<()>> {
     Err("Windows direct recording is unavailable; use guided recording".into())
 }
 

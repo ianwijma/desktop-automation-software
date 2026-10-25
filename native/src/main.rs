@@ -82,7 +82,22 @@ pub fn emit(value: Value) {
     let _ = writeln!(out, "{}", value);
     let _ = out.flush();
 }
-fn dispatch(method: &str, p: &Value, recording: &mut Arc<AtomicBool>) -> Result<Value> {
+struct Recording {
+    active: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+impl Recording {
+    fn stop(&mut self) -> Result<()> {
+        self.active.store(false, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            worker
+                .join()
+                .map_err(|_| "Recorder worker failed during shutdown".to_string())?;
+        }
+        Ok(())
+    }
+}
+fn dispatch(method: &str, p: &Value, recording: &mut Recording) -> Result<Value> {
     match method {
         "capabilities" => platform::capabilities(),
         "listWindows" => platform::windows(),
@@ -136,20 +151,24 @@ fn dispatch(method: &str, p: &Value, recording: &mut Arc<AtomicBool>) -> Result<
             Ok(json!({"pid":pid}))
         }
         "startRecording" => {
-            if recording.load(Ordering::SeqCst) {
+            if recording.active.load(Ordering::SeqCst) {
                 return Err("Recording is already active".into());
             }
-            *recording = Arc::new(AtomicBool::new(true));
-            match platform::record(p.clone(), recording.clone()) {
-                Ok(()) => Ok(json!(true)),
+            recording.stop()?;
+            recording.active = Arc::new(AtomicBool::new(true));
+            match platform::record(p.clone(), recording.active.clone()) {
+                Ok(worker) => {
+                    recording.worker = Some(worker);
+                    Ok(json!(true))
+                }
                 Err(e) => {
-                    recording.store(false, Ordering::SeqCst);
+                    recording.active.store(false, Ordering::SeqCst);
                     Err(e)
                 }
             }
         }
         "stopRecording" => {
-            recording.store(false, Ordering::SeqCst);
+            recording.stop()?;
             Ok(json!(true))
         }
         "ping" => Ok(json!(true)),
@@ -157,7 +176,10 @@ fn dispatch(method: &str, p: &Value, recording: &mut Arc<AtomicBool>) -> Result<
     }
 }
 fn main() {
-    let mut recording = Arc::new(AtomicBool::new(false));
+    let mut recording = Recording {
+        active: Arc::new(AtomicBool::new(false)),
+        worker: None,
+    };
     // Commands are processed serially: desktop input is a single shared resource.
     for line in io::stdin().lock().lines() {
         let line = match line {
@@ -178,6 +200,6 @@ fn main() {
             Err(message) => json!({"id":id,"error":{"message":message}}),
         });
     }
-    recording.store(false, Ordering::SeqCst);
+    let _ = recording.stop();
     let _ = release_owned();
 }

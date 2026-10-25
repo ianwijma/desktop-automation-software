@@ -11,6 +11,7 @@ import {
   prepareFlowSave,
 } from "../shared/flow-persistence";
 import { validateFlow } from "../engine/validation";
+import { emptyRecording } from "../shared/recording";
 import {
   createSeedFlows,
   defaultSettings,
@@ -45,7 +46,7 @@ function load(): WorkspaceState {
         "Native execution, recording, AI requests, and schedules are available in the desktop application.",
       ],
     },
-    recording: { active: false, mode: "guided", actions: [] },
+    recording: emptyRecording(),
     desktop: false,
   };
   const saved = localStorage.getItem(KEY);
@@ -237,7 +238,25 @@ export const previewAPI: RelayAPI = {
     return unavailable("Recording");
   },
   async stopRecording() {
-    return copy(load().recording);
+    return unavailable("Recording");
+  },
+  async pauseRecording() {
+    return unavailable("Recording");
+  },
+  async resumeRecording() {
+    return unavailable("Recording");
+  },
+  async setRecordingTarget() {
+    return unavailable("Recording");
+  },
+  async updateRecording() {
+    return unavailable("Recording review");
+  },
+  async discardRecording() {
+    return unavailable("Recording review");
+  },
+  async insertRecording() {
+    return unavailable("Recording insertion");
   },
   async importFlow() {
     return new Promise((resolve, reject) => {

@@ -1,11 +1,21 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { appendFile, cp, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { BrowserAdapter } from "../src/integrations/browser";
 import type { TargetDescriptor, RecordedAction } from "../src/shared/types";
-import { chromium } from "playwright";
+import { chromium, type Page } from "playwright";
+
+declare const chrome: {
+  tabs: { query(options: object): Promise<{ id?: number; url?: string }[]> };
+  scripting: {
+    executeScript(options: {
+      target: { tabId: number };
+      func: () => unknown;
+    }): Promise<{ result?: unknown }[]>;
+  };
+};
 
 describe("managed browser actions", () => {
   let server: Server, browser: BrowserAdapter, directory: string;
@@ -71,6 +81,51 @@ describe("managed browser actions", () => {
       ),
     ).toBe(true);
   });
+  it("uninstalls managed listeners and rejects delayed events from earlier recordings", async () => {
+    const before: RecordedAction[] = [],
+      after: RecordedAction[] = [];
+    await browser.startRecording(target, (action) => before.push(action));
+    const page = (browser as unknown as { pages: Map<string, Page> }).pages.get(
+      target.id,
+    )!;
+    const oldToken = await page.evaluate(
+      () =>
+        (window as unknown as { __relayRecorder: { recordingId: string } })
+          .__relayRecorder.recordingId,
+    );
+    await browser.execute("click", { selector: "#submit" }, target);
+    await browser.stopRecording();
+    expect(
+      await page.evaluate(() => Object.hasOwn(window, "__relayRecorder")),
+    ).toBe(false);
+    const oldCount = before.length;
+    await browser.execute("click", { selector: "#submit" }, target);
+    expect(before).toHaveLength(oldCount);
+    await browser.startRecording(target, (action) => after.push(action));
+    await page.evaluate(async (recordingId) => {
+      await (
+        window as unknown as {
+          relayRecordEvent: (value: unknown) => Promise<void>;
+        }
+      ).relayRecordEvent({
+        recordingId,
+        kind: "click",
+        label: "Stale event",
+        config: { selector: "#submit" },
+        at: Date.now(),
+      });
+    }, oldToken);
+    expect(after).toHaveLength(0);
+    await browser.execute("navigate", { url: target.url! }, target);
+    await page.waitForFunction(() => Object.hasOwn(window, "__relayRecorder"));
+    await browser.execute("click", { selector: "#submit" }, target);
+    expect(after).toHaveLength(1);
+    expect(after[0].config.targetId).toBe(target.id);
+    await browser.stopRecording();
+    expect(
+      await page.evaluate(() => Object.hasOwn(window, "__relayRecorder")),
+    ).toBe(false);
+  });
   it("returns selector errors without clicking arbitrary coordinates", async () => {
     await expect(
       browser.execute(
@@ -99,6 +154,11 @@ describe("managed browser actions", () => {
     ).toMatchObject({ outcome: "no-match" });
   });
   it("releases only the browser inputs owned by the completed run", async () => {
+    await browser.execute(
+      "select",
+      { selector: "#choice", value: "b" },
+      target,
+    );
     await browser.execute("type", { selector: "#name", text: "" }, target);
     await browser.execute(
       "key",
@@ -161,7 +221,14 @@ describe("real Chromium extension", () => {
     );
     const address = server.address();
     const port = typeof address === "object" && address ? address.port : 0;
-    const extensionPath = path.resolve("extension");
+    const extensionPath = path.join(directory, "extension");
+    await cp(path.resolve("extension"), extensionPath, { recursive: true });
+    // A temporary fixture hook models the module-local state lost when Chrome
+    // suspends the worker, without depending on DevTools worker lifecycle rules.
+    await appendFile(
+      path.join(extensionPath, "background.js"),
+      "\nglobalThis.__relayForgetRecordingForTest = () => { recording = undefined; targets.clear(); };\n",
+    );
     const context = await chromium.launchPersistentContext(
       path.join(directory, "chromium"),
       {
@@ -188,7 +255,7 @@ describe("real Chromium extension", () => {
         await new Promise((resolve) => setTimeout(resolve, 25));
       expect(browser.getBridgeInfo().connected).toBe(true);
       const page = await context.newPage();
-      await page.goto(`http://127.0.0.1:${port}`);
+      await page.goto(`http://127.0.0.1:${port}/original`);
       const target: TargetDescriptor = {
         id: "real-extension",
         name: "Extension fixture",
@@ -228,6 +295,85 @@ describe("real Chromium extension", () => {
             action.config.targetId === target.id,
         ),
       ).toBe(true);
+      const tabId = await worker.evaluate(
+        async (url) =>
+          (await chrome.tabs.query({})).find((tab) => tab.url === url)!.id!,
+        page.url(),
+      );
+      const listenerToken = async () =>
+        worker.evaluate(
+          async (tabId) =>
+            (
+              await chrome.scripting.executeScript({
+                target: { tabId },
+                func: () =>
+                  (
+                    window as unknown as {
+                      __relayRecorder?: { recordingId: string };
+                    }
+                  ).__relayRecorder?.recordingId ?? null,
+              })
+            )[0].result,
+          tabId,
+        );
+      expect(await listenerToken()).toBeNull();
+      const nextActions: RecordedAction[] = [];
+      await browser.startRecording(target, (action) =>
+        nextActions.push(action),
+      );
+      const oldToken = await listenerToken();
+      expect(typeof oldToken).toBe("string");
+      await browser.stopRecording();
+      expect(await listenerToken()).toBeNull();
+      await browser.startRecording(target, (action) =>
+        nextActions.push(action),
+      );
+      expect(await listenerToken()).not.toBe(oldToken);
+      await fetch(`http://127.0.0.1:${info.port}/result`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${info.token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          recordingId: oldToken,
+          action: {
+            kind: "click",
+            label: "Delayed previous session",
+            config: { selector: "#submit" },
+          },
+        }),
+      });
+      expect(nextActions).toHaveLength(0);
+      await page.locator("#submit").click();
+      for (let i = 0; i < 40 && !nextActions.length; i++)
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(nextActions).toHaveLength(1);
+      await browser.stopRecording();
+      expect(await listenerToken()).toBeNull();
+      await browser.startRecording(target, (action) =>
+        nextActions.push(action),
+      );
+      await page.goto(`http://127.0.0.1:${port}/navigated`);
+      for (let i = 0; i < 40 && !(await listenerToken()); i++)
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(typeof (await listenerToken())).toBe("string");
+      const decoy = await context.newPage();
+      await decoy.goto(target.url!);
+      // Emulate worker memory loss while preserving storage.session and the
+      // tab's isolated-world listener. Cleanup must use the stored tab ID,
+      // even though another tab now matches the target's original URL.
+      await worker.evaluate("globalThis.__relayForgetRecordingForTest()");
+      await browser.stopRecording();
+      expect(await listenerToken()).toBeNull();
+      await decoy.close();
+      await page.goto(target.url!);
+      await browser.execute(
+        "type",
+        { selector: "#name", text: "Extension works" },
+        target,
+      );
+      await browser.execute("click", { selector: "#submit" }, target);
       const abort = new AbortController(),
         started = Date.now();
       const key = browser.execute(

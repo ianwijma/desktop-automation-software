@@ -83,13 +83,16 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     signal?.addEventListener("abort", abort, { once: true });
   });
 }
-export function installRecorder() {
+export function installRecorder(recordingId: string | null) {
   const global = window as Window & {
-    __relayRecorder?: boolean;
+    __relayRecorder?: { recordingId: string; stop: () => void };
     relayRecordEvent?: (event: unknown) => void;
   };
-  if (global.__relayRecorder) return;
-  global.__relayRecorder = true;
+  global.__relayRecorder?.stop();
+  delete global.__relayRecorder;
+  if (!recordingId) return;
+  const listeners = new AbortController();
+  global.__relayRecorder = { recordingId, stop: () => listeners.abort() };
   const selector = (element: Element) => {
     if (element.id) return `#${CSS.escape(element.id)}`;
     if (element.getAttribute("data-testid"))
@@ -113,7 +116,13 @@ export function installRecorder() {
     return parts.join(" > ");
   };
   const send = (kind: string, label: string, config: unknown) => {
-    void global.relayRecordEvent?.({ kind, label, config, at: Date.now() });
+    void global.relayRecordEvent?.({
+      recordingId,
+      kind,
+      label,
+      config,
+      at: Date.now(),
+    });
   };
   document.addEventListener(
     "click",
@@ -134,11 +143,12 @@ export function installRecorder() {
         },
       );
     },
-    true,
+    { capture: true, signal: listeners.signal },
   );
   document.addEventListener(
     "change",
     (event) => {
+      if (!event.isTrusted) return;
       if (event.target instanceof HTMLSelectElement)
         send("select", "Select option", {
           selector: selector(event.target),
@@ -162,15 +172,16 @@ export function installRecorder() {
         );
       }
     },
-    true,
+    { capture: true, signal: listeners.signal },
   );
   document.addEventListener(
     "keydown",
     (event) => {
+      if (!event.isTrusted) return;
       if (["Enter", "Tab", "Escape"].includes(event.key))
         send("key", `Press ${event.key}`, { key: event.key });
     },
-    true,
+    { capture: true, signal: listeners.signal },
   );
 }
 export class BrowserAdapter {
@@ -182,9 +193,15 @@ export class BrowserAdapter {
     Map<string, { target: TargetDescriptor; keys: Set<string> }>
   >();
   private recording?: {
+    id: string;
     target: TargetDescriptor;
     callback: (action: RecordedAction) => void;
+    page?: Page;
   };
+  private installedRecording?: BrowserAdapter["recording"];
+  private recordingGeneration = 0;
+  private recordingOperation: Promise<void> = Promise.resolve();
+  private recordingInstalls = new Set<Promise<void>>();
   private server?: Server;
   private token = randomBytes(32).toString("hex");
   private port = 0;
@@ -308,6 +325,7 @@ export class BrowserAdapter {
         result?: Json;
         error?: string;
         action?: RecordedAction;
+        recordingId?: string;
       };
       try {
         result = JSON.parse(Buffer.concat(chunks).toString());
@@ -316,15 +334,20 @@ export class BrowserAdapter {
         return;
       }
       if (result.action) {
-        this.recording?.callback({
-          ...result.action,
-          config: {
-            ...result.action.config,
-            targetId: this.recording.target.id,
-          },
-          id: randomUUID(),
-          at: Date.now(),
-        });
+        const recording = this.recording;
+        if (
+          recording?.target.browserMode === "extension" &&
+          result.recordingId === recording.id
+        )
+          recording.callback({
+            ...result.action,
+            config: {
+              ...result.action.config,
+              targetId: recording.target.id,
+            },
+            id: randomUUID(),
+            at: Date.now(),
+          });
       } else if (result.id) {
         this.cancelled.delete(result.id);
         const pending = this.pending.get(result.id);
@@ -410,19 +433,24 @@ export class BrowserAdapter {
       });
       await context.exposeBinding(
         "relayRecordEvent",
-        (source, event: Omit<RecordedAction, "id">) => {
+        (
+          source,
+          event: Omit<RecordedAction, "id"> & { recordingId?: string },
+        ) => {
           if (
             this.recording &&
-            this.pages.get(this.recording.target.id) === source.page
+            this.recording.page === source.page &&
+            event.recordingId === this.recording.id
           )
             this.recording.callback({
-              ...event,
+              kind: event.kind,
+              label: event.label,
+              at: event.at,
               config: { ...event.config, targetId: this.recording.target.id },
               id: randomUUID(),
             });
         },
       );
-      await context.addInitScript(installRecorder);
       this.contexts.set(profileKey, context);
       context.on("close", () => {
         this.contexts.delete(profileKey);
@@ -434,7 +462,11 @@ export class BrowserAdapter {
         .find((page) => ![...this.pages.values()].includes(page)) ??
       (await context.newPage());
     this.pages.set(target.id, page);
-    await page.evaluate(installRecorder);
+    page.on("domcontentloaded", () => {
+      const recording = this.recording;
+      if (recording?.page === page)
+        void this.installManagedRecorder(page, recording).catch(() => {});
+    });
     if (target.url && page.url() === "about:blank") await page.goto(target.url);
     return page;
   }
@@ -718,27 +750,82 @@ export class BrowserAdapter {
     target: TargetDescriptor,
     callback: (action: RecordedAction) => void,
   ): Promise<void> {
-    this.recording = { target, callback };
-    try {
-      if (target.browserMode === "extension")
-        await this.extension("recordStart", target);
-      else await (await this.page(target)).evaluate(installRecorder);
-    } catch (error) {
-      this.recording = undefined;
-      throw error;
-    }
+    const generation = ++this.recordingGeneration;
+    this.recording = undefined;
+    const operation = this.recordingOperation
+      .catch(() => {})
+      .then(async () => {
+        await this.uninstallRecorder();
+        if (generation !== this.recordingGeneration) return;
+        const recording: NonNullable<BrowserAdapter["recording"]> = {
+          id: randomUUID(),
+          target: structuredClone(target),
+          callback,
+        };
+        this.installedRecording = recording;
+        try {
+          if (target.browserMode !== "extension")
+            recording.page = await this.page(target);
+          if (generation !== this.recordingGeneration) {
+            await this.uninstallRecorder();
+            return;
+          }
+          this.recording = recording;
+          if (target.browserMode === "extension")
+            await this.extension("recordStart", target, undefined, {
+              recordingId: recording.id,
+            });
+          else await this.installManagedRecorder(recording.page!, recording);
+        } catch (error) {
+          this.recording = undefined;
+          await this.uninstallRecorder();
+          throw error;
+        }
+      });
+    this.recordingOperation = operation;
+    return operation;
   }
   async stopRecording(): Promise<void> {
-    const recording = this.recording;
+    this.recordingGeneration++;
     this.recording = undefined;
-    if (recording?.target.browserMode === "extension")
-      await this.extension("recordStop", recording.target);
+    const operation = this.recordingOperation
+      .catch(() => {})
+      .then(() => this.uninstallRecorder());
+    this.recordingOperation = operation;
+    return operation;
+  }
+  private async installManagedRecorder(
+    page: Page,
+    recording: NonNullable<BrowserAdapter["recording"]>,
+  ): Promise<void> {
+    if (this.recording !== recording || page.isClosed()) return;
+    const operation = page
+      .evaluate(installRecorder, recording.id)
+      .then(() => {});
+    this.recordingInstalls.add(operation);
+    try {
+      await operation;
+    } finally {
+      this.recordingInstalls.delete(operation);
+    }
+  }
+  private async uninstallRecorder(): Promise<void> {
+    const recording = this.installedRecording;
+    await Promise.allSettled([...this.recordingInstalls]);
+    if (!recording) return;
+    if (recording.target.browserMode === "extension")
+      await this.extension("recordStop", recording.target, undefined, {
+        recordingId: recording.id,
+      });
+    else if (recording.page && !recording.page.isClosed())
+      await recording.page.evaluate(installRecorder, null);
+    if (this.installedRecording === recording)
+      this.installedRecording = undefined;
   }
   async releaseAll(ownerId?: string): Promise<void> {
     const owners = ownerId === undefined ? [...this.held.keys()] : [ownerId];
     for (const owner of owners) {
       const held = this.held.get(owner);
-      this.held.delete(owner);
       for (const entry of held?.values() ?? []) {
         if (!entry.keys.size) continue;
         if (entry.target.browserMode === "extension")
@@ -747,14 +834,19 @@ export class BrowserAdapter {
           });
         else {
           const page = this.pages.get(entry.target.id);
-          if (!page || page.isClosed()) continue;
+          if (!page || page.isClosed()) {
+            entry.keys.clear();
+            continue;
+          }
           for (const key of entry.keys)
             for (const part of keyParts(key).reverse())
               await page.keyboard.up(part);
           for (const button of ["left", "right", "middle"] as const)
             await page.mouse.up({ button });
         }
+        entry.keys.clear();
       }
+      this.held.delete(owner);
     }
   }
   async dispose(): Promise<void> {

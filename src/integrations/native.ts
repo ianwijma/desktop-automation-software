@@ -35,6 +35,8 @@ export class NativeAdapter {
   private frames = new Map<string, CaptureFrame>();
   private recording?: (action: RecordedAction) => void;
   private recordingId?: string;
+  private recordingGeneration = 0;
+  private recordingOperation: Promise<void> = Promise.resolve();
   private disposed = false;
   private platformSession?: string;
   private cleanupTask: Promise<void> = Promise.resolve();
@@ -117,8 +119,9 @@ export class NativeAdapter {
     this.child = undefined;
     const stopped = child ? this.terminate(child) : Promise.resolve();
     this.recording = undefined;
+    this.recordingId = undefined;
     if (child && release)
-      this.cleanupTask = stopped.then(() => this.emergencyRelease());
+      this.trackCleanup(stopped.then(() => this.emergencyRelease()));
     for (const pending of this.pending.values()) {
       pending.cleanup();
       pending.reject(error);
@@ -172,27 +175,72 @@ export class NativeAdapter {
       });
     });
   }
+  private trackCleanup(task: Promise<void>): void {
+    this.cleanupTask = task;
+    // A failed request rejects immediately; cleanup is checked by its caller's
+    // Stop/release barrier, which may arrive after the cleanup process exits.
+    void task.catch(() => {});
+  }
+  private async finishCleanup(retry: boolean): Promise<void> {
+    const previous = this.cleanupTask;
+    try {
+      await previous;
+    } catch (error) {
+      if (!retry) throw error;
+      if (this.cleanupTask === previous)
+        this.trackCleanup(this.emergencyRelease());
+      await this.cleanupTask;
+    }
+  }
   private emergencyRelease(): Promise<void> {
-    if (!existsSync(this.binaryPath)) return Promise.resolve();
-    return new Promise<void>((resolve) => {
+    if (!existsSync(this.binaryPath))
+      return Promise.reject(
+        new Error("Native input cleanup service is missing"),
+      );
+    return new Promise<void>((resolve, reject) => {
       const cleanup = spawn(this.binaryPath, [], {
         env: { ...process.env, ...this.options.env },
-        stdio: ["pipe", "ignore", "ignore"],
+        stdio: ["pipe", "pipe", "ignore"],
         windowsHide: true,
         detached: process.platform !== "win32",
       });
       let finished = false;
-      const done = () => {
+      let failure: Error | undefined;
+      const acknowledgements = new Set<string>();
+      const lines = createInterface({ input: cleanup.stdout! });
+      lines.on("line", (line) => {
+        try {
+          const reply = JSON.parse(line) as {
+            id?: string;
+            error?: { message?: string };
+          };
+          if (reply.id !== "cleanup-keys" && reply.id !== "cleanup") return;
+          if (reply.error)
+            failure = new Error(reply.error.message ?? "Native cleanup failed");
+          else acknowledgements.add(reply.id);
+        } catch {
+          failure = new Error("Native cleanup returned malformed JSON");
+        }
+      });
+      const done = (code: number | null = null) => {
         if (finished) return;
         finished = true;
         clearTimeout(timer);
+        lines.close();
+        if (failure || code !== 0 || acknowledgements.size !== 2) {
+          reject(
+            failure ?? new Error("Native input cleanup was not acknowledged"),
+          );
+          return;
+        }
         this.heldKeys.clear();
         resolve();
       };
       const timer = setTimeout(
         () => {
+          failure = new Error("Native input cleanup timed out");
           if (process.platform === "win32") {
-            void this.terminate(cleanup).then(done);
+            void this.terminate(cleanup).then(() => done());
             return;
           }
           try {
@@ -205,8 +253,11 @@ export class NativeAdapter {
         process.platform === "win32" ? 15000 : 5000,
       );
       timer.unref();
-      cleanup.once("error", done);
-      cleanup.once("exit", done);
+      cleanup.once("error", (error) => {
+        failure = error;
+        done();
+      });
+      cleanup.once("close", done);
       cleanup.stdin?.on("error", () => {});
       cleanup.stdin?.end(
         `${JSON.stringify({ id: "cleanup-keys", method: "releaseKeys", params: { keys: [...this.heldKeys] } })}\n${JSON.stringify({ id: "cleanup", method: "releaseAll", params: {} })}\n`,
@@ -467,29 +518,52 @@ export class NativeAdapter {
     target: TargetDescriptor,
     onAction: (action: RecordedAction) => void,
   ): Promise<void> {
-    const window = await this.resolve(target);
-    this.recording = (action) =>
-      onAction({
-        ...action,
-        config: { ...action.config, targetId: target.id },
+    const descriptor = structuredClone(target);
+    const generation = ++this.recordingGeneration;
+    this.recording = undefined;
+    this.recordingId = undefined;
+    const operation = this.recordingOperation
+      .catch(() => {})
+      .then(async () => {
+        if (this.child) await this.rpc("stopRecording");
+        if (generation !== this.recordingGeneration) return;
+        const window = await this.resolve(descriptor);
+        if (generation !== this.recordingGeneration) return;
+        this.recording = (action) =>
+          onAction({
+            ...action,
+            config: { ...action.config, targetId: descriptor.id },
+          });
+        this.recordingId = randomUUID();
+        try {
+          await this.rpc("startRecording", {
+            windowId: window.id,
+            recordingId: this.recordingId,
+          });
+        } catch (error) {
+          this.recording = undefined;
+          this.recordingId = undefined;
+          throw error;
+        }
       });
-    this.recordingId = randomUUID();
-    try {
-      await this.rpc("startRecording", {
-        windowId: window.id,
-        recordingId: this.recordingId,
-      });
-    } catch (error) {
-      this.recording = undefined;
-      throw error;
-    }
+    this.recordingOperation = operation;
+    return operation;
   }
   async stopRecording(): Promise<void> {
-    if (this.child) await this.rpc("stopRecording");
+    this.recordingGeneration++;
     this.recording = undefined;
+    this.recordingId = undefined;
+    const operation = this.recordingOperation
+      .catch(() => {})
+      .then(async () => {
+        await this.finishCleanup(true);
+        if (this.child) await this.rpc("stopRecording");
+      });
+    this.recordingOperation = operation;
+    return operation;
   }
   async releaseAll(): Promise<void> {
-    await this.cleanupTask;
+    await this.finishCleanup(true);
     if (this.child) {
       await this.rpc("releaseKeys", { keys: [...this.heldKeys] });
       await this.rpc("releaseAll");

@@ -11,6 +11,10 @@ import { BrowserAdapter } from "../integrations/browser";
 import { AIService, safeAIError } from "../integrations/ai";
 import { detectionCoordinates } from "../integrations/locations";
 import { DetectorService, cropFrame } from "../integrations/detectors";
+import {
+  RecordingController,
+  RecordingStorageTimeoutError,
+} from "./recording-controller";
 import type {
   AIConnection,
   CaptureFrame,
@@ -19,6 +23,9 @@ import type {
   Json,
   RecordedAction,
   RecordingState,
+  RecordingStartOptions,
+  RecordingInsertOptions,
+  RecordingInsertResult,
   RunRecord,
   Schedule,
   TargetDescriptor,
@@ -49,24 +56,50 @@ let browser: BrowserAdapter;
 let engine: WorkflowEngine;
 let initialized = false;
 let disposing = false;
-let recording: RecordingState = { active: false, mode: "guided", actions: [] };
-let recordingBusy = false;
-let recordingController = new AbortController();
-let recordingStartup: Promise<void> | undefined;
-let recordingAction: Promise<void> | undefined;
-let recordingStopping: Promise<RecordingState> | undefined;
+let recording: RecordingController;
 let stoppingRuns: Promise<void> | undefined;
-const recordingLocked = () =>
-  recording.active ||
-  recordingBusy ||
-  Boolean(recordingStartup || recordingStopping);
+const recordingLocked = () => Boolean(recording?.isLocked());
 const captures = new Map<string, CaptureFrame>();
 const detectors = new DetectorService();
 const ai = new AIService((id) => workspace?.keys[id]);
-const emitRecording = () =>
-  port.postMessage({
-    event: { type: "recording", recording: structuredClone(recording) },
+const recordingRequests = new Map<
+  string,
+  {
+    resolve(value: unknown): void;
+    reject(error: Error): void;
+    timer: ReturnType<typeof setTimeout>;
+  }
+>();
+function recordingStore<T>(
+  operation: "save" | "insert",
+  state: RecordingState,
+  options?: RecordingInsertOptions,
+): Promise<T> {
+  const id = randomUUID();
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      recordingRequests.delete(id);
+      reject(
+        new RecordingStorageTimeoutError(
+          "Recording storage did not acknowledge the draft. Retry Stop or Insert; application actions will not be repeated.",
+        ),
+      );
+    }, 15000);
+    recordingRequests.set(id, {
+      resolve: (value) => resolve(value as T),
+      reject,
+      timer,
+    });
+    port.postMessage({
+      recordingRequest: {
+        id,
+        operation,
+        state,
+        ...(options ? { options } : {}),
+      },
+    });
   });
+}
 function targetFor(id: unknown): TargetDescriptor {
   const target = workspace.targets.find((t) => t.id === id);
   if (!target)
@@ -388,6 +421,51 @@ async function handle(method: string, args: unknown[]): Promise<unknown> {
         if (failed?.status === "rejected") throw failed.reason;
       },
     });
+    recording = new RecordingController({
+      initialState: init.recording,
+      getTarget: (id) => workspace.targets.find((target) => target.id === id),
+      getFlow: (id) => workspace.flows.find((flow) => flow.id === id),
+      canStart: () => {
+        if (stoppingRuns || disposing || engine.isActive())
+          throw new Error(
+            "Stop active workflows and input cleanup before recording.",
+          );
+      },
+      persist: (state) => recordingStore<RecordingState>("save", state),
+      insert: (state, options) =>
+        recordingStore<RecordingInsertResult>("insert", state, options),
+      startDirect: (target, callback) =>
+        (target.kind === "browser" ? browser : native).startRecording(
+          target,
+          callback,
+        ),
+      stopDirect: async () => {
+        const results = await Promise.allSettled([
+          native.stopRecording(),
+          browser.stopRecording(),
+        ]);
+        const failed = results.find((result) => result.status === "rejected");
+        if (failed?.status === "rejected") throw failed.reason;
+      },
+      execute: (action, target, signal, ownerId) =>
+        (target.kind === "browser" ? browser : native).execute(
+          action.kind,
+          action.config,
+          target,
+          signal,
+          ownerId,
+        ),
+      releaseInputs: async (ownerId) => {
+        const results = await Promise.allSettled([
+          native.releaseAll(),
+          browser.releaseAll(ownerId),
+        ]);
+        const failed = results.find((result) => result.status === "rejected");
+        if (failed?.status === "rejected") throw failed.reason;
+      },
+      onState: (state) =>
+        port.postMessage({ event: { type: "recording", recording: state } }),
+    });
     initialized = true;
     lastTick = new Date();
     return true;
@@ -411,7 +489,7 @@ async function handle(method: string, args: unknown[]): Promise<unknown> {
       throw new Error("Stop active workflows before testing a detector.");
     return detect(args[0] as Record<string, Json>);
   }
-  if (method === "recording") return recording;
+  if (method === "recording") return recording.getState();
   if (method === "runFlow") {
     if (recordingLocked() || stoppingRuns)
       throw new Error(
@@ -443,7 +521,8 @@ async function handle(method: string, args: unknown[]): Promise<unknown> {
     const stop = async () => {
       for (const run of roots) engine.control(run.id, "stop");
       await Promise.all(roots.map((run) => engine.wait(run.id)));
-      if (recordingLocked()) await handle("stopRecording", []);
+      if (recordingLocked() || recording.getState().phase !== "idle")
+        await recording.stopCurrent();
       await Promise.all([native.releaseAll(), browser.releaseAll()]);
     };
     stoppingRuns = stop();
@@ -457,6 +536,9 @@ async function handle(method: string, args: unknown[]): Promise<unknown> {
   if (method === "pauseAll") {
     for (const run of engine.activeRuns())
       if (!run.parentId) engine.control(run.id, "pause");
+    const state = recording.getState();
+    if (state.phase === "capturing" && state.sessionId)
+      await recording.pause(state.sessionId);
     return true;
   }
   if (method === "testConnection") {
@@ -464,122 +546,47 @@ async function handle(method: string, args: unknown[]): Promise<unknown> {
     if (!connection) throw new Error("Connection not found.");
     return ai.test(connection);
   }
-  if (method === "startRecording") {
-    if (recordingLocked() || stoppingRuns || engine.isActive())
-      throw new Error(
-        "Stop active workflows and recording before starting another recording.",
-      );
-    const target = targetFor(args[0]);
-    const mode = args[1] as "guided" | "direct";
-    recordingController = new AbortController();
-    const controller = recordingController;
-    recording = { active: true, targetId: target.id, mode, actions: [] };
-    recordingStartup =
-      mode === "direct"
-        ? (target.kind === "browser" ? browser : native).startRecording(
-            target,
-            (action) => {
-              if (
-                recording.active &&
-                !controller.signal.aborted &&
-                recording.actions.length < 2000
-              ) {
-                recording.actions.push(action);
-                emitRecording();
-              }
-            },
-          )
-        : Promise.resolve();
-    try {
-      await recordingStartup;
-      controller.signal.throwIfAborted();
-      emitRecording();
-      return recording;
-    } catch (error) {
-      if (!recordingStopping) recording.active = false;
-      throw error;
-    } finally {
-      recordingStartup = undefined;
-    }
-  }
+  if (method === "startRecording")
+    return recording.start(args[0] as RecordingStartOptions);
   if (method === "recordAction") {
-    if (!recording.active || !recording.targetId)
-      throw new Error("Start a recording first.");
-    if (recordingBusy) throw new Error("The previous action is still running.");
-    const source = args[0] as Omit<RecordedAction, "id" | "at">;
-    if (
-      ![
-        "click",
-        "move",
-        "drag",
-        "scroll",
-        "type",
-        "key",
-        "wait",
-        "detect",
-        "focus",
-        "navigate",
-        "read",
-        "select",
-      ].includes(source.kind)
-    )
-      throw new Error("This action cannot be recorded.");
-    const target = targetFor(recording.targetId);
+    const sessionId = String(args[0]);
+    const state = recording.getState();
+    // Validate the session before reading or preparing an action for an adapter.
+    if (state.sessionId !== sessionId)
+      throw new Error("This recording session is no longer current.");
+    const source = structuredClone(args[1]) as Omit<
+      RecordedAction,
+      "id" | "at"
+    >;
     const latest = [...captures.values()]
       .reverse()
-      .find((frame) => frame.targetId === target.id);
-    const config = { ...source.config, targetId: target.id };
-    if (latest && ["click", "move", "drag"].includes(source.kind)) {
-      Object.assign(config, {
+      .find((frame) => frame.targetId === state.targetId);
+    if (latest && ["click", "move", "drag"].includes(source.kind))
+      Object.assign(source.config, {
         expectedWidth: latest.width,
         expectedHeight: latest.height,
       });
-    }
-    const action = { ...source, config, id: randomUUID(), at: Date.now() };
-    const controller = recordingController;
-    recordingBusy = true;
-    recordingAction = (async () => {
-      if (args[1])
-        await (target.kind === "browser" ? browser : native).execute(
-          action.kind,
-          action.config,
-          target,
-          AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]),
-        );
-      controller.signal.throwIfAborted();
-      recording.actions.push(action);
-      emitRecording();
-    })();
-    try {
-      await recordingAction;
-      return recording;
-    } finally {
-      recordingBusy = false;
-      recordingAction = undefined;
-    }
+    return recording.record(sessionId, source, Boolean(args[2]));
   }
-  if (method === "stopRecording") {
-    if (recordingStopping) return recordingStopping;
-    recordingController.abort();
-    recordingStopping = (async () => {
-      await Promise.allSettled(
-        [recordingStartup, recordingAction].filter(Boolean),
-      );
-      await Promise.allSettled([
-        native.stopRecording(),
-        browser.stopRecording(),
-      ]);
-      await Promise.all([native.releaseAll(), browser.releaseAll()]);
-      recording.active = false;
-      emitRecording();
-      return recording;
-    })();
-    try {
-      return await recordingStopping;
-    } finally {
-      recordingStopping = undefined;
-    }
-  }
+  if (method === "pauseRecording") return recording.pause(String(args[0]));
+  if (method === "resumeRecording") return recording.resume(String(args[0]));
+  if (method === "setRecordingTarget")
+    return recording.setTarget(String(args[0]), String(args[1]));
+  if (method === "stopRecording") return recording.stop(String(args[0]));
+  if (method === "updateRecording")
+    return recording.update(
+      String(args[0]),
+      Number(args[1]),
+      args[2] as RecordedAction[],
+    );
+  if (method === "discardRecording")
+    return recording.discard(String(args[0]), Number(args[1]));
+  if (method === "insertRecording")
+    return recording.insert(
+      String(args[0]),
+      Number(args[1]),
+      args[2] as RecordingInsertOptions,
+    );
   if (method === "dispose") {
     disposing = true;
     try {
@@ -593,6 +600,17 @@ async function handle(method: string, args: unknown[]): Promise<unknown> {
   throw new Error("Unknown automation service command.");
 }
 port.on("message", ({ data }) => {
+  if (data.method === "recordingStoreResult") {
+    const pending = recordingRequests.get(data.id);
+    if (pending) {
+      recordingRequests.delete(data.id);
+      clearTimeout(pending.timer);
+      const response = data.args[0] as { result?: unknown; error?: string };
+      if (response.error) pending.reject(new Error(response.error));
+      else pending.resolve(response.result);
+    }
+    return;
+  }
   void handle(data.method, data.args)
     .then((result) => port.postMessage({ id: data.id, result }))
     .catch((error) =>

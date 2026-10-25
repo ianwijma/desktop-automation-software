@@ -385,7 +385,7 @@ pub fn release_all() -> Result<Value> {
     }
     Ok(json!(true))
 }
-pub fn record(_: Value, _: Arc<AtomicBool>) -> Result<()> {
+pub fn record(_: Value, _: Arc<AtomicBool>) -> Result<thread::JoinHandle<()>> {
     Err("macOS direct recording is unavailable; use guided recording".into())
 }
 

@@ -37,4 +37,6 @@ Retain PR #1 workflow-format fixtures for migration and import tests, including 
 
 The [2026-10-22 foundation verification](verification/foundations-2026-10-22.md) adds migration, revision-conflict, validation, UI, and source Electron evidence. It does not expand the platform support claims above.
 
+The [2026-10-25 recording verification](verification/r01-2026-10-25.md) adds recoverable drafts, pause/review editing, explicit insertion, and listener/input cleanup regression evidence using the source app and isolated X11 fixtures. It does not expand the platform qualification above.
+
 Use the [manual test report](manual-test-report.md) for real-desktop/installer results. Store synthetic artifacts only; do not commit provider credentials, private desktop captures, or personal input. A skipped test is not a pass. Record unsupported cases and the scope actually exercised, rather than claiming all OS applications or all provider models work.

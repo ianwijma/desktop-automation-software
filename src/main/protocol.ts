@@ -5,6 +5,8 @@ import type {
   FlowDefinition,
   Schedule,
   TargetDescriptor,
+  RecordingState,
+  RecordingInsertOptions,
 } from "../shared/types";
 export interface RunnerWorkspace {
   generation: number;
@@ -19,9 +21,18 @@ export interface RunnerInit {
   dataDir: string;
   binaryPath: string;
   workspace: RunnerWorkspace;
+  recording: RecordingState;
 }
 export type RunnerMessage = { id: string; method: string; args: unknown[] };
 export type RunnerResponse =
+  | {
+      recordingRequest: {
+        id: string;
+        operation: "save" | "insert";
+        state: RecordingState;
+        options?: RecordingInsertOptions;
+      };
+    }
   | { id: string; result?: unknown; error?: string }
   | { event: AppEvent }
   | {
