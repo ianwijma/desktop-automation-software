@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { _electron as electron } from "playwright";
+import { expect } from "@playwright/test";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -179,6 +180,7 @@ try {
     process.env.DISPLAY &&
     process.env.RELAY_SMOKE_NATIVE === "1"
   ) {
+    const fixtureWindow = app.waitForEvent("window");
     await app.evaluate(async ({ BrowserWindow }) => {
       const fixture = new BrowserWindow({
         title: "Relay test target",
@@ -196,6 +198,7 @@ try {
       );
       fixture.show();
     });
+    const fixturePage = await fixtureWindow;
     const target = {
       id: "native-smoke",
       name: "Isolated native test",
@@ -290,16 +293,7 @@ try {
       (await page.evaluate(() => window.relay.runFlow("detected-click-smoke")))
         .id,
     );
-    assert.equal(
-      await app.evaluate(({ BrowserWindow }) =>
-        BrowserWindow.getAllWindows()
-          .find((w) => w.getTitle() === "Relay test target")
-          .webContents.executeJavaScript(
-            'document.querySelector("button").textContent',
-          ),
-      ),
-      "Clicked",
-    );
+    await expect(fixturePage.locator("button")).toHaveText("Clicked");
     const session = await page.evaluate(
       (flow) =>
         window.relay.startRecording({
@@ -326,14 +320,7 @@ try {
         ),
       session.sessionId,
     );
-    const clicked = await app.evaluate(({ BrowserWindow }) =>
-      BrowserWindow.getAllWindows()
-        .find((w) => w.getTitle() === "Relay test target")
-        .webContents.executeJavaScript(
-          'document.querySelector("button").textContent',
-        ),
-    );
-    assert.equal(clicked, "Clicked");
+    await expect(fixturePage.locator("button")).toHaveText("Clicked");
     await page.evaluate(
       (sessionId) =>
         window.relay.recordAction(
@@ -360,14 +347,11 @@ try {
         ),
       session.sessionId,
     );
-    const typed = await app.evaluate(({ BrowserWindow }) =>
-      BrowserWindow.getAllWindows()
-        .find((w) => w.getTitle() === "Relay test target")
-        .webContents.executeJavaScript(
-          'document.querySelector("textarea").value',
-        ),
+    // Native completion acknowledges X11 event submission; the target renderer
+    // may still be processing those events when recordAction resolves.
+    await expect(fixturePage.locator("textarea")).toHaveValue(
+      "Relay native test",
     );
-    assert.equal(typed, "Relay native test");
     const forbiddenType = async (sessionId) =>
       page.evaluate(
         (sessionId) =>
