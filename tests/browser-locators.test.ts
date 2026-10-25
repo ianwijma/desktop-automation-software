@@ -305,6 +305,28 @@ for (const mode of ["managed", "extension"] as const)
         ),
       ).rejects.toThrow(/missing/i);
     });
+    it("does not detect a leaf inside a hidden frame", async () => {
+      const scoped = locator(
+        { kind: "role", role: "button", name: "Frame action" },
+        [frame("same")],
+      );
+      await page.locator("#same").evaluate((element) => {
+        element.style.display = "none";
+      });
+      try {
+        expect(await adapter.inspectLocator(target, scoped)).toMatchObject({
+          status: "unique",
+          visible: false,
+        });
+        expect(
+          await adapter.execute("detect", { locator: scoped }, target),
+        ).toMatchObject({ outcome: "no-match" });
+      } finally {
+        await page.locator("#same").evaluate((element) => {
+          element.style.display = "";
+        });
+      }
+    });
     it("targets a cross-origin frame by its exact owner and maps click coordinates correctly", async () => {
       const scoped = locator(
         { kind: "role", role: "button", name: "Frame action" },
