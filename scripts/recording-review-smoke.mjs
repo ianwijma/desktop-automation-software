@@ -25,6 +25,46 @@ export async function runRecordingReviewSmoke({
     name: i ? "Other workflow" : "Recording origin",
     hotkey: undefined,
   }));
+  fixture.flows[0] = {
+    ...fixture.flows[0],
+    inputs: {},
+    outputs: {},
+    nodes: [
+      {
+        id: "start",
+        kind: "start",
+        label: "Start",
+        config: {},
+        position: { x: 0, y: 0 },
+      },
+      {
+        id: "choice",
+        kind: "condition",
+        label: "Choose route",
+        config: { left: true, operator: "truthy" },
+        position: { x: 310, y: 0 },
+      },
+      {
+        id: "yes",
+        kind: "end",
+        label: "Success",
+        config: {},
+        position: { x: 620, y: 0 },
+      },
+      {
+        id: "no",
+        kind: "end",
+        label: "Alternative",
+        config: {},
+        position: { x: 620, y: 220 },
+      },
+    ],
+    edges: [
+      { id: "enter", source: "start", target: "choice", port: "next" },
+      { id: "true-edge", source: "choice", target: "yes", port: "true" },
+      { id: "false-edge", source: "choice", target: "no", port: "false" },
+    ],
+  };
   fixture.targets = ["one", "two"].map((id) => ({
     id: `target-${id}`,
     name: `Application ${id}`,
@@ -157,6 +197,7 @@ export async function runRecordingReviewSmoke({
             ...(options.anchorNodeId
               ? { anchorNodeId: options.anchorNodeId }
               : {}),
+            ...(options.anchor ? { anchor: options.anchor } : {}),
           },
           actions: [],
         };
@@ -205,49 +246,36 @@ export async function runRecordingReviewSmoke({
       },
       insertRecording: async (id, revision, options) => {
         session(id, "review", revision);
-        if (options.destination !== "new")
-          throw new Error("Use a new workflow in this fixture.");
-        counters.inserts++;
+        const { applyRecording, createRecordingFlow, emptyRecordedFlow } =
+          await import("/src/shared/recording.ts");
         const source = state.flows.find(
           (flow) => flow.id === state.recording.destination.flowId,
         );
-        const nodes = [
-          {
-            id: crypto.randomUUID(),
-            kind: "start",
-            label: "Start",
-            config: {},
-            position: { x: 0, y: 0 },
-          },
-          ...state.recording.actions.map((action, i) => ({
-            ...clone(action),
-            id: crypto.randomUUID(),
-            position: { x: (i + 1) * 310, y: 0 },
-          })),
-          {
-            id: crypto.randomUUID(),
-            kind: "end",
-            label: "Finish",
-            config: {},
-            position: { x: 1000, y: 0 },
-          },
-        ];
+        const authored =
+          options.destination === "bound"
+            ? applyRecording(
+                source,
+                state.recording,
+                () => crypto.randomUUID(),
+                options.anchor,
+              )
+            : createRecordingFlow(state.recording, options.name);
         const flow = {
-          ...clone(source),
-          id: crypto.randomUUID(),
-          name: options.name || "Reviewed recording",
-          revision: 1,
-          nodes,
-          edges: nodes.slice(1).map((node, i) => ({
-            id: crypto.randomUUID(),
-            source: nodes[i].id,
-            target: node.id,
-          })),
+          ...authored,
+          revision: options.destination === "bound" ? source.revision + 1 : 1,
         };
-        state.flows.push(flow);
+        const previousFlow =
+          options.destination === "bound"
+            ? clone(source)
+            : emptyRecordedFlow(flow, () => crypto.randomUUID());
+        counters.inserts++;
+        state.flows = [
+          ...state.flows.filter((item) => item.id !== flow.id),
+          flow,
+        ];
         state.recording = empty();
         publish();
-        return { flow: clone(flow), recording: empty() };
+        return { flow: clone(flow), recording: empty(), previousFlow };
       },
     };
   }, fixture);
@@ -480,12 +508,163 @@ export async function runRecordingReviewSmoke({
       await page.evaluate(() => window.__recordingQA.counters.inserts),
       1,
     );
+    // One new-flow insertion is one undoable graph change.
+    await page
+      .getByRole("button", { name: "Undo (Ctrl+Z)", exact: true })
+      .click();
+    assert.equal(await page.locator(".react-flow__node").count(), 2);
+    await saveGraph();
+    assert.deepEqual(
+      (await snapshot()).flows
+        .find((flow) => flow.name === "Recovered reviewed flow")
+        .nodes.map((node) => node.kind),
+      ["start", "end"],
+    );
+    await page
+      .getByRole("button", { name: "Redo (Ctrl+Shift+Z)", exact: true })
+      .click();
+    await saveGraph();
+    assert.equal(
+      (await snapshot()).flows.find(
+        (flow) => flow.name === "Recovered reviewed flow",
+      ).nodes.length,
+      3,
+    );
+
+    // Selecting a canvas edge seeds an explicit branch choice; it never picks a decision branch by node alone.
+    await selectFlow("Recording origin");
+    await page.locator('.react-flow__edge[data-id="true-edge"]').click();
+    await recordTab();
+    const truePoint = JSON.stringify(["choice", "true", "true-edge", "yes"]);
+    assert.equal(
+      await page.getByLabel("Insertion point", { exact: true }).inputValue(),
+      truePoint,
+    );
+    await page
+      .getByRole("button", { name: "Start recording", exact: true })
+      .click();
+    assert.equal((await snapshot()).recording.destination.anchor.port, "true");
+    await type("branch action");
+    await page
+      .getByRole("button", { name: "Stop & review", exact: true })
+      .click();
+    const originBefore = (await snapshot()).flows.find(
+      (flow) => flow.name === "Recording origin",
+    );
+    await page
+      .getByLabel("Insert recording into", { exact: true })
+      .selectOption("bound");
+    assert.equal(
+      await page.getByLabel("Insertion point", { exact: true }).inputValue(),
+      truePoint,
+    );
+    await page.screenshot({
+      path: join(outputDir, "relay-recording-insertion.png"),
+      animations: "disabled",
+    });
+    await page
+      .getByRole("button", { name: "Insert recording", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Undo (Ctrl+Z)", exact: true })
+      .waitFor();
+    const branchInserted = (await snapshot()).flows.find(
+      (flow) => flow.name === "Recording origin",
+    );
+    assert.equal(branchInserted.nodes.length, originBefore.nodes.length + 1);
+    assert.deepEqual(
+      branchInserted.edges.find((edge) => edge.id === "false-edge"),
+      originBefore.edges.find((edge) => edge.id === "false-edge"),
+    );
+    assert.notEqual(
+      branchInserted.edges.find((edge) => edge.id === "true-edge").target,
+      "yes",
+    );
+    assert.ok(
+      branchInserted.edges.some(
+        (edge) =>
+          edge.source ===
+            branchInserted.edges.find((edge) => edge.id === "true-edge")
+              .target && edge.target === "yes",
+      ),
+    );
+    await selectFlow("Other workflow");
+    await selectFlow("Recording origin");
+    await page
+      .getByRole("button", { name: "Undo (Ctrl+Z)", exact: true })
+      .click();
+    await saveGraph();
+    const branchUndone = (await snapshot()).flows.find(
+      (flow) => flow.name === "Recording origin",
+    );
+    assert.deepEqual(branchUndone.nodes, originBefore.nodes);
+    assert.deepEqual(branchUndone.edges, originBefore.edges);
+    await page
+      .getByRole("button", { name: "Redo (Ctrl+Shift+Z)", exact: true })
+      .click();
+    await saveGraph();
+    const branchRedone = (await snapshot()).flows.find(
+      (flow) => flow.name === "Recording origin",
+    );
+    assert.deepEqual(branchRedone.nodes, branchInserted.nodes);
+    assert.deepEqual(branchRedone.edges, branchInserted.edges);
+
+    // A decision node alone never silently chooses a branch. Late changes preserve review.
+    await page.locator('.react-flow__node[data-id="choice"]').click();
+    await recordTab();
+    assert.equal(
+      await page.getByLabel("Insertion point", { exact: true }).inputValue(),
+      "",
+    );
+    await page
+      .getByRole("button", { name: "Start recording", exact: true })
+      .click();
+    await type("preserve on conflict");
+    await page
+      .getByRole("button", { name: "Stop & review", exact: true })
+      .click();
+    await page
+      .getByLabel("Insert recording into", { exact: true })
+      .selectOption("bound");
+    assert.equal(
+      await page
+        .getByRole("button", { name: "Insert recording", exact: true })
+        .isDisabled(),
+      true,
+    );
+    await page
+      .getByLabel("Insertion point", { exact: true })
+      .selectOption(JSON.stringify(["choice", "false", "false-edge", "no"]));
+    await page.evaluate(() => {
+      const flow = window.__recordingQA.state.flows.find(
+        (item) => item.name === "Recording origin",
+      );
+      flow.revision++;
+    });
+    const reviewBeforeConflict = (await snapshot()).recording;
+    await page
+      .getByRole("button", { name: "Insert recording", exact: true })
+      .click();
+    await page.getByText(/destination workflow changed/).waitFor();
+    assert.deepEqual((await snapshot()).recording, reviewBeforeConflict);
+    await page
+      .getByLabel("Insert recording into", { exact: true })
+      .selectOption("new");
+    await page
+      .getByLabel("New flow name", { exact: true })
+      .fill("Conflict copy");
+    await page
+      .getByRole("button", { name: "Insert recording", exact: true })
+      .click();
+    await page
+      .getByRole("button", { name: "Conflict copy", exact: true })
+      .waitFor();
     await page.reload();
     await recordTab();
     assert.equal((await snapshot()).recording.phase, "idle");
     assert.deepEqual(errors, []);
     console.log(
-      "PASS: recording destination across navigation; explicit pause/target switch; review edit/reorder/duplicate/delete/undo without capture/input; discard leaves graphs unchanged; recovery into review; explicit insertion once.",
+      "PASS: recording destination across navigation; explicit pause/target switch; review edit/reorder/duplicate/delete/undo without capture/input; discard leaves graphs unchanged; recovery into review; explicit insertion once; branch edge splicing and successor preservation; whole-insertion undo/redo with save/reload; stale destination preserves review.",
     );
   } catch (error) {
     await mkdir(outputDir, { recursive: true });
@@ -496,6 +675,15 @@ export async function runRecordingReviewSmoke({
     throw error;
   } finally {
     await context.close();
+  }
+  async function saveGraph() {
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await page.waitForFunction(
+      () =>
+        Array.from(document.querySelectorAll(".toolbar-actions button")).find(
+          (button) => button.textContent.trim() === "Save",
+        )?.disabled === true,
+    );
   }
   async function snapshot() {
     return page.evaluate(() => structuredClone(window.__recordingQA.state));

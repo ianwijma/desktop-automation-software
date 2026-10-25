@@ -27,11 +27,13 @@ import type {
   RecordingState,
   RecordingInsertOptions,
   RecordingInsertResult,
+  RecordingInsertionAnchor,
   RelayAPI,
   WorkspaceState,
   Json,
 } from "../shared/types";
-import { recordingAnchor } from "../shared/recording";
+import { recordingInsertionPoints } from "../shared/recording";
+import { RecordingPointSelect } from "./recording-point";
 import { Button, EmptyState, Field, Notice, Select } from "./components";
 import { catalog } from "./catalog";
 import { RecordingReview, type RecordingReviewCache } from "./recording-review";
@@ -43,6 +45,7 @@ export function Recorder({
   workspace,
   currentFlow,
   selectedNodeId,
+  selectedEdgeId,
   onStart,
   onInsert,
   onState,
@@ -54,9 +57,11 @@ export function Recorder({
   workspace: WorkspaceState;
   currentFlow: FlowDefinition | null;
   selectedNodeId: string | null;
+  selectedEdgeId: string | null;
   onStart: (
     targetId: string,
     mode: "guided" | "direct",
+    anchor?: RecordingInsertionAnchor,
   ) => Promise<RecordingState>;
   onInsert: (
     sessionId: string,
@@ -69,6 +74,22 @@ export function Recorder({
   reviewCache: RefObject<RecordingReviewCache | null>;
 }) {
   const recording = workspace.recording;
+  const points = currentFlow ? recordingInsertionPoints(currentFlow) : [];
+  const preferredPoint =
+    points.find((point) =>
+      selectedEdgeId
+        ? point.anchor.edgeId === selectedEdgeId
+        : point.anchor.sourceNodeId === selectedNodeId &&
+          point.anchor.port === "next" &&
+          !["condition", "detect"].includes(
+            currentFlow?.nodes.find((node) => node.id === selectedNodeId)
+              ?.kind ?? "",
+          ),
+    )?.key ?? "";
+  const [insertionPoint, setInsertionPoint] = useState(preferredPoint);
+  useEffect(() => {
+    setInsertionPoint(preferredPoint);
+  }, [currentFlow?.id, selectedNodeId, selectedEdgeId]);
   const [targetId, setTargetId] = useState(
     recording.targetId ?? workspace.targets[0]?.id ?? "",
   );
@@ -240,9 +261,6 @@ export function Recorder({
   };
   const destination = recording.destination;
   const sourceName = destination?.flowName ?? currentFlow?.name;
-  const initialAnchor = currentFlow
-    ? recordingAnchor(currentFlow, selectedNodeId)
-    : undefined;
   return (
     <div className="recorder">
       <div className="recording-workspace">
@@ -302,12 +320,8 @@ export function Recorder({
             ) : null}
             <small>
               {session
-                ? destination?.anchorNodeId
-                  ? "The selected free next port is reserved as an optional insertion point."
-                  : "No free next port was selected. Insert these steps into a new workflow."
-                : initialAnchor
-                  ? "The selected node can receive these steps after review."
-                  : "Select a node with a free next port in the editor to allow insertion into this workflow, or create a new workflow after review."}
+                ? "Choose a new workflow or an explicit edge/output in this saved workflow after review. Navigation does not change the bound workflow."
+                : "Select an edge in the editor or choose an output below. You can also choose an insertion point after review."}
             </small>
           </div>
         ) : null}
@@ -319,6 +333,14 @@ export function Recorder({
         ) : null}
         {recording.error ? (
           <Notice kind="error">{recording.error}</Notice>
+        ) : null}
+        {!session && currentFlow ? (
+          <RecordingPointSelect
+            points={points}
+            value={insertionPoint}
+            disabled={busy}
+            onChange={setInsertionPoint}
+          />
         ) : null}
         {recording.phase === "review" ? (
           <RecordingReview
@@ -416,7 +438,16 @@ export function Recorder({
                   variant="primary"
                   busy={busy}
                   disabled={!targetId || !canInput || !currentFlow}
-                  onClick={() => void command(() => onStart(targetId, mode))}
+                  onClick={() =>
+                    void command(() =>
+                      onStart(
+                        targetId,
+                        mode,
+                        points.find((point) => point.key === insertionPoint)
+                          ?.anchor,
+                      ),
+                    )
+                  }
                 >
                   <Circle size={12} fill="currentColor" />
                   Start recording

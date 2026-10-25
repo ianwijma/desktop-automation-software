@@ -34,6 +34,7 @@ import {
   applyRecording,
   createRecordingFlow,
   emptyRecording,
+  emptyRecordedFlow,
   recoverRecording,
 } from "../shared/recording";
 import {
@@ -45,6 +46,7 @@ import {
   recordingStateSchema,
   recordingInsertSchema,
   boundedJson,
+  flowSchema,
 } from "../shared/validation";
 
 const recordingEnvelopeSchema = z.object({
@@ -56,6 +58,8 @@ const recordingReceiptSchema = z.object({
   sessionId: z.string(),
   revision: z.number().int().positive(),
   flowId: z.string(),
+  insertedFlow: flowSchema.optional(),
+  previousFlow: flowSchema.optional(),
 });
 
 const STORAGE_VERSION = 2;
@@ -375,7 +379,20 @@ export class Storage {
           throw new Error(
             "This recording was already inserted, but its workflow has since been deleted.",
           );
-        return { flow, recording: emptyRecording() };
+        const changed =
+          receipt.insertedFlow &&
+          JSON.stringify(flow) !== JSON.stringify(receipt.insertedFlow);
+        return {
+          flow,
+          recording: emptyRecording(),
+          previousFlow: changed ? undefined : receipt.previousFlow,
+          ...(changed
+            ? {
+                warning:
+                  "This recording was already inserted and the workflow has since changed. The current workflow is shown; the earlier insertion cannot be undone from this view.",
+              }
+            : {}),
+        };
       }
       const current = this.recording();
       if (
@@ -397,7 +414,7 @@ export class Storage {
           "The destination workflow was deleted. Create a new workflow from this recording instead.",
         );
       const authored = existing
-        ? applyRecording(existing, state, randomUUID)
+        ? applyRecording(existing, state, randomUUID, choice.anchor)
         : createRecordingFlow(state, choice.name, randomUUID);
       const prepared = prepareFlowSave(
         authored,
@@ -406,6 +423,8 @@ export class Storage {
       );
       if (prepared.status !== "saved") throw new Error(prepared.reason);
       const flow = { ...prepared.flow, updatedAt: new Date().toISOString() };
+      boundedJson(flow);
+      const previousFlow = existing ?? emptyRecordedFlow(flow, randomUUID);
       this.put("flows", flow);
       const recording = emptyRecording();
       this.setMeta("recordingDraft", { version: 1, state: recording });
@@ -414,8 +433,10 @@ export class Storage {
         sessionId: state.sessionId,
         revision: state.revision,
         flowId: flow.id,
+        insertedFlow: flow,
+        previousFlow,
       });
-      return { flow, recording };
+      return { flow, recording, previousFlow };
     });
   }
   list<K extends keyof Collections>(collection: K): Collections[K][] {
