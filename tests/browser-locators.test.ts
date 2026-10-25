@@ -88,13 +88,23 @@ for (const mode of ["managed", "extension"] as const)
         await popup.goto(
           `chrome-extension://${new URL(worker.url()).host}/popup.html`,
         );
+        // Storage initialization can otherwise overwrite fields filled immediately after load.
+        await popup.waitForFunction(() =>
+          Boolean(document.querySelector("#status")?.textContent),
+        );
         await popup.locator("#port").fill(String(bridge.port));
         await popup.locator("#token").fill(bridge.token);
         await popup
           .getByRole("button", { name: "Connect", exact: true })
           .click();
-        await vi.waitFor(() =>
-          expect(adapter.getBridgeInfo().connected).toBe(true),
+        await vi.waitFor(
+          () => {
+            expect(
+              adapter.getBridgeInfo().connected,
+              "The paired extension must start polling the actual bridge",
+            ).toBe(true);
+          },
+          { timeout: 10000 },
         );
         page = await context.newPage();
         await page.goto(target.url!);
@@ -106,7 +116,7 @@ for (const mode of ["managed", "extension"] as const)
         )!;
         await page.waitForLoadState("load");
       }
-    });
+    }, 30000);
     afterAll(async () => {
       await adapter?.dispose();
       await context?.close();
@@ -337,12 +347,18 @@ for (const mode of ["managed", "extension"] as const)
         element: { locator: scoped },
       });
       await adapter.execute("click", { locator: scoped }, target);
-      expect(
-        await page
-          .frameLocator("#foreign")
-          .locator("body")
-          .getAttribute("data-clicked"),
-      ).toBe("yes");
+      // CDP input acknowledgement can precede event handling in a child renderer.
+      // Wait for the application effect without repeating the click.
+      await expect
+        .poll(
+          () =>
+            page
+              .frameLocator("#foreign")
+              .locator("body")
+              .getAttribute("data-clicked"),
+          { timeout: 5000 },
+        )
+        .toBe("yes");
       expect(
         await page
           .frameLocator("#same")

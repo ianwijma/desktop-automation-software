@@ -256,6 +256,9 @@ describe("real Chromium extension", () => {
       const extensionId = new URL(worker.url()).host;
       const popup = await context.newPage();
       await popup.goto(`chrome-extension://${extensionId}/popup.html`);
+      await popup.waitForFunction(() =>
+        Boolean(document.querySelector("#status")?.textContent),
+      );
       await popup.locator("#port").fill(String(info.port));
       await popup.locator("#token").fill(info.token);
       await popup.getByRole("button", { name: "Connect", exact: true }).click();
