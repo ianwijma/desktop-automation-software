@@ -1045,6 +1045,9 @@ function App() {
                       onChange={change}
                       onDelete={deleteNode}
                       onDuplicate={duplicateNode}
+                      onInspectLocator={(targetId, locator) =>
+                        api.inspectBrowserLocator(targetId, locator)
+                      }
                       onTest={(config) =>
                         void api
                           .testDetector(config)

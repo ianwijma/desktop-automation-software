@@ -26,6 +26,10 @@ import {
   recordingPointKey,
 } from "../shared/recording";
 import { RecordingPointSelect } from "./recording-point";
+import {
+  BrowserLocatorField,
+  supportsBrowserLocator,
+} from "./browser-locator-field";
 import { createReferenceInspector } from "../shared/value-references";
 import { updateNodeConfig } from "../shared/node-authoring";
 import { catalog, blankFlow, uid, type FieldSpec } from "./catalog";
@@ -589,6 +593,7 @@ export function RecordingReview({
           key={editing.id}
           action={editing}
           workspace={workspace}
+          api={api}
           busy={busy}
           onCancel={() => setEditing(null)}
           onSave={async (next) => {
@@ -607,12 +612,14 @@ export function RecordingReview({
 function StepEditor({
   action,
   workspace,
+  api,
   busy,
   onSave,
   onCancel,
 }: {
   action: RecordedAction;
   workspace: WorkspaceState;
+  api: RelayAPI;
   busy: boolean;
   onSave: (action: RecordedAction) => Promise<boolean>;
   onCancel: () => void;
@@ -679,106 +686,130 @@ function StepEditor({
             />
           </Field>
           <div className="recorded-step-fields">
-            {fields.map((field) => {
-              const value = draft.config[field.key];
-              if (
-                field.type === "target" ||
-                field.type === "connection" ||
-                field.type === "flow"
-              ) {
-                const choices =
-                  field.type === "target"
-                    ? workspace.targets
-                    : field.type === "connection"
-                      ? workspace.connections
-                      : workspace.flows;
-                return (
-                  <Field key={field.key} label={field.label}>
-                    <Select
-                      aria-label={field.label}
-                      value={typeof value === "string" ? value : ""}
-                      onChange={(event) =>
-                        update(field.key, event.target.value || undefined)
-                      }
-                    >
-                      <option value="">Not set</option>
-                      {typeof value === "string" &&
-                      !choices.some((item) => item.id === value) ? (
-                        <option value={value}>Missing · {value}</option>
-                      ) : null}
-                      {choices.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.name}
-                        </option>
-                      ))}
-                    </Select>
-                  </Field>
-                );
-              }
-              if (
-                field.type === "select" &&
-                (value === undefined ||
-                  (typeof value === "string" && field.options?.includes(value)))
+            {fields
+              .filter(
+                (field) =>
+                  field.key !== "selector" ||
+                  !supportsBrowserLocator(draft.kind, draft.config, workspace),
               )
+              .map((field) => {
+                const value = draft.config[field.key];
+                if (
+                  field.type === "target" ||
+                  field.type === "connection" ||
+                  field.type === "flow"
+                ) {
+                  const choices =
+                    field.type === "target"
+                      ? workspace.targets
+                      : field.type === "connection"
+                        ? workspace.connections
+                        : workspace.flows;
+                  return (
+                    <Field key={field.key} label={field.label}>
+                      <Select
+                        aria-label={field.label}
+                        value={typeof value === "string" ? value : ""}
+                        onChange={(event) =>
+                          update(field.key, event.target.value || undefined)
+                        }
+                      >
+                        <option value="">Not set</option>
+                        {typeof value === "string" &&
+                        !choices.some((item) => item.id === value) ? (
+                          <option value={value}>Missing · {value}</option>
+                        ) : null}
+                        {choices.map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.name}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                  );
+                }
+                if (
+                  field.type === "select" &&
+                  (value === undefined ||
+                    (typeof value === "string" &&
+                      field.options?.includes(value)))
+                )
+                  return (
+                    <Field key={field.key} label={field.label}>
+                      <Select
+                        aria-label={field.label}
+                        value={typeof value === "string" ? value : ""}
+                        onChange={(event) =>
+                          update(field.key, event.target.value || undefined)
+                        }
+                      >
+                        <option value="">Not set</option>
+                        {field.options?.map((option) => (
+                          <option key={option} value={option}>
+                            {option}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                  );
+                if (field.type === "image")
+                  return (
+                    <div key={field.key} className="recorded-template">
+                      <span className="field-label">{field.label}</span>
+                      {typeof value === "string" &&
+                      value.startsWith("data:image/") ? (
+                        <img src={value} alt="Recorded detector template" />
+                      ) : (
+                        <span className="field-help">
+                          Edit the image data in advanced configuration.
+                        </span>
+                      )}
+                    </div>
+                  );
                 return (
-                  <Field key={field.key} label={field.label}>
-                    <Select
-                      aria-label={field.label}
-                      value={typeof value === "string" ? value : ""}
-                      onChange={(event) =>
-                        update(field.key, event.target.value || undefined)
-                      }
-                    >
-                      <option value="">Not set</option>
-                      {field.options?.map((option) => (
-                        <option key={option} value={option}>
-                          {option}
-                        </option>
-                      ))}
-                    </Select>
-                  </Field>
+                  <ValueField
+                    key={field.key}
+                    label={field.label}
+                    value={value}
+                    onChange={(next) => update(field.key, next)}
+                    references={references}
+                    allowReference={false}
+                    literalType={
+                      typeof value === "string"
+                        ? "string"
+                        : field.type === "number"
+                          ? "number"
+                          : field.type === "boolean"
+                            ? "boolean"
+                            : field.type === "json"
+                              ? "object"
+                              : "string"
+                    }
+                    allowTypeChange={
+                      field.type === "json" || field.type === "value"
+                    }
+                    multiline={field.type === "textarea"}
+                    help={field.help}
+                  />
                 );
-              if (field.type === "image")
-                return (
-                  <div key={field.key} className="recorded-template">
-                    <span className="field-label">{field.label}</span>
-                    {typeof value === "string" &&
-                    value.startsWith("data:image/") ? (
-                      <img src={value} alt="Recorded detector template" />
-                    ) : (
-                      <span className="field-help">
-                        Edit the image data in advanced configuration.
-                      </span>
-                    )}
-                  </div>
-                );
-              return (
-                <ValueField
-                  key={field.key}
-                  label={field.label}
-                  value={value}
-                  onChange={(next) => update(field.key, next)}
-                  references={references}
-                  allowReference={false}
-                  literalType={
-                    typeof value === "string"
-                      ? "string"
-                      : field.type === "number"
-                        ? "number"
-                        : field.type === "boolean"
-                          ? "boolean"
-                          : field.type === "json"
-                            ? "object"
-                            : "string"
-                  }
-                  allowTypeChange={
-                    field.type === "json" || field.type === "value"
-                  }
-                  multiline={field.type === "textarea"}
-                  help={field.help}
-                />
-              );
-            })}
+              })}
+            {supportsBrowserLocator(draft.kind, draft.config, workspace) ? (
+              <BrowserLocatorField
+                kind={draft.kind}
+                config={draft.config}
+                workspace={workspace}
+                onChange={(config) => {
+                  setDraft({ ...draft, config });
+                  setJson(JSON.stringify(config, null, 2));
+                  setError("");
+                }}
+                inspect={(targetId, locator) =>
+                  api.inspectBrowserLocator(targetId, locator)
+                }
+                references={references}
+                allowReference={false}
+              />
+            ) : null}
           </div>
           <Button
             type="button"

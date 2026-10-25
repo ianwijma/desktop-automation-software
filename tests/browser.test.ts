@@ -8,6 +8,9 @@ import type { TargetDescriptor, RecordedAction } from "../src/shared/types";
 import { chromium, type Page } from "playwright";
 
 declare const chrome: {
+  debugger: {
+    sendCommand(target: object, method: string, params?: object): Promise<any>;
+  };
   tabs: { query(options: object): Promise<{ id?: number; url?: string }[]> };
   scripting: {
     executeScript(options: {
@@ -77,7 +80,12 @@ describe("managed browser actions", () => {
     expect(
       actions.some(
         (action) =>
-          action.kind === "click" && action.config.selector === "#submit",
+          action.kind === "click" &&
+          JSON.stringify(action.config.locator) ===
+            JSON.stringify({
+              version: 1,
+              selector: { kind: "role", role: "button", name: "Submit" },
+            }),
       ),
     ).toBe(true);
   });
@@ -248,6 +256,9 @@ describe("real Chromium extension", () => {
       const extensionId = new URL(worker.url()).host;
       const popup = await context.newPage();
       await popup.goto(`chrome-extension://${extensionId}/popup.html`);
+      await popup.waitForFunction(() =>
+        Boolean(document.querySelector("#status")?.textContent),
+      );
       await popup.locator("#port").fill(String(info.port));
       await popup.locator("#token").fill(info.token);
       await popup.getByRole("button", { name: "Connect", exact: true }).click();
@@ -291,8 +302,11 @@ describe("real Chromium extension", () => {
       expect(
         actions.some(
           (action) =>
-            action.config.selector === "#submit" &&
-            action.config.targetId === target.id,
+            JSON.stringify(action.config.locator) ===
+              JSON.stringify({
+                version: 1,
+                selector: { kind: "role", role: "button", name: "Submit" },
+              }) && action.config.targetId === target.id,
         ),
       ).toBe(true);
       const tabId = await worker.evaluate(
@@ -301,21 +315,30 @@ describe("real Chromium extension", () => {
         page.url(),
       );
       const listenerToken = async () =>
-        worker.evaluate(
-          async (tabId) =>
-            (
-              await chrome.scripting.executeScript({
-                target: { tabId },
-                func: () =>
-                  (
-                    window as unknown as {
-                      __relayRecorder?: { recordingId: string };
-                    }
-                  ).__relayRecorder?.recordingId ?? null,
-              })
-            )[0].result,
-          tabId,
-        );
+        worker.evaluate(async (tabId) => {
+          const tree = await chrome.debugger.sendCommand(
+            { tabId },
+            "Page.getFrameTree",
+          );
+          const world = await chrome.debugger.sendCommand(
+            { tabId },
+            "Page.createIsolatedWorld",
+            {
+              frameId: tree.frameTree.frame.id,
+              worldName: "Relay locator inspection",
+            },
+          );
+          const result = await chrome.debugger.sendCommand(
+            { tabId },
+            "Runtime.evaluate",
+            {
+              expression: "window.__relayRecorder?.recordingId ?? null",
+              contextId: world.executionContextId,
+              returnByValue: true,
+            },
+          );
+          return result.result.value;
+        }, tabId);
       expect(await listenerToken()).toBeNull();
       const nextActions: RecordedAction[] = [];
       await browser.startRecording(target, (action) =>

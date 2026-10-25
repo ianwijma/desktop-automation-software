@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import { _electron as electron } from "playwright";
 import { expect } from "@playwright/test";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
@@ -20,6 +21,7 @@ const launchOptions = {
 };
 let app = await electron.launch(launchOptions);
 const errors = [];
+let locatorServer;
 try {
   const page = await app.firstWindow();
   page.on("pageerror", (error) => errors.push(error.message));
@@ -626,6 +628,145 @@ try {
   await insertionPage.screenshot({
     path: "test-results/relay-recording-inserted.png",
   });
+  // B01 checks the actual locator inspection IPC and graph preflight/runtime path.
+  locatorServer = createServer((_request, response) => {
+    response.setHeader("Content-Type", "text/html");
+    response.end(
+      `<!doctype html><button data-testid="run">Run task</button><button>Other</button><iframe id="pane" srcdoc="<button data-testid=run onclick=&quot;document.querySelector('#result').textContent='Clicked'&quot;>Run task</button><p id=result>waiting</p>"></iframe>`,
+    );
+  });
+  await new Promise((resolve) => locatorServer.listen(0, "127.0.0.1", resolve));
+  const browserTarget = {
+    id: "locator-browser-smoke",
+    name: "Locator browser",
+    kind: "browser",
+    browserMode: "managed",
+    url: `http://127.0.0.1:${locatorServer.address().port}/`,
+  };
+  await insertionPage.evaluate(
+    (target) => window.relay.saveTarget(target),
+    browserTarget,
+  );
+  const runsBeforeMatch = (
+    await insertionPage.evaluate(() => window.relay.bootstrap())
+  ).runs.length;
+  const match = await insertionPage.evaluate(
+    (id) =>
+      window.relay.inspectBrowserLocator(id, {
+        version: 1,
+        selector: { kind: "role", role: "button", name: "Run task" },
+      }),
+    browserTarget.id,
+  );
+  assert.equal(match.status, "unique");
+  assert.equal(match.element.locator.selector.kind, "testId");
+  const ambiguous = await insertionPage.evaluate(
+    (id) => window.relay.inspectBrowserLocator(id, "button"),
+    browserTarget.id,
+  );
+  assert.equal(ambiguous.status, "ambiguous");
+  assert.equal(ambiguous.count, 2);
+  assert.equal(
+    (await insertionPage.evaluate(() => window.relay.bootstrap())).runs.length,
+    runsBeforeMatch,
+    "Test match must not start a run",
+  );
+  const scopedLocator = {
+    version: 1,
+    path: [{ kind: "frame", selector: { kind: "id", value: "pane" } }],
+    selector: { kind: "testId", attribute: "data-testid", value: "run" },
+  };
+  const scopedMatch = await insertionPage.evaluate(
+    ({ id, locator }) => window.relay.inspectBrowserLocator(id, locator),
+    { id: browserTarget.id, locator: scopedLocator },
+  );
+  assert.equal(scopedMatch.status, "unique");
+  assert.deepEqual(scopedMatch.element.locator, scopedLocator);
+  const locatorFlow = {
+    ...branchFixture,
+    id: "locator-graph-smoke",
+    name: "Locator graph fixture",
+    inputs: {},
+    outputs: { result: "${nodes.locator-read}" },
+    nodes: [
+      {
+        id: "locator-start",
+        kind: "start",
+        label: "Start",
+        config: {},
+        position: { x: 0, y: 0 },
+      },
+      {
+        id: "locator-click",
+        kind: "click",
+        label: "Click scoped button",
+        config: { targetId: browserTarget.id, locator: scopedLocator },
+        position: { x: 310, y: 0 },
+      },
+      {
+        id: "locator-read",
+        kind: "read",
+        label: "Read scoped result",
+        config: {
+          targetId: browserTarget.id,
+          locator: {
+            ...scopedLocator,
+            selector: { kind: "css", value: "#result" },
+          },
+        },
+        position: { x: 620, y: 0 },
+      },
+      {
+        id: "locator-end",
+        kind: "end",
+        label: "Finish",
+        config: {},
+        position: { x: 930, y: 0 },
+      },
+    ],
+    edges: [
+      {
+        id: "locator-one",
+        source: "locator-start",
+        target: "locator-click",
+        port: "next",
+      },
+      {
+        id: "locator-two",
+        source: "locator-click",
+        target: "locator-read",
+        port: "next",
+      },
+      {
+        id: "locator-three",
+        source: "locator-read",
+        target: "locator-end",
+        port: "next",
+      },
+    ],
+  };
+  assert.deepEqual(
+    (
+      await insertionPage.evaluate(
+        (flow) => window.relay.validateFlow(flow),
+        locatorFlow,
+      )
+    ).filter((issue) => issue.severity === "error"),
+    [],
+  );
+  const savedLocator = await insertionPage.evaluate(
+    (flow) => window.relay.saveFlow(flow, { expectedRevision: null }),
+    locatorFlow,
+  );
+  assert.equal(savedLocator.status, "saved");
+  const locatorRun = await insertionPage.evaluate(
+    (id) => window.relay.runFlow(id),
+    locatorFlow.id,
+  );
+  assert.equal(
+    (await waitRun(locatorRun.id, insertionPage)).outputs.result,
+    "Clicked",
+  );
   assert.deepEqual(errors, [], "Renderer errors");
   console.log(
     JSON.stringify(
@@ -642,6 +783,8 @@ try {
           "real welcome execution",
           "12-child fixed batch",
           "theme switching",
+          "read-only browser locator inspection IPC",
+          "structured frame locators validate, persist and run through the engine",
           "recording branch insertion preserves successor and other branch",
           "inserted branch executes through the real engine",
           "recording graph undo/redo saves through revision checks",
@@ -669,6 +812,8 @@ try {
     await app.close();
   } finally {
     clearTimeout(forceClose);
+    if (locatorServer)
+      await new Promise((resolve) => locatorServer.close(resolve));
   }
   await rm(dataDir, { recursive: true, force: true });
 }

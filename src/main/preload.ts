@@ -19,6 +19,7 @@ const methods: (keyof Omit<RelayAPI, "onEvent">)[] = [
   "browserBridge",
   "capture",
   "testDetector",
+  "inspectBrowserLocator",
   "startRecording",
   "recordAction",
   "stopRecording",

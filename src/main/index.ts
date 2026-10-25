@@ -46,6 +46,7 @@ import {
   resolveRecordingAnchor,
 } from "../shared/recording";
 import { defaultCapabilities } from "../shared/seed";
+import { browserLocatorSchema } from "../shared/browser-locators";
 import type {
   AIConnection,
   AppEvent,
@@ -557,6 +558,14 @@ async function request(
       return rpc(
         "testDetector",
         z.record(z.string(), jsonSchema).parse(args[0]),
+      );
+    case "inspectBrowserLocator":
+      return rpc(
+        method,
+        id(),
+        z
+          .union([browserLocatorSchema, z.string().min(1).max(4000)])
+          .parse(args[1]),
       );
     case "startRecording": {
       const options = recordingStartSchema.parse(args[0]);

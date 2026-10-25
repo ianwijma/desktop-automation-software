@@ -49,6 +49,14 @@ Pure orchestration frames hold no resource lease. A concrete invocation reserves
 
 Timeout and cancellation abort adapters, await child cleanup, and release held input before freeing a desktop reservation. Adapters must reject stale completions and avoid retrying a possibly completed input action. Native-process timeout recovery performs a separate input-release cleanup before admitting more input.
 
+## Browser targeting
+
+`extension/browser-runtime.js` is the canonical self-contained DOM matcher, locator generator, and basic event extractor. Managed Chromium evaluates the same function that the extension imports and injects through CDP. Shared versioned descriptors support test attributes, role/name, labels, IDs, CSS, and ordered frame/open-shadow scopes. Every scope and action leaf must resolve to one element; ambiguous matches never choose a first result. Legacy CSS configuration remains supported without migration.
+
+The managed adapter resolves exact frame-owner handles through Playwright. The extension resolves frame owners through CDP node identity and uses isolated worlds, including flat child sessions for cross-origin frames. Pointer mapping checks frame geometry and hit targets before dispatch. Both modes install the shared recorder per frame, carrying its owner-derived locator path. Session tokens, pending-install drains, and listener cleanup retain R01 ownership semantics. They share extraction of the existing event set; B02 remains responsible for broader normalization and recording coverage.
+
+Locator inspection is an explicit validated preload/main/utility request. It reports match counts and a bounded semantic summary without sending input or starting a run. The renderer shares locator controls between node properties and recording review, preserves unsupported descriptors, and invalidates late inspection responses when the target/query changes. Browser preview rejects inspection. See [browser locator semantics and limitations](browser-locators.md).
+
 ## Detection
 
 Capture coordinates are separate from preview display size. Frames identify their target, capture time, source dimensions, and bounds. Region offsets are restored before a detected box becomes an action target. Detected-coordinate actions must include their source `frameId`; stale or moved/resized captures are rejected.

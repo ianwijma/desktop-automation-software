@@ -192,6 +192,27 @@ export interface RecordedAction {
   config: Record<string, Json>;
   at: number;
 }
+export type BrowserSelector =
+  | { kind: "testId"; attribute: string; value: string }
+  | { kind: "role"; role: string; name?: string }
+  | { kind: "label" | "id" | "css"; value: string };
+export type BrowserLocator = {
+  version: 1;
+  selector: BrowserSelector;
+  path?: { kind: "frame" | "shadow"; selector: BrowserSelector }[];
+};
+export interface BrowserLocatorInspection {
+  status: "unique" | "missing" | "ambiguous";
+  count: number;
+  visible?: boolean;
+  element?: {
+    tag: string;
+    role: string;
+    name: string;
+    id: string;
+    locator: BrowserLocator;
+  };
+}
 export interface RecordingState {
   phase: "idle" | "capturing" | "paused" | "review";
   sessionId?: string;
@@ -294,6 +315,10 @@ export interface RelayAPI {
   browserBridge(): Promise<{ port: number; token: string; connected: boolean }>;
   capture(targetId: string): Promise<CaptureFrame>;
   testDetector(config: Record<string, Json>): Promise<DetectionResult>;
+  inspectBrowserLocator(
+    targetId: string,
+    locator: BrowserLocator | string,
+  ): Promise<BrowserLocatorInspection>;
   startRecording(options: RecordingStartOptions): Promise<RecordingState>;
   recordAction(
     sessionId: string,

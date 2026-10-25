@@ -6,6 +6,7 @@ import type {
   TargetDescriptor,
   ValidationIssue,
 } from "./types";
+import { browserLocatorSchema } from "./browser-locators";
 
 /** Shared by the editor, import/preflight validation and runtime; no renderer dependencies. */
 export const nodeKinds = [
@@ -517,8 +518,8 @@ export function nodeRequirements(
     browserKinds.has(kind) ||
     (detector && config.detector === "element") ||
     (!detector &&
-      Boolean(config.selector) &&
-      (options?.resolved || !hasReference(config.selector)));
+      Boolean(config.selector || config.locator) &&
+      (options?.resolved || !hasReference(config.selector ?? config.locator)));
   return {
     target: {
       kinds: browser ? ["browser"] : ["desktop", "browser"],
@@ -591,6 +592,17 @@ export function validateNodeConfig(
       error(`${key} must be an object`);
   };
   numeric("timeoutMs", Number.MIN_VALUE);
+  if (present(config.locator)) {
+    if (
+      !reference(config.locator) &&
+      !browserLocatorSchema.safeParse(config.locator).success
+    )
+      error(
+        "Browser locator is invalid; complete its strategy and scope fields",
+      );
+    if (present(config.selector))
+      error("Choose one browser locator or legacy selector");
+  }
   for (const key of ["targetId", "connectionId", "selector", "frameId"])
     if (config[key] !== undefined && typeof config[key] !== "string")
       error(`${key} must be a string`);
@@ -608,7 +620,7 @@ export function validateNodeConfig(
       choice("button", ["left", "right", "middle"]);
     if (kind === "click") numeric("clickCount", 1, Infinity, true);
     if ((kind === "click" || kind === "move") && present(config.detection)) {
-      if (config.selector)
+      if (config.selector || config.locator)
         error(
           "Choose one location source: a detected result or a browser selector",
         );
@@ -642,7 +654,7 @@ export function validateNodeConfig(
     )
       error("Launch args must be an array of strings");
   }
-  if (kind === "select" && context)
+  if (kind === "select" && context && !present(config.locator))
     required("selector", "Choose a browser element selector");
   if (kind === "tab") {
     choice("action", ["new", "close", "switch"]);
@@ -750,7 +762,7 @@ export function validateNodeConfig(
         !/^data:image\/(png|jpeg);base64,/.test(config.template))
     )
       error("Template must be a PNG or JPEG data URL");
-    if (context && type === "element")
+    if (context && type === "element" && !present(config.locator))
       required("selector", "Element detection requires a browser selector");
     if (context && type === "text" && !present(config.text ?? config.prompt))
       error("Enter the text to detect");

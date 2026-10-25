@@ -39,6 +39,10 @@ import { ValueField } from "./value-field";
 import { ChildInputs, isRecord } from "./child-inputs";
 import { SchemaField } from "./schema-field";
 import {
+  BrowserLocatorField,
+  supportsBrowserLocator,
+} from "./browser-locator-field";
+import {
   updateNodeConfig,
   setWaitMode,
   setLoopMode,
@@ -693,6 +697,7 @@ export function Inspector({
   onDelete,
   onDuplicate,
   onTest,
+  onInspectLocator,
   issues,
 }: {
   flow: FlowDefinition;
@@ -702,6 +707,7 @@ export function Inspector({
   onDelete: () => void;
   onDuplicate: () => void;
   onTest: (config: Record<string, Json>) => void;
+  onInspectLocator?: import("../shared/types").RelayAPI["inspectBrowserLocator"];
   issues: ValidationIssue[];
 }) {
   const [advanced, setAdvanced] = useState(false);
@@ -865,6 +871,11 @@ export function Inspector({
               )
               .filter((f) => {
                 if (
+                  f.key === "selector" &&
+                  supportsBrowserLocator(node.kind, node.config, workspace)
+                )
+                  return false;
+                if (
                   node.kind === "condition" &&
                   f.key === "right" &&
                   (node.config.operator ?? "truthy") === "truthy"
@@ -947,6 +958,17 @@ export function Inspector({
                   references={references}
                 />
               ))}
+            {supportsBrowserLocator(node.kind, node.config, workspace) ? (
+              <BrowserLocatorField
+                kind={node.kind}
+                config={node.config}
+                workspace={workspace}
+                onChange={(config) => update({ config })}
+                inspect={onInspectLocator}
+                references={references}
+                consumerNodeId={node.id}
+              />
+            ) : null}
             {spec.fields.length === 0 ? (
               <p className="muted small">
                 This node needs no configuration. Connect it to your next step.

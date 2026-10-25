@@ -12,7 +12,10 @@ import {
 } from "node:http";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import type { BrowserContext, Page } from "playwright";
+import type { BrowserContext, Page, Frame, ElementHandle } from "playwright";
+import { browserRuntime } from "../../extension/browser-runtime.js";
+import { browserLocatorSchema } from "../shared/browser-locators";
+import type { BrowserLocator, BrowserLocatorInspection } from "../shared/types";
 import type {
   CaptureFrame,
   Json,
@@ -82,107 +85,6 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     }, ms);
     signal?.addEventListener("abort", abort, { once: true });
   });
-}
-export function installRecorder(recordingId: string | null) {
-  const global = window as Window & {
-    __relayRecorder?: { recordingId: string; stop: () => void };
-    relayRecordEvent?: (event: unknown) => void;
-  };
-  global.__relayRecorder?.stop();
-  delete global.__relayRecorder;
-  if (!recordingId) return;
-  const listeners = new AbortController();
-  global.__relayRecorder = { recordingId, stop: () => listeners.abort() };
-  const selector = (element: Element) => {
-    if (element.id) return `#${CSS.escape(element.id)}`;
-    if (element.getAttribute("data-testid"))
-      return `[data-testid="${CSS.escape(element.getAttribute("data-testid")!)}"]`;
-    const parts: string[] = [];
-    let current: Element | null = element;
-    while (current && current !== document.documentElement) {
-      let part = current.tagName.toLowerCase();
-      const parent: Element | null = current.parentElement;
-      if (parent) {
-        const siblings = [...parent.children].filter(
-          (child) => child.tagName === current!.tagName,
-        );
-        if (siblings.length > 1)
-          part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
-      }
-      parts.unshift(part);
-      if (parts.length >= 7) break;
-      current = parent;
-    }
-    return parts.join(" > ");
-  };
-  const send = (kind: string, label: string, config: unknown) => {
-    void global.relayRecordEvent?.({
-      recordingId,
-      kind,
-      label,
-      config,
-      at: Date.now(),
-    });
-  };
-  document.addEventListener(
-    "click",
-    (event) => {
-      if (!(event.target instanceof Element) || !event.isTrusted) return;
-      const element =
-        event.target.closest(
-          'button,a,input,select,textarea,[role="button"]',
-        ) ?? event.target;
-      send(
-        "click",
-        `Click ${(element.textContent ?? element.tagName).trim().slice(0, 40)}`,
-        {
-          selector: selector(element),
-          x: event.clientX,
-          y: event.clientY,
-          button: "left",
-        },
-      );
-    },
-    { capture: true, signal: listeners.signal },
-  );
-  document.addEventListener(
-    "change",
-    (event) => {
-      if (!event.isTrusted) return;
-      if (event.target instanceof HTMLSelectElement)
-        send("select", "Select option", {
-          selector: selector(event.target),
-          value: event.target.value,
-        });
-      else if (
-        event.target instanceof HTMLInputElement ||
-        event.target instanceof HTMLTextAreaElement
-      ) {
-        const secret =
-          event.target instanceof HTMLInputElement &&
-          event.target.type === "password";
-        send(
-          "type",
-          secret ? "Enter password (configure value)" : "Type text",
-          {
-            selector: selector(event.target),
-            text: secret ? "" : event.target.value,
-            ...(secret ? { secret: true } : {}),
-          },
-        );
-      }
-    },
-    { capture: true, signal: listeners.signal },
-  );
-  document.addEventListener(
-    "keydown",
-    (event) => {
-      if (!event.isTrusted) return;
-      if (["Enter", "Tab", "Escape"].includes(event.key))
-        send("key", `Press ${event.key}`, { key: event.key });
-    },
-    { capture: true, signal: listeners.signal },
-  );
 }
 export class BrowserAdapter {
   private contexts = new Map<string, BrowserContext>();
@@ -467,6 +369,13 @@ export class BrowserAdapter {
       if (recording?.page === page)
         void this.installManagedRecorder(page, recording).catch(() => {});
     });
+    page.on("framenavigated", (frame) => {
+      const recording = this.recording;
+      if (recording?.page === page && frame !== page.mainFrame())
+        void this.installManagedRecorder(page, recording, frame).catch(
+          () => {},
+        );
+    });
     if (target.url && page.url() === "about:blank") await page.goto(target.url);
     return page;
   }
@@ -512,6 +421,73 @@ export class BrowserAdapter {
     this.frames.set(target.id, frame);
     return frame;
   }
+  private async domScope(page: Page, query: Record<string, unknown>) {
+    let frame: Frame = page.mainFrame();
+    const owners: { frame: Frame; element: ElementHandle<Element> }[] = [];
+    const locator = query.locator as BrowserLocator | undefined;
+    let shadow: NonNullable<BrowserLocator["path"]> = [],
+      prefix: NonNullable<BrowserLocator["path"]> = [];
+    try {
+      for (const [index, step] of (locator?.path ?? []).entries()) {
+        if (step.kind === "shadow") {
+          shadow.push(step);
+          continue;
+        }
+        const handle = await frame.evaluateHandle(browserRuntime, {
+          operation: "resolve",
+          locator: { version: 1, selector: step.selector, path: shadow },
+        });
+        const element = handle.asElement() as ElementHandle<Element> | null;
+        if (!element) {
+          await handle.dispose();
+          throw new Error("Frame locator did not identify an element");
+        }
+        owners.push({ frame, element });
+        const child = await element.contentFrame();
+        if (!child) throw new Error("The frame document is unavailable");
+        frame = child;
+        shadow = [];
+        prefix = locator!.path!.slice(0, index + 1);
+      }
+      return {
+        frame,
+        owners,
+        prefix,
+        query: locator
+          ? ({ locator: { ...locator, path: shadow } } as Record<
+              string,
+              unknown
+            >)
+          : query,
+      };
+    } catch (error) {
+      await Promise.all(owners.map((owner) => owner.element.dispose()));
+      throw error;
+    }
+  }
+  private async domPoint(
+    scope: Awaited<ReturnType<BrowserAdapter["domScope"]>>,
+  ) {
+    const point = await scope.frame.evaluate(browserRuntime, {
+      operation: "point",
+      ...scope.query,
+    });
+    for (const owner of [...scope.owners].reverse()) {
+      const geometry = await owner.frame.evaluate(browserRuntime, {
+        operation: "frameGeometry",
+        element: owner.element,
+      });
+      point.x = geometry.x + point.x * geometry.scaleX;
+      point.y = geometry.y + point.y * geometry.scaleY;
+      await owner.frame.evaluate(browserRuntime, {
+        operation: "verifyPoint",
+        element: owner.element,
+        x: point.x,
+        y: point.y,
+      });
+    }
+    return point as { x: number; y: number };
+  }
   async execute(
     kind: NodeKind,
     config: Record<string, Json>,
@@ -520,11 +496,17 @@ export class BrowserAdapter {
     ownerId = "interactive",
   ): Promise<Json> {
     if (signal?.aborted) throw new Error("Cancelled");
+    if (config.locator) {
+      browserLocatorSchema.parse(config.locator);
+      if (config.selector)
+        throw new Error("Choose one browser locator or legacy selector.");
+    }
     if (kind === "screenshot")
       return (await this.capture(target, signal)) as unknown as Json;
     if (
       ["click", "move", "drag", "scroll"].includes(kind) &&
-      !config.selector
+      !config.selector &&
+      !config.locator
     ) {
       let frame = this.frames.get(target.id);
       if (config.frameId && config.frameId !== frame?.id)
@@ -582,10 +564,13 @@ export class BrowserAdapter {
       this.pages.delete(target.id);
     };
     signal?.addEventListener("abort", abort, { once: true });
-    const selector =
-      typeof config.selector === "string" && config.selector
-        ? page.locator(config.selector)
-        : undefined;
+    let selector: ElementHandle<Element> | null = null;
+    let scope: Awaited<ReturnType<BrowserAdapter["domScope"]>> | undefined;
+    let query: Record<string, unknown> = {
+      ...(config.locator
+        ? { locator: config.locator }
+        : { selector: config.selector }),
+    };
     const timeout = Math.max(
       100,
       Math.min(120000, Number(config.timeoutMs ?? 15000)),
@@ -596,6 +581,24 @@ export class BrowserAdapter {
       ? (config.button as "left" | "right" | "middle")
       : "left";
     try {
+      scope = await this.domScope(page, query);
+      query = scope.query;
+      const frame = scope.frame;
+      if (
+        (config.locator || config.selector) &&
+        ["click", "move", "drag", "scroll", "type", "key", "select"].includes(
+          kind,
+        )
+      ) {
+        selector = (
+          await frame.evaluateHandle(browserRuntime, {
+            operation: "resolve",
+            ...query,
+          })
+        ).asElement() as ElementHandle<Element> | null;
+        if (!selector)
+          throw new Error("Browser locator did not resolve to an element");
+      }
       switch (kind) {
         case "launch":
         case "navigate":
@@ -632,7 +635,8 @@ export class BrowserAdapter {
           else await page.mouse.move(x, y);
           return true;
         case "drag":
-          await page.mouse.move(x, y);
+          const start = selector ? await this.domPoint(scope) : { x, y };
+          await page.mouse.move(start.x, start.y);
           await page.mouse.down({ button });
           try {
             await page.mouse.move(Number(config.toX), Number(config.toY), {
@@ -643,7 +647,10 @@ export class BrowserAdapter {
           }
           return true;
         case "scroll":
-          if (config.x !== undefined) await page.mouse.move(x, y);
+          if (selector) {
+            const start = await this.domPoint(scope);
+            await page.mouse.move(start.x, start.y);
+          } else if (config.x !== undefined) await page.mouse.move(x, y);
           await page.mouse.wheel(
             Number(config.deltaX ?? 0),
             Number(config.deltaY ?? 0),
@@ -655,7 +662,11 @@ export class BrowserAdapter {
           else await page.keyboard.insertText(String(config.text ?? ""));
           return true;
         case "key": {
-          if (selector) await selector.focus({ timeout });
+          if (selector)
+            await frame.evaluate(browserRuntime, {
+              operation: "focus",
+              ...query,
+            });
           const keys = keyParts(config.key);
           if (config.action === "down")
             for (const key of keys) await page.keyboard.down(key);
@@ -679,33 +690,18 @@ export class BrowserAdapter {
           return true;
         }
         case "read":
-          return selector
-            ? await selector.innerText({ timeout })
-            : await page.locator("body").innerText({ timeout });
-        case "detect": {
-          if (!selector)
-            throw new Error("Element detection requires a selector");
-          const count = await selector.count();
-          if (count > 1)
-            return {
-              outcome: "uncertain",
-              evidence: `${count} elements match; use a more specific selector`,
-            };
-          const present = count === 1 && (await selector.isVisible());
-          const value = present ? await selector.innerText({ timeout }) : "";
-          const expected = config.text ?? config.prompt;
-          const match =
-            present &&
-            (typeof expected !== "string" || value.includes(expected));
-          return {
-            outcome: match ? "match" : "no-match",
-            confidence: 1,
-            value,
-            evidence: present
-              ? "Element is visible"
-              : "No visible element matches",
-          };
-        }
+          return await frame.evaluate(browserRuntime, {
+            operation: "read",
+            ...query,
+          });
+        case "detect":
+          if (!config.locator && !config.selector)
+            throw new Error("Element detection requires a browser locator");
+          return await frame.evaluate(browserRuntime, {
+            operation: "detect",
+            ...query,
+            text: (config.text ?? config.prompt) as unknown,
+          });
         case "select":
           if (!selector) throw new Error("Select requires a selector");
           return await selector.selectOption(String(config.value ?? ""), {
@@ -744,6 +740,47 @@ export class BrowserAdapter {
       }
     } finally {
       signal?.removeEventListener("abort", abort);
+      await selector?.dispose().catch(() => {});
+      await Promise.all(
+        scope?.owners.map((owner) => owner.element.dispose().catch(() => {})) ??
+          [],
+      );
+    }
+  }
+  async inspectLocator(
+    target: TargetDescriptor,
+    locator: BrowserLocator | string,
+  ): Promise<BrowserLocatorInspection> {
+    const query =
+      typeof locator === "string"
+        ? { selector: locator }
+        : { locator: browserLocatorSchema.parse(locator) };
+    if (target.browserMode === "extension")
+      return (await this.extension(
+        "inspectLocator",
+        target,
+        undefined,
+        query as unknown as Record<string, Json>,
+      )) as unknown as BrowserLocatorInspection;
+    const scope = await this.domScope(await this.page(target), query);
+    try {
+      const result: BrowserLocatorInspection = await scope.frame.evaluate(
+        browserRuntime,
+        { operation: "inspect", ...scope.query },
+      );
+      if (result.element && scope.prefix.length)
+        result.element.locator.path = [
+          ...scope.prefix,
+          ...(result.element.locator.path ?? []),
+        ];
+      if (result.visible)
+        for (const owner of scope.owners)
+          result.visible = result.visible && (await owner.element.isVisible());
+      return result;
+    } finally {
+      await Promise.all(
+        scope.owners.map((owner) => owner.element.dispose().catch(() => {})),
+      );
     }
   }
   async startRecording(
@@ -797,11 +834,42 @@ export class BrowserAdapter {
   private async installManagedRecorder(
     page: Page,
     recording: NonNullable<BrowserAdapter["recording"]>,
+    selectedFrame?: Frame,
   ): Promise<void> {
     if (this.recording !== recording || page.isClosed()) return;
-    const operation = page
-      .evaluate(installRecorder, recording.id)
-      .then(() => {});
+    const operation = (async () => {
+      for (const frame of selectedFrame ? [selectedFrame] : page.frames()) {
+        if (frame.isDetached()) continue;
+        await frame.waitForLoadState("domcontentloaded", { timeout: 10000 });
+        const basePath: NonNullable<BrowserLocator["path"]> = [];
+        let current = frame;
+        while (current.parentFrame()) {
+          const parent = current.parentFrame()!,
+            element = await current.frameElement();
+          try {
+            const owner: BrowserLocator = await parent.evaluate(
+              browserRuntime,
+              { operation: "describe", element },
+            );
+            basePath.unshift(...(owner.path ?? []), {
+              kind: "frame",
+              selector: owner.selector,
+            });
+          } finally {
+            await element.dispose();
+          }
+          current = parent;
+        }
+        if (this.recording !== recording || frame.isDetached()) return;
+        await frame.evaluate(browserRuntime, {
+          operation: "record",
+          recordingId: recording.id,
+          transport: "managed",
+          singleDocument: true,
+          basePath,
+        });
+      }
+    })();
     this.recordingInstalls.add(operation);
     try {
       await operation;
@@ -818,7 +886,18 @@ export class BrowserAdapter {
         recordingId: recording.id,
       });
     else if (recording.page && !recording.page.isClosed())
-      await recording.page.evaluate(installRecorder, null);
+      await Promise.all(
+        recording.page.frames().map(async (frame) => {
+          try {
+            await frame.evaluate(browserRuntime, {
+              operation: "record",
+              recordingId: null,
+            });
+          } catch (error) {
+            if (!frame.isDetached()) throw error;
+          }
+        }),
+      );
     if (this.installedRecording === recording)
       this.installedRecording = undefined;
   }

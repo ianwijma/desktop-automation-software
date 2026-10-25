@@ -58,3 +58,22 @@
 .flow-value-contract {
   margin-bottom: 20px;
 }
+.browser-locator-field,
+.browser-locator-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.browser-locator-field {
+  margin: 12px 0;
+}
+.browser-locator-scope {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.locator-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

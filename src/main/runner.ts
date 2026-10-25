@@ -489,6 +489,17 @@ async function handle(method: string, args: unknown[]): Promise<unknown> {
       throw new Error("Stop active workflows before testing a detector.");
     return detect(args[0] as Record<string, Json>);
   }
+  if (method === "inspectBrowserLocator") {
+    const target = targetFor(args[0]);
+    if (target.kind !== "browser")
+      throw new Error("Locator inspection requires a browser target.");
+    if (engine.isActive())
+      throw new Error("Stop active workflows before testing a locator.");
+    return browser.inspectLocator(
+      target,
+      args[1] as import("../shared/types").BrowserLocator | string,
+    );
+  }
   if (method === "recording") return recording.getState();
   if (method === "runFlow") {
     if (recordingLocked() || stoppingRuns)
