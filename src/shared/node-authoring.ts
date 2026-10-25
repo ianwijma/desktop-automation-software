@@ -13,6 +13,7 @@ const detectorFields = [
   "language",
   "watchId",
   "selector",
+  "locator",
   "connectionId",
   "locate",
 ];
@@ -24,6 +25,7 @@ const detectorOnlyFields: Record<string, readonly string[]> = {
   language: ["text"],
   watchId: ["change"],
   selector: ["element"],
+  locator: ["element"],
   connectionId: ["ai"],
   locate: ["ai"],
   threshold: ["image", "color", "change", "ai"],

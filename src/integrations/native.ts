@@ -456,7 +456,7 @@ export class NativeAdapter {
       if (kind === "close") this.bindings.delete(target.id);
       return result;
     }
-    if (config.selector)
+    if (config.selector || config.locator)
       throw new Error(
         "Native accessibility selectors are not implemented; use a visual detector or window-relative coordinates",
       );

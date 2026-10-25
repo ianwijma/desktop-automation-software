@@ -54,6 +54,11 @@ async function imported(data: unknown) {
 }
 
 describe("browser preview persistence", () => {
+  it("rejects browser locator inspection rather than simulating desktop access", async () => {
+    await expect(
+      previewAPI.inspectBrowserLocator("browser", "button"),
+    ).rejects.toThrow(/requires the Relay desktop application/);
+  });
   it("migrates v1 storage without changing revisions or node configuration", async () => {
     const state = await seed();
     const legacy = {

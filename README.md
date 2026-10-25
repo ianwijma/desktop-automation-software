@@ -48,7 +48,9 @@ For an existing Chrome/Edge session:
 4. Enter the local port and pairing token in the extension popup.
 5. Add a browser target using the extension connection.
 
-The bridge listens only on loopback and authenticates requests. Pairing is scoped to the running application session; browser extension permissions and restricted pages still apply. The extension uses the browser's debugger permission while controlling a tab.
+The bridge listens only on loopback and authenticates requests. Pairing is scoped to the running application session; browser extension permissions and restricted pages still apply. The extension uses the browser's debugger permission while controlling a tab. Frame targeting requires Chrome/Chromium 125+ debugger child-session support.
+
+Browser actions and recordings support shared test-attribute, role/name, label, ID, and CSS locators, including frame and open shadow-root scopes. Use **Test match** in node properties or recording review to inspect a target without sending input. See [browser locators](docs/browser-locators.md).
 
 ## AI connections
 
@@ -70,7 +72,7 @@ Use the inspectors to configure duration or detector waits, numeric conditions, 
 
 Recording keeps a recoverable local draft: pause to switch targets, stop to review, edit and undo steps without replaying them, then insert into a new flow or a chosen edge/output in the original flow. Connected successors are preserved, decision branches are explicit, and the whole insertion supports graph undo/redo. Restart always opens the draft in review. See [recording and reviewing a workflow](docs/recording.md).
 
-To click an image or AI-detected object, connect the detector's **match** output to a Click node. Beside **Detected result**, choose **Use value from…** and select the detector's complete result. Use the same application target for both nodes. Relay clicks the box center and verifies its capture is still fresh and belongs to the selected target. Enable location output for AI detectors; browser element detection uses selectors.
+To click an image or AI-detected object, connect the detector's **match** output to a Click node. Beside **Detected result**, choose **Use value from…** and select the detector's complete result. Use the same application target for both nodes. Relay clicks the box center and verifies its capture is still fresh and belongs to the selected target. Enable location output for AI detectors; browser element detection uses selectors or structured locators.
 
 A root run snapshots its complete referenced flow tree. Child results preserve input order. Desktop-dependent work reserves the physical desktop across waits; independent browser profiles and AI work can overlap. Nested callers inherit reservations without allowing conflicting siblings to run together.
 
