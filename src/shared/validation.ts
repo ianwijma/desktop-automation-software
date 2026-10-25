@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Json } from "./types";
 import { nodeKinds } from "./node-definitions";
+import { recordableKinds } from "./recording";
 
 export const jsonSchema: z.ZodType<Json> = z.lazy(() =>
   z.union([
@@ -145,10 +146,80 @@ export const scheduleSchema = z.object({
   nextRunAt: z.string().optional(),
 });
 export const actionSchema = z.object({
-  kind: nodeKind,
+  kind: z.enum(recordableKinds),
   label: z.string().max(200),
   config: configSchema,
 });
+export const recordedActionSchema = actionSchema.extend({
+  id,
+  at: z.number().finite().nonnegative(),
+});
+export const recordedActionsSchema = z
+  .array(recordedActionSchema)
+  .max(2000)
+  .refine(
+    (actions) =>
+      new Set(actions.map((action) => action.id)).size === actions.length,
+    "Recorded step IDs must be unique.",
+  );
+export const recordingStartSchema = z.object({
+  targetId: id,
+  mode: z.enum(["guided", "direct"]),
+  flowId: id,
+  flowRevision: z.number().int().positive(),
+  anchorNodeId: id.optional(),
+});
+export const recordingInsertSchema = z.object({
+  destination: z.enum(["new", "bound"]),
+  name: z.string().trim().min(1).max(160).optional(),
+});
+export const recordingStateSchema = z
+  .object({
+    phase: z.enum(["idle", "capturing", "paused", "review"]),
+    sessionId: id.optional(),
+    revision: z.number().int().nonnegative(),
+    active: z.boolean(),
+    mode: z.enum(["guided", "direct"]),
+    targetId: id.optional(),
+    destination: z
+      .object({
+        flowId: id,
+        flowRevision: z.number().int().positive(),
+        flowName: z.string().max(160),
+        anchorNodeId: id.optional(),
+      })
+      .optional(),
+    actions: recordedActionsSchema,
+    recovered: z.boolean().optional(),
+    error: z.string().max(4000).optional(),
+  })
+  .superRefine((state, ctx) => {
+    if (state.active !== (state.phase === "capturing"))
+      ctx.addIssue({
+        code: "custom",
+        message: "Recording activity does not match its phase.",
+      });
+    if (
+      state.phase !== "idle" &&
+      (!state.sessionId ||
+        !state.destination ||
+        !state.targetId ||
+        state.revision < 1)
+    )
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "A recording draft requires a session, target, destination, and revision.",
+      });
+    if (
+      state.phase === "idle" &&
+      (state.sessionId || state.destination || state.actions.length)
+    )
+      ctx.addIssue({
+        code: "custom",
+        message: "An idle recorder cannot contain a draft.",
+      });
+  });
 export function boundedJson(value: unknown): void {
   if (JSON.stringify(value).length > 12_000_000)
     throw new Error("This request exceeds the 12 MB limit.");

@@ -1,0 +1,231 @@
+.recording-binding {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-bottom: 20px;
+  padding: 13px 15px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 11px;
+}
+.recording-binding strong {
+  color: var(--text);
+  font-weight: 500;
+}
+.recording-binding small {
+  width: 100%;
+  line-height: 1.6;
+  color: var(--faint);
+  font-size: 10px;
+}
+.recording-binding .button {
+  margin-left: auto;
+}
+.capture-preview.is-paused .capture-image-wrap {
+  opacity: 0.65;
+  cursor: default;
+}
+.recording-review {
+  max-width: 1000px;
+  margin: 0 auto;
+}
+.review-heading {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  margin: 20px 0 16px;
+}
+.review-heading h3 {
+  font-size: 14px;
+  font-weight: 600;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.review-heading p {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 7px;
+  line-height: 1.6;
+}
+.review-history {
+  display: flex;
+  gap: 4px;
+}
+.review-actions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.review-action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.review-action:last-child {
+  border-bottom: 0;
+}
+.review-action .step-number {
+  width: 18px;
+  font-size: 11px;
+}
+.review-action-title {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: transparent;
+  color: var(--text);
+  padding: 4px 0;
+  border: 0;
+  cursor: pointer;
+}
+.review-action-title strong {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  width: 100%;
+}
+.review-action-title small {
+  font-size: 10px;
+  color: var(--muted);
+}
+.review-action-title:hover strong {
+  color: var(--accent);
+}
+.review-action-tools {
+  display: flex;
+  gap: 2px;
+}
+.recording-insertion {
+  margin-top: 26px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: 0 20px 20px;
+  border-radius: 10px;
+}
+.recording-insertion > .field {
+  margin: 15px 0;
+}
+.recording-insertion .field-help {
+  line-height: 1.7;
+}
+.recording-insert-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border-soft);
+}
+.review-recovery {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+.recorded-step-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 0;
+}
+.recorded-step-form fieldset {
+  padding: 0;
+  margin: 0;
+  border: 0;
+  min-width: 0;
+}
+.recorded-step-form fieldset > .field {
+  margin-bottom: 20px;
+}
+.recorded-step-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.recorded-step-fields .value-field {
+  min-width: 0;
+}
+.recorded-step-form fieldset > .button {
+  margin: 18px 0;
+}
+.recorded-template {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.recorded-template img {
+  max-width: 100%;
+  max-height: 160px;
+  object-fit: contain;
+  align-self: flex-start;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+.recording-draft-nav {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0 14px 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  text-align: left;
+  cursor: pointer;
+}
+.recording-draft-nav span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.recording-draft-nav small {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 10px;
+}
+.recording-standalone {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+@media (max-width: 1000px) {
+  .review-action {
+    gap: 8px;
+    padding: 10px;
+    flex-wrap: wrap;
+  }
+  .review-action-tools {
+    margin-left: auto;
+  }
+  .recording-insertion {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+}

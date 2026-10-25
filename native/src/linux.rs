@@ -260,7 +260,7 @@ pub fn release_all() -> Result<Value> {
     }
     Ok(json!(true))
 }
-pub fn record(p: Value, active: Arc<AtomicBool>) -> Result<()> {
+pub fn record(p: Value, active: Arc<AtomicBool>) -> Result<thread::JoinHandle<()>> {
     x11()?;
     let recording_id = str_field(&p, "recordingId").to_string();
     let target = id(&p)?.to_string();
@@ -274,7 +274,7 @@ pub fn record(p: Value, active: Arc<AtomicBool>) -> Result<()> {
     let child = Arc::new(Mutex::new(child));
     let monitor = child.clone();
     let flag = active.clone();
-    thread::spawn(move || {
+    let monitor_worker = thread::spawn(move || {
         while flag.load(Ordering::SeqCst) {
             thread::sleep(Duration::from_millis(50));
         }
@@ -291,7 +291,7 @@ pub fn record(p: Value, active: Arc<AtomicBool>) -> Result<()> {
             Some((code, key))
         })
         .collect();
-    thread::spawn(move || {
+    let worker = thread::spawn(move || {
         let mut event = String::new();
         let mut pressed: HashMap<String, (i64, i64)> = HashMap::new();
         for line in io::BufReader::new(stdout).lines() {
@@ -349,6 +349,9 @@ pub fn record(p: Value, active: Arc<AtomicBool>) -> Result<()> {
                 None
             };
             if let Some(mut action) = action {
+                if !active.load(Ordering::SeqCst) {
+                    break;
+                }
                 if action["kind"] == "click" || action["kind"] == "drag" {
                     action["config"]["expectedWidth"] = g["width"].clone();
                     action["config"]["expectedHeight"] = g["height"].clone();
@@ -363,9 +366,10 @@ pub fn record(p: Value, active: Arc<AtomicBool>) -> Result<()> {
             let _ = c.kill();
             let _ = c.wait();
         }
+        let _ = monitor_worker.join();
         emit(json!({"event":"recordingStopped","recordingId":recording_id}));
     });
-    Ok(())
+    Ok(worker)
 }
 
 pub fn release_keys(p: &Value) -> Result<Value> {

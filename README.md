@@ -68,6 +68,8 @@ Choose **Use value from…** beside a node field to select flow inputs, variable
 
 Use the inspectors to configure duration or detector waits, numeric conditions, count or foreach loops, child-input overrides, and structured AI output schemas. Flow overview edits typed input defaults and output mappings. Advanced JSON remains available. See [structured inspectors and flow interfaces](docs/structured-inspectors.md).
 
+Recording keeps a recoverable local draft: pause to switch targets, stop to review, edit and undo steps without replaying them, then explicitly insert into a new flow or the original flow's selected free tail. Restart always opens the draft in review. See [recording and reviewing a workflow](docs/recording.md).
+
 To click an image or AI-detected object, connect the detector's **match** output to a Click node. Beside **Detected result**, choose **Use value from…** and select the detector's complete result. Use the same application target for both nodes. Relay clicks the box center and verifies its capture is still fresh and belongs to the selected target. Enable location output for AI detectors; browser element detection uses selectors.
 
 A root run snapshots its complete referenced flow tree. Child results preserve input order. Desktop-dependent work reserves the physical desktop across waits; independent browser profiles and AI work can overlap. Nested callers inherit reservations without allowing conflicting siblings to run together.

@@ -40,7 +40,8 @@ import type {
   FlowNode,
   NodeKind,
   ValidationIssue,
-  RecordedAction,
+  RecordingState,
+  RecordingInsertOptions,
   Json,
   FlowSaveResult,
 } from "../shared/types";
@@ -48,6 +49,8 @@ import { previewAPI } from "./preview-api";
 import { catalog, blankFlow, uid } from "./catalog";
 import { GraphEditor, Inspector, NodePalette } from "./editor";
 import { Recorder } from "./recorder";
+import type { RecordingReviewCache } from "./recording-review";
+import { recordingAnchor } from "../shared/recording";
 import { Settings } from "./settings";
 import { Runs, Schedules } from "./runs";
 import { Button, IconButton, Modal, JsonField } from "./components";
@@ -81,6 +84,7 @@ function App() {
   const baseRevisions = useRef(new Map<string, number>());
   const saving = useRef<Promise<FlowDefinition | null> | null>(null);
   const clipboard = useRef<FlowNode | null>(null);
+  const recordingReviewCache = useRef<RecordingReviewCache | null>(null);
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const toast = useCallback((message: string, error = false) => {
@@ -129,6 +133,10 @@ function App() {
       else void refresh().catch(onError);
     });
   }, [refresh, onError]);
+  useEffect(() => {
+    if (workspace?.recording.phase === "idle")
+      recordingReviewCache.current = null;
+  }, [workspace?.recording.phase]);
   useEffect(() => {
     if (!workspace) return;
     const apply = () => {
@@ -387,6 +395,9 @@ function App() {
       const command = event.ctrlKey || event.metaKey;
       if (command && event.key.toLowerCase() === "s") {
         event.preventDefault();
+        // Review edits use their own revisioned save. Saving the graph here
+        // would invalidate the bound insertion revision without changing it.
+        if (page === "flows" && flowTab === "record") return;
         if (document.activeElement instanceof HTMLElement)
           document.activeElement.blur();
         queueMicrotask(() => void save());
@@ -487,49 +498,97 @@ function App() {
       setBusy(null);
     }
   };
-  const recorded = (actions: RecordedAction[]) => {
-    if (!draft) return;
-    const parent =
-      draft.nodes.find((n) => n.id === selected) ??
-      draft.nodes.find(
-        (n) => !draft.edges.some((e) => e.source === n.id) && n.kind !== "end",
-      ) ??
-      draft.nodes.at(-1);
-    const nodes = actions.map((action, i) => ({
-      id: uid(),
-      kind: action.kind,
-      label: action.label,
-      position: {
-        x: (parent?.position.x ?? -230) + (i + 1) * 310,
-        y: parent?.position.y ?? 180,
-      },
-      config: action.config,
-    }));
-    const edges = [...draft.edges];
-    if (
-      parent &&
-      parent.kind !== "end" &&
-      !edges.some((e) => e.source === parent.id) &&
-      nodes.length
-    )
-      edges.push({
-        id: uid(),
-        source: parent.id,
-        target: nodes[0].id,
-        port: catalog[parent.kind].ports?.[0] ?? "next",
-      });
-    nodes.slice(1).forEach((n, i) =>
-      edges.push({
-        id: uid(),
-        source: nodes[i].id,
-        target: n.id,
-        port: catalog[nodes[i].kind].ports?.[0] ?? "next",
-      }),
+  const updateRecordingState = useCallback((recording: RecordingState) => {
+    setWorkspace((current) => (current ? { ...current, recording } : current));
+  }, []);
+  const startRecording = async (
+    targetId: string,
+    mode: "guided" | "direct",
+  ) => {
+    const current = draftRef.current;
+    if (!current)
+      throw new Error("Open a workflow before starting a recording.");
+    const anchorNodeId = recordingAnchor(current, selected);
+    const saved = await save();
+    if (!saved)
+      throw new Error(
+        "Recording has not started. Resolve the workflow save issue first.",
+      );
+    if (draftRef.current !== saved)
+      throw new Error(
+        "The workflow changed while saving. Save your latest changes before recording.",
+      );
+    const recording = await api.startRecording({
+      targetId,
+      mode,
+      flowId: saved.id,
+      flowRevision: saved.revision,
+      anchorNodeId,
+    });
+    updateRecordingState(recording);
+    return recording;
+  };
+  const insertRecording = async (
+    sessionId: string,
+    revision: number,
+    options: RecordingInsertOptions,
+  ) => {
+    if (dirty && draftRef.current) {
+      const saved = await save();
+      if (!saved || draftRef.current !== saved)
+        throw new Error(
+          "Your recording is preserved. Save or resolve the current workflow draft before inserting.",
+        );
+    }
+    const previousDraft = draftRef.current;
+    const result = await api.insertRecording(sessionId, revision, options);
+    updateRecordingState(result.recording);
+    // A user may navigate or edit while IPC is pending. Never replace that draft.
+    const canOpen = draftRef.current === previousDraft;
+    if (canOpen || draftRef.current?.id !== result.flow.id) {
+      rememberSaved(result.flow);
+    } else {
+      // Keep the edited draft's old CAS base so saving it cannot erase the
+      // insertion that committed while the user was editing.
+      setWorkspace((current) =>
+        current
+          ? {
+              ...current,
+              flows: current.flows.map((flow) =>
+                flow.id === result.flow.id ? result.flow : flow,
+              ),
+            }
+          : current,
+      );
+    }
+    if (canOpen) {
+      draftRef.current = result.flow;
+      setDraft(result.flow);
+      setSaveConflict(null);
+      setUndo([]);
+      setRedo([]);
+      setDirty(false);
+      setSelected(null);
+      setIssues([]);
+      setPage("flows");
+      setFlowTab("flow");
+    }
+    let warning = result.warning;
+    try {
+      await refresh();
+    } catch (error) {
+      warning = [
+        warning,
+        `Workspace refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }
+    toast(
+      `Recording inserted into “${result.flow.name}”.${canOpen ? "" : " Your current draft is preserved; open the inserted workflow from the sidebar."}${warning ? ` ${warning}` : ""}`,
+      Boolean(warning),
     );
-    change({ ...draft, nodes: [...draft.nodes, ...nodes], edges });
-    setFlowTab("flow");
-    setSelected(nodes[0]?.id ?? null);
-    toast(`${actions.length} recorded steps added.`);
+    return result;
   };
   const importFlow = async () => {
     if (dirty && !window.confirm("Discard unsaved changes and import a flow?"))
@@ -719,6 +778,29 @@ function App() {
           ) : null}
         </div>
         <div className="sidebar-bottom">
+          {workspace.recording.phase !== "idle" ? (
+            <button
+              className="recording-draft-nav"
+              aria-label="Open recording draft"
+              onClick={() => {
+                setPage("flows");
+                setFlowTab("record");
+              }}
+            >
+              <span>
+                <Video size={14} />
+                {workspace.recording.phase === "capturing"
+                  ? "Recording in progress"
+                  : workspace.recording.phase === "paused"
+                    ? "Recording paused"
+                    : "Review recording draft"}
+              </span>
+              <small>
+                {workspace.recording.destination?.flowName} ·{" "}
+                {workspace.recording.actions.length} steps
+              </small>
+            </button>
+          ) : null}
           <button onClick={() => void importFlow()}>
             <ArrowDownToLine size={15} /> Import a workflow
           </button>
@@ -996,8 +1078,14 @@ function App() {
               <Recorder
                 api={api}
                 workspace={workspace}
-                onRecorded={recorded}
+                currentFlow={draft}
+                selectedNodeId={selected}
+                onStart={startRecording}
+                onInsert={insertRecording}
+                onState={updateRecordingState}
+                onOpenBoundFlow={chooseFlow}
                 onError={onError}
+                reviewCache={recordingReviewCache}
               />
             ) : (
               <Runs
@@ -1009,6 +1097,23 @@ function App() {
               />
             )}
           </>
+        ) : page === "flows" &&
+          flowTab === "record" &&
+          workspace.recording.phase !== "idle" ? (
+          <div className="recording-standalone">
+            <Recorder
+              api={api}
+              workspace={workspace}
+              currentFlow={null}
+              selectedNodeId={null}
+              onStart={startRecording}
+              onInsert={insertRecording}
+              onState={updateRecordingState}
+              onOpenBoundFlow={chooseFlow}
+              onError={onError}
+              reviewCache={recordingReviewCache}
+            />
+          </div>
         ) : page === "flows" ? (
           <div className="welcome-page">
             <div className="welcome-orbit">

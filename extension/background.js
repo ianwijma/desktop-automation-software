@@ -1,5 +1,5 @@
 let running = false;
-let recordingTab;
+let recording;
 let activeSignal;
 const targets = new Map();
 const attached = new Set();
@@ -201,22 +201,79 @@ async function key(tabId, config) {
       }
   }
 }
-async function record(tabId, enabled) {
-  if (enabled)
+async function record(tabId, recordingId, expectedRecordingId) {
+  if (recordingId)
     await chrome.scripting.executeScript({
       target: { tabId },
       files: ["recorder.js"],
     });
   await chrome.scripting.executeScript({
     target: { tabId },
-    func: (value) => {
-      window.__relayRecordingEnabled = value;
+    func: (value, expected) => {
+      if (
+        !value &&
+        expected &&
+        window.__relayRecorder &&
+        window.__relayRecorder.recordingId !== expected
+      )
+        throw new Error("Recording session has changed in the target tab");
+      window.__relaySetRecording?.(value);
     },
-    args: [enabled],
+    args: [recordingId, expectedRecordingId ?? null],
   });
+}
+async function installRecording(current) {
+  if (recording !== current || !current.active) return;
+  const operation = (async () => {
+    await record(current.tabId, current.id);
+    if (recording !== current || !current.active)
+      await record(current.tabId, null);
+  })();
+  current.pending.add(operation);
+  try {
+    await operation;
+  } finally {
+    current.pending.delete(operation);
+  }
+}
+async function stopRecording(recordingId) {
+  let current = recording;
+  if (!current) {
+    const { relayRecording } =
+      await chrome.storage.session.get("relayRecording");
+    if (!relayRecording) {
+      if (recordingId)
+        throw new Error(
+          "The recorded tab could not be established for cleanup",
+        );
+      return true;
+    }
+    if (recordingId && relayRecording.id !== recordingId)
+      throw new Error("Recording session has changed");
+    if (relayRecording.stopped) return true;
+    // The service worker can restart while an isolated-world listener survives.
+    // Resume only its cleanup ownership; capture never restarts implicitly.
+    current = recording = {
+      ...relayRecording,
+      active: false,
+      pending: new Set(),
+    };
+  }
+  if (recordingId && current.id !== recordingId)
+    throw new Error("Recording session has changed");
+  current.active = false;
+  await Promise.allSettled([...current.pending]);
+  const tab = await chrome.tabs.get(current.tabId).catch(() => null);
+  if (tab) await record(current.tabId, null, current.id);
+  await chrome.storage.session.set({
+    relayRecording: { id: current.id, tabId: current.tabId, stopped: true },
+  });
+  if (recording === current) recording = undefined;
+  return true;
 }
 async function command(command) {
   const { method, target, kind, config = {} } = command;
+  if (method === "recordStop") return stopRecording(config.recordingId);
   const tab = await tabFor(target, kind === "launch");
   const tabId = tab.id;
   if (method === "releaseInputs") {
@@ -225,14 +282,29 @@ async function command(command) {
     return true;
   }
   if (method === "recordStart") {
-    recordingTab = tabId;
-    await record(tabId, true);
-    return true;
-  }
-  if (method === "recordStop") {
-    recordingTab = undefined;
-    await record(tabId, false);
-    return true;
+    if (typeof config.recordingId !== "string" || !config.recordingId)
+      throw new Error("Recording session token is required");
+    await stopRecording();
+    const current = {
+      id: config.recordingId,
+      tabId,
+      active: true,
+      pending: new Set(),
+    };
+    recording = current;
+    try {
+      // Save the exact owner before installing any listener. URL matching is
+      // insufficient after navigation or a service-worker restart.
+      await chrome.storage.session.set({
+        relayRecording: { id: current.id, tabId, stopped: false },
+      });
+      await installRecording(current);
+      return true;
+    } catch (error) {
+      current.active = false;
+      await stopRecording(current.id);
+      throw error;
+    }
   }
   if (method === "capture" || kind === "screenshot") {
     const result = await cdp(tabId, "Page.captureScreenshot", {
@@ -520,14 +592,23 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     void poll();
     respond({ ok: true });
   }
-  if (message.type === "recorded" && sender.tab?.id === recordingTab) {
-    void call("/result", { action: message.action }).catch(() => {});
+  if (
+    message.type === "recorded" &&
+    recording?.active &&
+    sender.tab?.id === recording.tabId &&
+    message.recordingId === recording.id
+  ) {
+    void call("/result", {
+      action: message.action,
+      recordingId: message.recordingId,
+    }).catch(() => {});
     respond({ ok: true });
   }
 });
 chrome.webNavigation.onCompleted.addListener(({ tabId, frameId }) => {
-  if (frameId === 0 && tabId === recordingTab)
-    void record(tabId, true).catch(() => {});
+  const current = recording;
+  if (frameId === 0 && current?.active && tabId === current.tabId)
+    void installRecording(current).catch(() => {});
 });
 chrome.alarms.create("relay-connect", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(() => {
