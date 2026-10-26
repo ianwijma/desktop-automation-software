@@ -351,6 +351,45 @@ for (const mode of ["managed", "extension"] as const)
         });
       }
     });
+    it("measures frame geometry after delayed layout rather than before the paint wait", async () => {
+      const owner = await page.locator("#foreign").elementHandle();
+      const previous = await owner!.evaluate(
+        (element) => element.style.marginTop,
+      );
+      try {
+        await page.evaluate(() => {
+          const original = window.requestAnimationFrame;
+          window.requestAnimationFrame = (callback) => {
+            window.requestAnimationFrame = original;
+            return original.call(window, (time) => {
+              (
+                document.querySelector("#foreign") as HTMLElement
+              ).style.marginTop = "52px";
+              callback(time);
+            });
+          };
+        });
+        const geometry = await page.evaluate(browserRuntime, {
+          operation: "frameGeometry",
+          element: owner,
+        });
+        const actual = await owner!.evaluate((element) => {
+          const frame = element as HTMLElement;
+          const r = frame.getBoundingClientRect();
+          return {
+            x: r.x + (frame.clientLeft * r.width) / frame.offsetWidth,
+            y: r.y + (frame.clientTop * r.height) / frame.offsetHeight,
+          };
+        });
+        expect(geometry.x).toBeCloseTo(actual.x, 5);
+        expect(geometry.y).toBeCloseTo(actual.y, 5);
+      } finally {
+        await owner!.evaluate((element, margin) => {
+          element.style.marginTop = margin;
+        }, previous);
+        await owner!.dispose();
+      }
+    });
     it("targets a cross-origin frame by its exact owner and maps click coordinates correctly", async () => {
       const scoped = locator(
         { kind: "role", role: "button", name: "Frame action" },
