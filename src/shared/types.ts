@@ -91,6 +91,7 @@ export interface NativeWindow {
   id: string;
   title: string;
   application?: string;
+  applicationIdentity?: import("./native-protocol").NativeApplicationIdentity;
   bounds: { x: number; y: number; width: number; height: number };
 }
 export interface CaptureFrame {
@@ -102,6 +103,7 @@ export interface CaptureFrame {
   dataUrl: string;
   bounds?: { x: number; y: number; width: number; height: number };
   scale?: number;
+  native?: import("./native-protocol").NativeCaptureMetadata;
 }
 export interface DetectionResult {
   outcome: "match" | "no-match" | "uncertain";
@@ -184,6 +186,7 @@ export interface PlatformCapabilities {
   globalShortcuts: boolean;
   reasons: string[];
   windows: NativeWindow[];
+  native?: import("./native-protocol").NativeDiagnostics;
 }
 export interface RecordedAction {
   id: string;

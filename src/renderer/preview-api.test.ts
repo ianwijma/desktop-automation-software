@@ -55,6 +55,10 @@ async function imported(data: unknown) {
 
 describe("browser preview persistence", () => {
   it("rejects browser locator inspection rather than simulating desktop access", async () => {
+    const capabilities = await previewAPI.getCapabilities();
+    expect(capabilities.native).toBeUndefined();
+    expect(capabilities.capture).toBe(false);
+    expect(capabilities.input).toBe(false);
     await expect(
       previewAPI.inspectBrowserLocator("browser", "button"),
     ).rejects.toThrow(/requires the Relay desktop application/);

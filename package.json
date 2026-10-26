@@ -19,6 +19,7 @@
     "check": "npm run typecheck && npm test",
     "test:smoke": "node scripts/smoke.mjs",
     "test:ui": "node scripts/smoke-ui.mjs",
+    "test:native": "node scripts/native-harness.mjs",
     "format": "prettier --write src tests scripts docs README.md package.json *.json *.ts *.html .github/workflows/*.yml",
     "install:browser": "playwright install chromium"
   },

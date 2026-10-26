@@ -75,7 +75,15 @@ pub fn windows() -> Result<Value> {
                 .nth(3)
                 .or_else(|| app.split('"').nth(1))
                 .unwrap_or("");
-            result.push(json!({"id":id,"title":title,"application":application,"bounds":bounds}));
+            let pid = run("xprop", &["-id", id, "_NET_WM_PID"])
+                .ok()
+                .and_then(|s| s.split('=').nth(1)?.trim().parse::<u32>().ok());
+            let mut window =
+                json!({"id":id,"title":title,"application":application,"bounds":bounds});
+            if let Some(pid) = pid {
+                window["pid"] = json!(pid);
+            }
+            result.push(window);
         }
     }
     Ok(json!(result))

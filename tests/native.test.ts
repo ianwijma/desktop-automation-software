@@ -36,10 +36,11 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
   fs.appendFileSync(path.join(root, 'requests'), line + '\\n');
   if(request.method === 'input' && request.params.kind === 'drag') return;
   let result = true;
-  if(request.method === 'capabilities') result = {session:'x11'};
+  if(request.method === 'handshake') result = {protocolVersion:1,helperVersion:'test',instanceId:'mock',platform:'linux',backend:'mock',coordinateSpace:'physical-pixels'};
+  if(request.method === 'capabilities') result = {platform:'linux',session:'x11',capture:true,input:true,accessibility:false,directRecording:false,globalShortcuts:false,windows:[],reasons:[]};
   if(request.method === 'listWindows') result = [{id:'1',title:'Fixture',bounds:{x:0,y:0,width:100,height:100}}];
-  const error = request.id === 'cleanup-keys' && fs.readFileSync(path.join(root,'mode'),'utf8') === 'fail' ? {message:'Mock key release failed'} : undefined;
-  process.stdout.write(JSON.stringify({id:request.id,result,error}) + '\\n');
+  const error = request.id === 'cleanup-keys' && fs.readFileSync(path.join(root,'mode'),'utf8') === 'fail' ? {code:'BACKEND_FAILURE',message:'Mock key release failed',operation:'releaseKeys',backend:'mock',permission:'unknown',retryable:false} : undefined;
+  process.stdout.write(JSON.stringify({protocolVersion:1,id:request.id,...(error?{error}:{result})}) + '\\n');
 });
 `,
       { mode: 0o700 },

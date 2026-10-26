@@ -59,9 +59,13 @@ Recorder event IDs remain in an outbox until Relay accepts them. Pause/Stop fenc
 
 Locator inspection is an explicit validated preload/main/utility request. It reports match counts and a bounded semantic summary without sending input or starting a run. The renderer shares locator controls between node properties and recording review, preserves unsupported descriptors, and invalidates late inspection responses when the target/query changes. Browser preview rejects inspection. See [browser locator semantics and limitations](browser-locators.md).
 
+## Native protocol and qualification
+
+Native protocol 1 negotiates a helper instance/backend/coordinate-space handshake before desktop operations. Versioned structured errors and capability/permission metadata cross the utility/main boundary; passive availability stays separate from observed capture/input. Window handles remain transient, with separately reported application identity and owner checks. Native frames carry helper/window identity and validated independent pixel-to-input axis transforms; helper replacement clears bindings/frames. Cancellation still waits for acknowledged key/button cleanup and never replays the interrupted action. The [native harness](native-contracts.md) records real fixture effects and artifact/session identity; Xvfb software rendering is separate from native toolkit, hardware GPU, Windows/macOS and Wayland qualification.
+
 ## Detection
 
-Capture coordinates are separate from preview display size. Frames identify their target, capture time, source dimensions, and bounds. Region offsets are restored before a detected box becomes an action target. Detected-coordinate actions must include their source `frameId`; stale or moved/resized captures are rejected.
+Capture coordinates are separate from preview display size. Frames identify their target, capture time, source dimensions, and bounds. Region offsets are restored before a detected box becomes an action target. Detected-coordinate actions must include their source `frameId`; stale target identities or resized capture geometry are rejected.
 
 Local detection uses OpenCV template matching, Tesseract OCR, region colors, and image changes. Similar multiple template hits produce uncertain results. AI detection uses schema-validated answers and does not treat transport errors as “no match.” Jev Box results are discarded unless its independent presence answer passes the threshold.
 

@@ -9,6 +9,7 @@ import {
 import { NativeAdapter } from "../integrations/native";
 import { BrowserAdapter } from "../integrations/browser";
 import { AIService, safeAIError } from "../integrations/ai";
+import { NativeServiceError } from "../shared/native-protocol";
 import { detectionCoordinates } from "../integrations/locations";
 import { DetectorService, cropFrame } from "../integrations/detectors";
 import {
@@ -621,6 +622,12 @@ port.on("message", ({ data }) => {
   void handle(data.method, data.args)
     .then((result) => port.postMessage({ id: data.id, result }))
     .catch((error) =>
-      port.postMessage({ id: data.id, error: safeAIError(error) }),
+      port.postMessage({
+        id: data.id,
+        error: safeAIError(error),
+        ...(error instanceof NativeServiceError
+          ? { nativeError: { ...error.details, message: safeAIError(error) } }
+          : {}),
+      }),
     );
 });

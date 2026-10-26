@@ -7,6 +7,17 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
+import {
+  NATIVE_PROTOCOL_VERSION,
+  NativeServiceError,
+  nativeErrorSchema,
+  nativeHandshakeSchema,
+  nativeCaptureSchema,
+  nativeWindowSchema,
+  nativeCapabilitiesSchema,
+  type NativeHandshake,
+  type NativeErrorDetails,
+} from "../shared/native-protocol";
 import type {
   CaptureFrame,
   Json,
@@ -19,6 +30,7 @@ import type {
 
 export interface NativeAdapterOptions {
   binaryPath?: string;
+  binaryArgs?: string[];
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
 }
@@ -39,6 +51,10 @@ export class NativeAdapter {
   private recordingOperation: Promise<void> = Promise.resolve();
   private disposed = false;
   private platformSession?: string;
+  private handshake?: Promise<NativeHandshake>;
+  private helper?: NativeHandshake;
+  private lastError?: NativeErrorDetails;
+  private bindingIdentities = new Map<string, string>();
   private cleanupTask: Promise<void> = Promise.resolve();
   private heldKeys = new Set<string>();
   readonly binaryPath: string;
@@ -61,8 +77,12 @@ export class NativeAdapter {
     if (this.disposed) throw new Error("Native adapter is closed");
     if (this.child) return this.child;
     if (!existsSync(this.binaryPath))
-      throw new Error("Native service is not built. Run npm run build:native.");
-    const child = spawn(this.binaryPath, [], {
+      throw this.serviceError(
+        "DEPENDENCY_UNAVAILABLE",
+        "startup",
+        "Native service is not built. Run npm run build:native.",
+      );
+    const child = spawn(this.binaryPath, this.options.binaryArgs ?? [], {
       env: { ...process.env, ...this.options.env },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -71,18 +91,38 @@ export class NativeAdapter {
     this.child = child;
     const lines = createInterface({ input: child.stdout });
     lines.on("line", (line) => {
+      if (this.child !== child) return;
       let message: {
+        protocolVersion?: number;
         id?: string;
         result?: unknown;
-        error?: { message: string };
+        error?: NativeErrorDetails;
         event?: string;
         recordingId?: string;
         action?: RecordedAction;
       };
       try {
         message = JSON.parse(line);
+        if (!message || typeof message !== "object" || Array.isArray(message))
+          throw new Error("Invalid envelope");
       } catch {
-        this.fail(new Error("Native service returned malformed JSON"));
+        this.fail(
+          this.serviceError(
+            "INVALID_REQUEST",
+            "response",
+            "Native service returned malformed JSON",
+          ),
+        );
+        return;
+      }
+      if (message.protocolVersion !== NATIVE_PROTOCOL_VERSION) {
+        this.fail(
+          this.serviceError(
+            "PROTOCOL_MISMATCH",
+            "handshake",
+            "Native protocol version mismatch; rebuild or reinstall the matching helper",
+          ),
+        );
         return;
       }
       if (message.event === "recordedAction" && message.action) {
@@ -95,38 +135,103 @@ export class NativeAdapter {
           this.recording = undefined;
         return;
       }
+      if (
+        typeof message.id !== "string" ||
+        "error" in message === "result" in message
+      ) {
+        this.fail(
+          this.serviceError(
+            "INVALID_REQUEST",
+            "response",
+            "Native service returned an invalid response envelope",
+          ),
+        );
+        return;
+      }
       const pending = message.id && this.pending.get(message.id);
       if (!pending || !message.id) return;
       this.pending.delete(message.id);
       pending.cleanup();
-      if (message.error) pending.reject(new Error(message.error.message));
-      else pending.resolve(message.result);
+      if (message.error) {
+        const parsed = nativeErrorSchema.safeParse(message.error);
+        const error = parsed.success
+          ? new NativeServiceError(parsed.data)
+          : this.serviceError(
+              "INVALID_REQUEST",
+              "response",
+              "Native service returned an invalid error envelope",
+            );
+        this.lastError = error.details;
+        pending.reject(error);
+        if (!parsed.success) this.fail(error);
+      } else pending.resolve(message.result);
     });
     // Read stderr so a native dependency cannot fill its pipe; never log typed text or request payloads.
     child.stderr.on("data", () => {});
     child.once("error", (error) => {
-      if (this.child === child) this.fail(error);
+      if (this.child === child)
+        this.fail(
+          this.serviceError(
+            "HELPER_EXITED",
+            "startup",
+            "Native helper could not start; check file permissions and dependencies",
+          ),
+        );
     });
     child.once("exit", (code, signal) => {
       lines.close();
       if (this.child === child)
-        this.fail(new Error(`Native service exited (${signal ?? code})`));
+        this.fail(
+          this.serviceError(
+            "HELPER_EXITED",
+            "transport",
+            `Native service exited (${signal ?? code})`,
+          ),
+        );
     });
     return child;
   }
   private fail(error: Error, release = true) {
     const child = this.child;
+    const mayHoldInput = Boolean(this.helper) || this.heldKeys.size > 0;
     this.child = undefined;
+    this.handshake = undefined;
+    this.helper = undefined;
+    this.platformSession = undefined;
+    this.bindings.clear();
+    this.bindingIdentities.clear();
+    this.frames.clear();
+    if (error instanceof NativeServiceError) this.lastError = error.details;
     const stopped = child ? this.terminate(child) : Promise.resolve();
     this.recording = undefined;
     this.recordingId = undefined;
-    if (child && release)
-      this.trackCleanup(stopped.then(() => this.emergencyRelease()));
+    if (child)
+      this.trackCleanup(
+        release && mayHoldInput
+          ? stopped.then(() => this.emergencyRelease())
+          : stopped,
+      );
     for (const pending of this.pending.values()) {
       pending.cleanup();
       pending.reject(error);
     }
     this.pending.clear();
+  }
+  private serviceError(
+    code: NativeErrorDetails["code"],
+    operation: string,
+    message: string,
+  ): NativeServiceError {
+    const error = new NativeServiceError({
+      code,
+      operation,
+      message,
+      backend: this.helper?.backend ?? "unavailable",
+      permission: "unknown",
+      retryable: false,
+    });
+    this.lastError = error.details;
+    return error;
   }
   private terminate(child: ChildProcess): Promise<void> {
     if (process.platform === "win32" && child.pid && child.exitCode === null) {
@@ -198,7 +303,7 @@ export class NativeAdapter {
         new Error("Native input cleanup service is missing"),
       );
     return new Promise<void>((resolve, reject) => {
-      const cleanup = spawn(this.binaryPath, [], {
+      const cleanup = spawn(this.binaryPath, this.options.binaryArgs ?? [], {
         env: { ...process.env, ...this.options.env },
         stdio: ["pipe", "pipe", "ignore"],
         windowsHide: true,
@@ -211,12 +316,25 @@ export class NativeAdapter {
       lines.on("line", (line) => {
         try {
           const reply = JSON.parse(line) as {
+            protocolVersion?: number;
             id?: string;
             error?: { message?: string };
+            result?: unknown;
           };
           if (reply.id !== "cleanup-keys" && reply.id !== "cleanup") return;
-          if (reply.error)
-            failure = new Error(reply.error.message ?? "Native cleanup failed");
+          if (reply.protocolVersion !== NATIVE_PROTOCOL_VERSION)
+            failure = this.serviceError(
+              "PROTOCOL_MISMATCH",
+              "cleanup",
+              "Native input cleanup protocol is incompatible",
+            );
+          else if (reply.error) {
+            const details = nativeErrorSchema.safeParse(reply.error);
+            failure = details.success
+              ? new NativeServiceError(details.data)
+              : new Error("Native cleanup returned an invalid error");
+          } else if (reply.result !== true)
+            failure = new Error("Native input cleanup was not acknowledged");
           else acknowledgements.add(reply.id);
         } catch {
           failure = new Error("Native cleanup returned malformed JSON");
@@ -260,7 +378,7 @@ export class NativeAdapter {
       cleanup.once("close", done);
       cleanup.stdin?.on("error", () => {});
       cleanup.stdin?.end(
-        `${JSON.stringify({ id: "cleanup-keys", method: "releaseKeys", params: { keys: [...this.heldKeys] } })}\n${JSON.stringify({ id: "cleanup", method: "releaseAll", params: {} })}\n`,
+        `${JSON.stringify({ protocolVersion: NATIVE_PROTOCOL_VERSION, id: "cleanup-keys", method: "releaseKeys", params: { keys: [...this.heldKeys] } })}\n${JSON.stringify({ protocolVersion: NATIVE_PROTOCOL_VERSION, id: "cleanup", method: "releaseAll", params: {} })}\n`,
       );
     });
   }
@@ -272,18 +390,52 @@ export class NativeAdapter {
     await this.cleanupTask;
     if (signal?.aborted)
       return Promise.reject(signal.reason ?? new Error("Cancelled"));
+    const child = this.start();
+    if (!this.handshake) {
+      this.handshake = this.request<unknown>(
+        child,
+        "handshake",
+        {},
+        signal,
+      ).then((value) => {
+        const parsed = nativeHandshakeSchema.safeParse(value);
+        if (!parsed.success) {
+          const error = this.serviceError(
+            "PROTOCOL_MISMATCH",
+            "handshake",
+            "Native helper handshake is incompatible; rebuild or reinstall the matching helper",
+          );
+          this.fail(error, false);
+          throw error;
+        }
+        this.helper = parsed.data;
+        return parsed.data;
+      });
+    }
+    await this.handshake;
+    if (this.child !== child)
+      throw this.serviceError(
+        "HELPER_EXITED",
+        method,
+        "Native helper changed before the operation could start",
+      );
+    if (signal?.aborted)
+      throw this.serviceError("CANCELLED", method, "Cancelled");
+    return this.request<T>(child, method, params, signal);
+  }
+  private request<T>(
+    child: ChildProcessWithoutNullStreams,
+    method: string,
+    params: Record<string, unknown> = {},
+    signal?: AbortSignal,
+  ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      let child: ChildProcessWithoutNullStreams;
-      try {
-        child = this.start();
-      } catch (error) {
-        reject(error);
-        return;
-      }
       const id = randomUUID();
       const abort = () => {
         this.fail(
-          new Error(
+          this.serviceError(
+            signal?.aborted ? "CANCELLED" : "TIMEOUT",
+            method,
             signal?.aborted ? "Cancelled" : `Native ${method} timed out`,
           ),
         );
@@ -307,19 +459,59 @@ export class NativeAdapter {
       });
       signal?.addEventListener("abort", abort, { once: true });
       child.stdin.write(
-        `${JSON.stringify({ id, method, params })}\n`,
+        `${JSON.stringify({ protocolVersion: NATIVE_PROTOCOL_VERSION, id, method, params })}\n`,
         (error) => {
-          if (error) this.fail(error);
+          if (error && this.child === child)
+            this.fail(
+              this.serviceError(
+                "HELPER_EXITED",
+                method,
+                "Native helper request could not be delivered",
+              ),
+            );
         },
       );
     });
   }
-  async capabilities(): Promise<PlatformCapabilities> {
+  async capabilities(signal?: AbortSignal): Promise<PlatformCapabilities> {
     try {
-      const result = await this.rpc<PlatformCapabilities>("capabilities");
+      const raw = await this.rpc<unknown>("capabilities", {}, signal);
+      const parsed = nativeCapabilitiesSchema.safeParse(raw);
+      if (!parsed.success)
+        throw this.serviceError(
+          "INVALID_REQUEST",
+          "capabilities",
+          "Native helper returned invalid capability metadata",
+        );
+      const result: PlatformCapabilities = parsed.data;
+      if (
+        result.native?.helper &&
+        (result.native.helper.instanceId !== this.helper?.instanceId ||
+          result.native.helper.backend !== this.helper?.backend)
+      )
+        throw this.serviceError(
+          "INVALID_REQUEST",
+          "capabilities",
+          "Native capability metadata identifies a different helper",
+        );
       this.platformSession = result.session;
+      result.native = {
+        ...result.native,
+        helper: this.helper,
+        ...(this.lastError ? { lastError: this.lastError } : {}),
+      };
       return result;
     } catch (error) {
+      if (signal?.aborted) throw error;
+      this.lastError = (
+        error instanceof NativeServiceError
+          ? error
+          : this.serviceError(
+              "BACKEND_FAILURE",
+              "capabilities",
+              (error as Error).message,
+            )
+      ).details;
       return {
         platform: process.platform,
         session: "unavailable",
@@ -330,18 +522,37 @@ export class NativeAdapter {
         globalShortcuts: false,
         windows: [],
         reasons: [(error as Error).message],
+        native: {
+          ...(this.helper ? { helper: this.helper } : {}),
+          ...(this.lastError ? { lastError: this.lastError } : {}),
+        },
       };
     }
   }
-  listWindows(): Promise<NativeWindow[]> {
-    return this.rpc("listWindows");
+  async listWindows(signal?: AbortSignal): Promise<NativeWindow[]> {
+    const parsed = nativeWindowSchema
+      .array()
+      .safeParse(await this.rpc("listWindows", {}, signal));
+    if (!parsed.success)
+      throw this.serviceError(
+        "INVALID_REQUEST",
+        "listWindows",
+        "Native helper returned invalid window metadata",
+      );
+    return parsed.data;
   }
   private async resolve(
     target: TargetDescriptor,
     signal?: AbortSignal,
   ): Promise<NativeWindow> {
     if (signal?.aborted) throw new Error("Cancelled");
-    if (!this.platformSession) await this.capabilities();
+    if (!this.platformSession) {
+      const capabilities = await this.capabilities(signal);
+      if (capabilities.session === "unavailable")
+        throw this.lastError
+          ? new NativeServiceError(this.lastError)
+          : new Error(capabilities.reasons.join(" "));
+    }
     if (this.platformSession === "wayland") {
       const frame = this.frames.get(target.id);
       return {
@@ -350,12 +561,18 @@ export class NativeAdapter {
         bounds: frame?.bounds ?? { x: 0, y: 0, width: 0, height: 0 },
       };
     }
-    const windows = await this.listWindows();
+    const windows = await this.listWindows(signal);
     const descriptor = JSON.stringify([target.application, target.windowTitle]);
     if (this.bindingDescriptors.get(target.id) !== descriptor)
       this.bindings.delete(target.id);
     const binding = this.bindings.get(target.id);
-    const bound = windows.find((window) => window.id === binding);
+    const identity = (window: NativeWindow) =>
+      JSON.stringify(window.applicationIdentity ?? null);
+    const bound = windows.find(
+      (window) =>
+        window.id === binding &&
+        identity(window) === this.bindingIdentities.get(target.id),
+    );
     if (bound) return bound;
     let matches = windows;
     if (target.application)
@@ -381,12 +598,19 @@ export class NativeAdapter {
         "Choose an application or window title for this desktop target",
       );
     if (!matches.length)
-      throw new Error(`Target window not found: ${target.name}`);
+      throw this.serviceError(
+        "TARGET_UNAVAILABLE",
+        "attach",
+        `Target window not found: ${target.name}`,
+      );
     if (matches.length !== 1)
-      throw new Error(
+      throw this.serviceError(
+        "AMBIGUOUS_TARGET",
+        "attach",
         `Multiple windows match ${target.name}; use a more specific window title`,
       );
     this.bindings.set(target.id, matches[0]!.id);
+    this.bindingIdentities.set(target.id, identity(matches[0]!));
     this.bindingDescriptors.set(target.id, descriptor);
     return matches[0]!;
   }
@@ -395,11 +619,40 @@ export class NativeAdapter {
     signal?: AbortSignal,
   ): Promise<CaptureFrame> {
     const window = await this.resolve(target, signal);
-    const result = await this.rpc<Omit<CaptureFrame, "id" | "targetId">>(
+    const raw = await this.rpc<unknown>(
       "capture",
-      { windowId: window.id },
+      { windowId: window.id, applicationIdentity: window.applicationIdentity },
       signal,
     );
+    const parsed = nativeCaptureSchema.safeParse(raw);
+    if (!parsed.success)
+      throw this.serviceError(
+        "INVALID_REQUEST",
+        "capture",
+        "Native capture returned invalid geometry metadata",
+      );
+    const result = parsed.data;
+    const metadata: CaptureFrame["native"] = result.native;
+    if (
+      metadata.helperInstanceId !== this.helper?.instanceId ||
+      metadata.backend !== this.helper?.backend ||
+      metadata.windowId !== window.id ||
+      metadata.geometry.inputSpace !== this.helper?.coordinateSpace ||
+      Math.abs(
+        metadata.geometry.pixelToInput.scaleX -
+          result.bounds.width / result.width,
+      ) > 1e-9 ||
+      Math.abs(
+        metadata.geometry.pixelToInput.scaleY -
+          result.bounds.height / result.height,
+      ) > 1e-9
+    )
+      throw this.serviceError(
+        "INVALID_REQUEST",
+        "capture",
+        "Native capture returned invalid identity or coordinate transform",
+      );
+    metadata.application = window.applicationIdentity;
     const frame: CaptureFrame = {
       ...result,
       id: randomUUID(),
@@ -450,7 +703,10 @@ export class NativeAdapter {
     if (kind === "focus" || kind === "close") {
       const result = await this.rpc<Json>(
         kind,
-        { windowId: window.id },
+        {
+          windowId: window.id,
+          applicationIdentity: window.applicationIdentity,
+        },
         signal,
       );
       if (kind === "close") this.bindings.delete(target.id);
@@ -480,11 +736,17 @@ export class NativeAdapter {
       typeof config.frameId === "string" &&
       (!sourceFrame ||
         config.frameId !== sourceFrame.id ||
+        sourceFrame.native?.helperInstanceId !== this.helper?.instanceId ||
+        sourceFrame.native?.windowId !== window.id ||
+        JSON.stringify(sourceFrame.native?.application ?? null) !==
+          JSON.stringify(window.applicationIdentity ?? null) ||
         (sourceFrame.bounds &&
           (sourceFrame.bounds.width !== window.bounds.width ||
             sourceFrame.bounds.height !== window.bounds.height)))
     )
-      throw new Error(
+      throw this.serviceError(
+        "STALE_CAPTURE",
+        "input",
         "Capture geometry changed; capture and detect the target again",
       );
     if (
@@ -503,8 +765,8 @@ export class NativeAdapter {
     const input = { ...config };
     const frame = this.frames.get(target.id);
     if (frame?.bounds) {
-      const sx = frame.bounds.width / frame.width,
-        sy = frame.bounds.height / frame.height;
+      const sx = frame.native!.geometry.pixelToInput.scaleX,
+        sy = frame.native!.geometry.pixelToInput.scaleY;
       for (const key of ["x", "toX"])
         if (typeof input[key] === "number") input[key] = input[key] * sx;
       for (const key of ["y", "toY"])
@@ -518,7 +780,12 @@ export class NativeAdapter {
       this.heldKeys.add(config.key);
     const result = await this.rpc<Json>(
       "input",
-      { ...input, kind, windowId: window.id },
+      {
+        ...input,
+        kind,
+        windowId: window.id,
+        applicationIdentity: window.applicationIdentity,
+      },
       signal,
     );
     if (
@@ -553,6 +820,7 @@ export class NativeAdapter {
         try {
           await this.rpc("startRecording", {
             windowId: window.id,
+            applicationIdentity: window.applicationIdentity,
             recordingId: this.recordingId,
           });
         } catch (error) {
@@ -585,6 +853,19 @@ export class NativeAdapter {
       this.heldKeys.clear();
     }
   }
+  /** Releases owned input before replacing the helper; never replays a request. */
+  async restart(): Promise<NativeHandshake> {
+    await this.stopRecording();
+    await this.releaseAll();
+    const child = this.child;
+    this.fail(
+      this.serviceError("HELPER_EXITED", "restart", "Native helper restarted"),
+      false,
+    );
+    if (child) await this.waitForExit(child);
+    await this.rpc("ping");
+    return this.helper!;
+  }
   async dispose(): Promise<void> {
     if (this.disposed) return;
     try {
@@ -593,6 +874,7 @@ export class NativeAdapter {
     } finally {
       this.disposed = true;
       this.fail(new Error("Native adapter closed"), false);
+      await this.cleanupTask;
     }
   }
 }

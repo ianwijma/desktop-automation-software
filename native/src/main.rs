@@ -14,6 +14,7 @@ use std::{
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+mod protocol;
 #[cfg(target_os = "linux")]
 mod wayland;
 #[cfg(target_os = "windows")]
@@ -26,6 +27,7 @@ use macos as platform;
 use windows as platform;
 static HELD_KEYS: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =
     std::sync::OnceLock::new();
+static INPUT_USED: AtomicBool = AtomicBool::new(false);
 fn held_keys() -> &'static Mutex<std::collections::HashSet<String>> {
     HELD_KEYS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
@@ -77,7 +79,8 @@ pub fn capture_file(path: &std::path::Path, bounds: Value) -> Result<Value> {
         json!({"width":width,"height":height,"dataUrl":format!("data:image/png;base64,{}",STANDARD.encode(data)),"bounds":bounds,"capturedAt":now()}),
     )
 }
-pub fn emit(value: Value) {
+pub fn emit(mut value: Value) {
+    value["protocolVersion"] = json!(protocol::VERSION);
     let mut out = io::stdout().lock();
     let _ = writeln!(out, "{}", value);
     let _ = out.flush();
@@ -98,12 +101,28 @@ impl Recording {
     }
 }
 fn dispatch(method: &str, p: &Value, recording: &mut Recording) -> Result<Value> {
+    if p["applicationIdentity"].is_object() {
+        let windows = protocol::windows(platform::windows()?);
+        if !windows
+            .as_array()
+            .map(|items| {
+                items.iter().any(|w| {
+                    w["id"] == p["windowId"] && w["applicationIdentity"] == p["applicationIdentity"]
+                })
+            })
+            .unwrap_or(false)
+        {
+            return Err("Target window identity is no longer available".into());
+        }
+    }
     match method {
-        "capabilities" => platform::capabilities(),
-        "listWindows" => platform::windows(),
-        "capture" => platform::capture(p),
+        "handshake" => Ok(protocol::handshake()),
+        "capabilities" => platform::capabilities().map(protocol::capabilities),
+        "listWindows" => platform::windows().map(protocol::windows),
+        "capture" => protocol::capture(platform::capture(p)?, p),
         "focus" => platform::focus(p),
         "input" => {
+            INPUT_USED.store(true, Ordering::SeqCst);
             if str_field(p, "kind") == "key" && str_field(p, "action") != "up" {
                 held_keys()
                     .lock()
@@ -180,6 +199,7 @@ fn main() {
         active: Arc::new(AtomicBool::new(false)),
         worker: None,
     };
+    let mut negotiated = false;
     // Commands are processed serially: desktop input is a single shared resource.
     for line in io::stdin().lock().lines() {
         let line = match line {
@@ -188,18 +208,36 @@ fn main() {
         };
         let req: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
-            Err(e) => {
-                emit(json!({"id":null,"error":{"message":e.to_string()}}));
+            Err(_) => {
+                emit(
+                    json!({"id":null,"protocolVersion":protocol::VERSION,"error":protocol::error("parse","Invalid request required".into())}),
+                );
                 continue;
             }
         };
         let id = req["id"].clone();
-        let result = dispatch(str_field(&req, "method"), &req["params"], &mut recording);
+        let method = str_field(&req, "method");
+        let result = if req["protocolVersion"].as_u64() != Some(protocol::VERSION) {
+            Err("Native protocol mismatch".into())
+        } else if !req["params"].is_object() || !req["id"].is_string() {
+            Err("A valid request ID and params object are required".into())
+        } else if !negotiated && !matches!(method, "handshake" | "releaseKeys" | "releaseAll") {
+            Err("Native protocol handshake is required".into())
+        } else {
+            dispatch(method, &req["params"], &mut recording)
+        };
+        if method == "handshake" && result.is_ok() {
+            negotiated = true;
+        }
         emit(match result {
-            Ok(value) => json!({"id":id,"result":value}),
-            Err(message) => json!({"id":id,"error":{"message":message}}),
+            Ok(value) => json!({"id":id,"protocolVersion":protocol::VERSION,"result":value}),
+            Err(message) => {
+                json!({"id":id,"protocolVersion":protocol::VERSION,"error":protocol::error(method,message)})
+            }
         });
     }
     let _ = recording.stop();
-    let _ = release_owned();
+    if INPUT_USED.load(Ordering::SeqCst) {
+        let _ = release_owned();
+    }
 }

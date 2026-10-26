@@ -12,6 +12,7 @@ Copy this template for a real verification run and link the completed report fro
 - Desktop session / compositor / portal versions:
 - Display arrangement / resolutions / scaling:
 - Capture/input/accessibility backends:
+- Native protocol / helper version / helper and harness SHA-256 / harness report path:
 - Installation type / upgrade-from version:
 - Applications and exact versions tested:
 - AI provider / endpoint kind / model / runtime version (no keys):
