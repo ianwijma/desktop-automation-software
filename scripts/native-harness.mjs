@@ -278,6 +278,9 @@ if (!args.has("--run")) {
                           "--use-gl=angle",
                           "--use-angle=swiftshader",
                           "--enable-unsafe-swiftshader",
+                          ...(process.platform === "win32"
+                            ? ["--disable-gpu-compositing"]
+                            : []),
                         ]
                       : []),
                     fixture,

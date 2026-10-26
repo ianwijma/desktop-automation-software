@@ -30,7 +30,7 @@ npm run build:native
 npm run test:native:windows -- --run
 ```
 
-The matrix runs Electron/WebGL at renderer scales 1 and 1.5, native Win32 BUTTON/EDIT/password/scroll/drag/animated-GDI controls at content scales 1 and 1.5, and an explicitly selected PrintWindow native-control case. Each case tests observed capture pixels, Unicode text, click/scroll/drag, resize, held-input cancellation, helper replacement, duplicate targeting, and minimized capture failure followed by recovery on the same selected backend. Observation endpoints never synthesize input or return secure text.
+The matrix runs Electron/WebGL at renderer scales 1 and 1.5, native Win32 BUTTON/EDIT/password/scroll/drag/animated-GDI controls at content scales 1 and 1.5, and an explicitly selected PrintWindow native-control case. Hosted Electron fixtures use SwiftShader and software compositing; this is not hardware GPU coverage. Each case tests observed capture pixels, Unicode text, click/scroll/drag, resize, held-input cancellation, helper replacement, duplicate targeting, and minimized capture failure followed by recovery on the same selected backend. Observation endpoints never synthesize input or return secure text. All cases run even if an earlier case fails, and any failure fails the matrix.
 
 Hosted Windows CI uses `--allow-unavailable`: if the interactive desktop, DPI setup or required graphics device is unavailable before input, cases produce **incomplete / not-run** reports. Actual scenario failures still fail the job. Review `test-results/native-windows/report.json` and per-case reports in the Windows verification artifact; a green build with incomplete cases is not native qualification.
 

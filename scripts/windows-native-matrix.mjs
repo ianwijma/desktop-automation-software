@@ -59,7 +59,6 @@ if (!enabled || process.platform !== "win32") {
       status: code === 0 && report ? report.status : "fail",
       report: path.relative(root, path.join(directory, "report.json")),
     });
-    if (code !== 0) break;
   }
 }
 const status = results.some((r) => r.status === "fail")

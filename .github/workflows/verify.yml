@@ -36,8 +36,8 @@ jobs:
       - name: Windows native controls and graphics matrix
         if: runner.os == 'Windows'
         run: npm run test:native:windows -- --run --allow-unavailable
-      - run: npm run check
       - run: npx playwright install --with-deps chromium
+      - run: npm run check
       - run: npm run test:ui
       - run: npm run build
       - name: Linux isolated desktop smoke test
