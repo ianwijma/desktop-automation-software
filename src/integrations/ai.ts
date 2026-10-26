@@ -431,8 +431,8 @@ export class AIService {
         const localize = operation === "localization";
         const image = sharp({
           create: {
-            width: 128,
-            height: 128,
+            width: 320,
+            height: 320,
             channels: 3,
             background: localize ? "white" : "red",
           },
@@ -442,16 +442,16 @@ export class AIService {
             {
               input: await sharp({
                 create: {
-                  width: 48,
-                  height: 32,
+                  width: 120,
+                  height: 80,
                   channels: 3,
                   background: "red",
                 },
               })
                 .png()
                 .toBuffer(),
-              left: 24,
-              top: 40,
+              left: 60,
+              top: 100,
             },
           ]);
         const data = await image.png().toBuffer();
@@ -459,8 +459,8 @@ export class AIService {
           id: "connection-probe",
           targetId: "synthetic-probe",
           capturedAt: Date.now(),
-          width: 128,
-          height: 128,
+          width: 320,
+          height: 320,
           dataUrl: `data:image/png;base64,${data.toString("base64")}`,
         };
         if (!localize && connection.provider !== "jev") {
@@ -498,13 +498,13 @@ export class AIService {
             const overlap =
               Math.max(
                 0,
-                Math.min(72, box.x + box.width) - Math.max(24, box.x),
+                Math.min(180, box.x + box.width) - Math.max(60, box.x),
               ) *
               Math.max(
                 0,
-                Math.min(72, box.y + box.height) - Math.max(40, box.y),
+                Math.min(180, box.y + box.height) - Math.max(100, box.y),
               );
-            if (overlap / (48 * 32 + box.width * box.height - overlap) < 0.5)
+            if (overlap / (120 * 80 + box.width * box.height - overlap) < 0.5)
               throw new Error(
                 "Localization probe did not locate the known rectangle.",
               );
