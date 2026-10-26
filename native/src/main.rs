@@ -143,7 +143,11 @@ fn dispatch(method: &str, p: &Value, recording: &mut Recording) -> Result<Value>
             {
                 return windows::uia::call(method, p);
             }
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(target_os = "macos")]
+            {
+                return macos::semantic(method, p);
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             {
                 return Err("uia:UNSUPPORTED_OPERATION".into());
             }

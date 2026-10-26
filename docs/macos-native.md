@@ -14,7 +14,7 @@ The session guard uses the public Window Server on-console/login state and rejec
 
 Runtime window handles are CGWindowIDs, separate from owning PID and application bundle identity (or an owner/PID fallback). Saved coordinate workflows retain their existing target configuration. Unbound duplicate title matches remain ambiguous. Window handles are transient and same-process handle recycling is not universally detectable.
 
-Once a window is selected, focus enumerates its owner's public AX windows and requires exactly one matching position/size. It activates the application, raises that AX window, then verifies the focused window, owner and geometry. It does not use a title to raise a window or call private AX-to-CGWindowID APIs. Duplicate titles with different geometry can be distinguished after binding; overlapping identical-geometry AX windows fail as ambiguous. Nonstandard applications that do not expose usable public AX geometry fail explicitly. General semantic AX selectors and direct macOS recording remain N06/N09.
+Once a window is selected, focus enumerates its owner's public AX windows and requires exactly one matching position/size. It activates the application, raises that AX window, then verifies the focused window, owner and geometry. It does not use a title to raise a window or call private AX-to-CGWindowID APIs. Duplicate titles with different geometry can be distinguished after binding; overlapping identical-geometry AX windows fail as ambiguous. Nonstandard applications that do not expose usable public AX geometry fail explicitly. [Semantic AX selectors](native-locators.md#macos-ax-targeting-n06) support scoped inspection and individual read/press/value/selection operations. Direct recording remains N09.
 
 ## Capture and coordinates
 

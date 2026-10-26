@@ -29,6 +29,7 @@ export function supportsNativeLocator(
 export function setNativeTargeting(
   config: Record<string, Json>,
   enabled: boolean,
+  backend: NativeLocator["backend"] = "uia",
 ): Record<string, Json> {
   const next = { ...config };
   delete next.nativeLocator;
@@ -50,7 +51,7 @@ export function setNativeTargeting(
       delete next[key];
     next.nativeLocator = {
       version: 1,
-      backend: "uia",
+      backend,
       selector: { controlType: "button" },
     };
   }
@@ -92,6 +93,7 @@ export function NativeLocatorField({
     },
     [],
   );
+  const backend = workspace.capabilities.platform === "darwin" ? "ax" : "uia";
   const enabled = config.nativeLocator !== undefined;
   const parsed = nativeLocatorSchema.safeParse(config.nativeLocator);
   const locator = (config.nativeLocator &&
@@ -100,7 +102,7 @@ export function NativeLocatorField({
     ? config.nativeLocator
     : {
         version: 1,
-        backend: "uia",
+        backend,
         selector: { controlType: "button" },
       }) as unknown as NativeLocator;
   const selector =
@@ -108,7 +110,10 @@ export function NativeLocatorField({
       ? locator.selector
       : {};
   const available = Boolean(
-    workspace.desktop && workspace.capabilities.platform === "win32" && tools,
+    workspace.desktop &&
+    ["win32", "darwin"].includes(workspace.capabilities.platform) &&
+    tools &&
+    locator.backend === backend,
   );
   const update = (next: NativeLocator) =>
     onChange({ ...config, nativeLocator: next as unknown as Json });
@@ -198,9 +203,15 @@ export function NativeLocatorField({
       <Field label="Desktop targeting">
         <Select
           aria-label="Desktop targeting"
-          value={enabled ? "uia" : "none"}
+          value={enabled ? locator.backend : "none"}
           onChange={(e) =>
-            onChange(setNativeTargeting(config, e.target.value === "uia"))
+            onChange(
+              setNativeTargeting(
+                config,
+                e.target.value !== "none",
+                e.target.value === "ax" ? "ax" : "uia",
+              ),
+            )
           }
         >
           <option value="none">
@@ -209,12 +220,13 @@ export function NativeLocatorField({
               : "Choose a native locator"}
           </option>
           <option value="uia">Windows semantic locator</option>
+          <option value="ax">macOS semantic locator</option>
         </Select>
       </Field>
       {!available ? (
         <p className="field-help">
-          Windows UIA is required for native inspection and semantic actions.
-          macOS AX and Linux AT-SPI are planned separately.
+          Native inspection requires a matching Windows UIA or macOS AX locator
+          and desktop permissions. Linux AT-SPI is planned separately.
         </p>
       ) : null}
       {enabled ? (
@@ -250,18 +262,26 @@ export function NativeLocatorField({
               key={key}
               label={
                 {
-                  automationId: "Automation ID",
+                  automationId:
+                    locator.backend === "ax"
+                      ? "AX identifier"
+                      : "Automation ID",
                   name: "Accessible name",
-                  className: "Native class",
+                  className:
+                    locator.backend === "ax" ? "AX role" : "Native class",
                 }[key]
               }
             >
               <input
                 aria-label={
                   {
-                    automationId: "Automation ID",
+                    automationId:
+                      locator.backend === "ax"
+                        ? "AX identifier"
+                        : "Automation ID",
                     name: "Accessible name",
-                    className: "Native class",
+                    className:
+                      locator.backend === "ax" ? "AX role" : "Native class",
                   }[key]
                 }
                 value={selector[key] ?? ""}

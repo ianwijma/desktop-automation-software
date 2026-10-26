@@ -430,6 +430,7 @@ try {
   await runRecordingReviewSmoke({ browser, url });
   await runBrowserLocatorSmoke({ browser, url });
   await runNativeLocatorSmoke({ browser, url });
+  await runNativeLocatorSmoke({ browser, url, platform: "darwin" });
   await runWindowsSettingsSmoke({ browser, url });
   console.log(
     "PASS: editor and references; undo/redo across revisions; child groups; theme/OpenRouter persistence; schedules; preview rejection; cross-tab conflicts; future-schema preservation; committed-save warning recovery with no automatic run; no page errors.",

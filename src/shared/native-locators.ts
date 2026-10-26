@@ -29,7 +29,7 @@ export const nativeSelectorSchema = z
 export const nativeLocatorSchema = z
   .object({
     version: z.literal(1),
-    backend: z.literal("uia"),
+    backend: z.enum(["uia", "ax"]),
     selector: nativeSelectorSchema,
     ancestors: z.array(nativeSelectorSchema).max(8).optional(),
   })

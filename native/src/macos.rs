@@ -20,12 +20,32 @@ fn call(method: &str, params: &Value) -> Result<Value> {
     }
     let reply: Value = serde_json::from_str(&text).map_err(|_| "macos:BACKEND_FAILURE")?;
     if let Some(code) = reply["error"].as_str() {
-        return Err(format!("macos:{code}"));
+        let semantic =
+            ["inspectNativeLocator", "nativeElement"].contains(&method.to_str().unwrap_or(""));
+        let prefix = if semantic
+            && ![
+                "AX_REQUIRED",
+                "SESSION_INACTIVE",
+                "AX_AMBIGUOUS",
+                "AX_WINDOW_UNAVAILABLE",
+                "TARGET_UNAVAILABLE",
+                "CAPTURE_GEOMETRY",
+            ]
+            .contains(&code)
+        {
+            "ax"
+        } else {
+            "macos"
+        };
+        return Err(format!("{prefix}:{code}"));
     }
     reply
         .get("result")
         .cloned()
         .ok_or_else(|| "macos:BACKEND_FAILURE".into())
+}
+pub fn semantic(method: &str, params: &Value) -> Result<Value> {
+    call(method, params)
 }
 pub fn windows() -> Result<Value> {
     call("listWindows", &json!({}))

@@ -8,7 +8,9 @@ export async function runNativeLocatorSmoke({
   browser,
   url,
   outputDir = "test-results",
+  platform = "win32",
 }) {
+  const backend = platform === "darwin" ? "ax" : "uia";
   const context = await browser.newContext({
     viewport: { width: 1560, height: 1050 },
   });
@@ -66,7 +68,7 @@ export async function runNativeLocatorSmoke({
   state.desktop = true;
   state.capabilities = {
     ...state.capabilities,
-    platform: "win32",
+    platform,
     accessibility: true,
   };
   const image = await sharp({
@@ -104,7 +106,7 @@ export async function runNativeLocatorSmoke({
         locator: query.point
           ? {
               version: 1,
-              backend: "uia",
+              backend,
               selector: { automationId: "apply", controlType: "button" },
             }
           : query.locator,
@@ -159,7 +161,7 @@ export async function runNativeLocatorSmoke({
     await page.locator('.react-flow__node[data-id="native-action"]').click();
     await page
       .getByLabel("Desktop targeting", { exact: true })
-      .selectOption("uia");
+      .selectOption(backend);
     await page.getByLabel("Accessible name", { exact: true }).fill("Duplicate");
     await page
       .getByRole("button", { name: "Test native match", exact: true })
@@ -202,7 +204,7 @@ export async function runNativeLocatorSmoke({
     assert.ok(queries.some((q) => q.point?.frameId === "preview-frame"));
     await mkdir(outputDir, { recursive: true });
     await page.screenshot({
-      path: join(outputDir, "relay-native-picker.png"),
+      path: join(outputDir, `relay-native-picker-${backend}.png`),
       fullPage: true,
     });
     await page
@@ -213,7 +215,11 @@ export async function runNativeLocatorSmoke({
       .click();
     await page.getByRole("dialog").waitFor({ state: "hidden" });
     assert.equal(
-      await page.getByLabel("Automation ID", { exact: true }).inputValue(),
+      await page
+        .getByLabel(backend === "ax" ? "AX identifier" : "Automation ID", {
+          exact: true,
+        })
+        .inputValue(),
       "apply",
     );
     await page.getByRole("button", { name: "Save", exact: true }).click();
@@ -221,11 +227,15 @@ export async function runNativeLocatorSmoke({
     await page.reload();
     await page.locator('.react-flow__node[data-id="native-action"]').click();
     assert.equal(
-      await page.getByLabel("Automation ID", { exact: true }).inputValue(),
+      await page
+        .getByLabel(backend === "ax" ? "AX identifier" : "Automation ID", {
+          exact: true,
+        })
+        .inputValue(),
       "apply",
     );
     await page.screenshot({
-      path: join(outputDir, "relay-native-locator.png"),
+      path: join(outputDir, `relay-native-locator-${backend}.png`),
       fullPage: true,
     });
     await page

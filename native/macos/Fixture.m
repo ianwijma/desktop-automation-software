@@ -8,6 +8,7 @@
 #import <unistd.h>
 static NSDictionary *Config;
 static NSWindow *Window, *Duplicate;
+static BOOL SheetOpen;
 static NSMutableDictionary<NSString *, NSView *> *Controls;
 static NSTextField *Text;
 static NSSecureTextField *Secure;
@@ -194,6 +195,7 @@ static NSDictionary *Snapshot(void) {
         @"focused" : Window.isKeyWindow && NSApp.isActive ? @YES : @NO,
         @"minimized" : Window.isMiniaturized ? @YES : @NO,
         @"duplicate" : Duplicate != nil ? @YES : @NO,
+        @"modalBlocked" : @(SheetOpen),
         @"displays" : displays,
         @"versions" : @{@"fixture" : @"AppKit/Metal", @"version" : @"1"}
     };
@@ -269,7 +271,18 @@ static void Serve(int listener) {
                           [Duplicate setFrameOrigin:NSMakePoint(NSMinX(Window.frame) + 80,
                                                                 NSMinY(Window.frame) - 40)];
                           [Duplicate makeKeyAndOrderFront:nil];
+                      } else if ([path isEqual:@"/ax-move"]) {
+                          NSView *action = Controls[@"action"];
+                          [action setFrameOrigin:NSMakePoint(action.frame.origin.x, action.frame.origin.y + 25 * ContentScale)];
+                      } else if ([path isEqual:@"/ax-destroy"]) {
+                          [Controls[@"action"] removeFromSuperview];
+                          [Controls removeObjectForKey:@"action"];
+                      } else if ([path isEqual:@"/ax-modal"]) {
+                          Duplicate = NewWindow();
+                          SheetOpen = YES;
+                          [Window beginSheet:Duplicate completionHandler:nil];
                       } else if ([path isEqual:@"/close-duplicate"]) {
+                          if (SheetOpen) { [Window endSheet:Duplicate]; SheetOpen = NO; }
                           [Duplicate close];
                           Duplicate = nil;
                           [Window makeKeyAndOrderFront:nil];
@@ -310,6 +323,7 @@ static void Serve(int listener) {
     Controls = [NSMutableDictionary dictionary];
     NSButton *action = [[NSButton alloc] initWithFrame:R(28, 70, 110, 38)];
     action.title = @"Activate";
+    action.accessibilityIdentifier = @"relay-action";
     action.target = self;
     action.action = @selector(click:);
     [root addSubview:action];
@@ -320,10 +334,20 @@ static void Serve(int listener) {
         [root addSubview:b];
     }
     Text = [[NSTextField alloc] initWithFrame:R(62, 117, 240, 38)];
+    Text.accessibilityIdentifier = @"relay-text";
     [root addSubview:Text];
     Controls[@"text"] = Text;
     Secure = [[NSSecureTextField alloc] initWithFrame:R(118, 163, 240, 38)];
+    Secure.accessibilityIdentifier = @"relay-secure";
     [root addSubview:Secure];
+    NSButton *disabled = [[NSButton alloc] initWithFrame:R(450, 70, 160, 38)];
+    disabled.title = @"Disabled action"; disabled.enabled = NO;
+    disabled.accessibilityIdentifier = @"relay-disabled";
+    [root addSubview:disabled]; Controls[@"disabled"] = disabled;
+    NSTextField *readonly = [[NSTextField alloc] initWithFrame:R(450, 117, 160, 38)];
+    readonly.stringValue = @"Read only"; readonly.editable = NO;
+    readonly.accessibilityIdentifier = @"relay-readonly";
+    [root addSubview:readonly]; Controls[@"readonly"] = readonly;
     Controls[@"secure"] = Secure;
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:R(32, 220, 240, 80)];
     Surface *document = [[Surface alloc] initWithFrame:R(0, 0, 220, 600)];

@@ -820,6 +820,177 @@ if (!args.has("--run")) {
             };
           });
         }
+        if (
+          process.platform === "darwin" &&
+          fixtureKind === "appkit" &&
+          captured
+        ) {
+          const locator = (id) => ({
+            version: 1,
+            backend: "ax",
+            selector: { automationId: `relay-${id}` },
+          });
+          const actionLocator = locator("action");
+          await check("ax-preview-pick-and-moving-control", async () => {
+            frame = await adapter.capture(target);
+            const before = await control();
+            const picked = await adapter.inspectLocator(target, {
+              point: { ...(await point("action")), frameId: frame.id },
+            });
+            assert.equal(picked.status, "unique");
+            assert.equal(picked.element.locator.backend, "ax");
+            assert.ok(picked.element.actions.includes("invoke"));
+            assert.equal((await control()).clicks, before.clicks);
+            await control("/ax-move", "POST");
+            await poll(
+              control,
+              (s) => s.targets.action.y !== before.targets.action.y,
+            );
+            await adapter.execute(
+              "click",
+              { nativeLocator: picked.element.locator },
+              target,
+            );
+            await poll(control, (s) => s.clicks === before.clicks + 1);
+            return {
+              pickedWithoutInput: true,
+              movementPreservesLocator: true,
+              invokeObserved: true,
+            };
+          });
+          await check(
+            "ax-unicode-value-read-and-supported-actions",
+            async () => {
+              const text = "AX fixture 日本語 😀";
+              const inspected = await adapter.inspectLocator(target, {
+                locator: locator("text"),
+              });
+              assert.equal(inspected.status, "unique");
+              assert.ok(inspected.element.actions.includes("setValue"));
+              await adapter.execute(
+                "type",
+                { nativeLocator: locator("text"), text },
+                target,
+              );
+              await poll(control, (s) => s.text === text);
+              assert.equal(
+                await adapter.execute(
+                  "read",
+                  { nativeLocator: locator("text") },
+                  target,
+                ),
+                text,
+              );
+              await assert.rejects(
+                adapter.execute(
+                  "select",
+                  { nativeLocator: actionLocator },
+                  target,
+                ),
+                (e) => e.details?.code === "UNSUPPORTED_PATTERN",
+              );
+              return {
+                valueObserved: true,
+                readMatched: true,
+                unsupportedSelectionExplicit: true,
+              };
+            },
+          );
+          await check(
+            "ax-duplicate-disabled-secure-readonly-policy",
+            async () => {
+              const duplicate = {
+                version: 1,
+                backend: "ax",
+                selector: { controlType: "button", name: "Duplicate label" },
+              };
+              assert.equal(
+                (await adapter.inspectLocator(target, { locator: duplicate }))
+                  .status,
+                "ambiguous",
+              );
+              await assert.rejects(
+                adapter.execute("click", { nativeLocator: duplicate }, target),
+                (e) => e.details?.code === "AMBIGUOUS_ELEMENT",
+              );
+              await assert.rejects(
+                adapter.execute(
+                  "click",
+                  { nativeLocator: locator("disabled") },
+                  target,
+                ),
+                (e) => e.details?.code === "ELEMENT_DISABLED",
+              );
+              const secure = await adapter.inspectLocator(target, {
+                locator: locator("secure"),
+              });
+              assert.equal(secure.element.secure, true);
+              assert.equal(secure.element.name, "");
+              assert.deepEqual(secure.element.actions, []);
+              for (const kind of ["read", "type"])
+                await assert.rejects(
+                  adapter.execute(
+                    kind,
+                    { nativeLocator: locator("secure"), text: "never-send" },
+                    target,
+                  ),
+                  (e) => e.details?.code === "SECURE_ELEMENT",
+                );
+              const readonly = await adapter.inspectLocator(target, {
+                locator: locator("readonly"),
+              });
+              assert.ok(!readonly.element.actions.includes("setValue"));
+              await assert.rejects(
+                adapter.execute(
+                  "type",
+                  { nativeLocator: locator("readonly"), text: "unchanged" },
+                  target,
+                ),
+                (e) => e.details?.code === "UNSUPPORTED_PATTERN",
+              );
+              return {
+                ambiguityRejected: true,
+                disabledRejected: true,
+                secureRedacted: true,
+                readonlyRejected: true,
+              };
+            },
+          );
+          await check("ax-modal-and-removed-control", async () => {
+            await control("/ax-modal", "POST");
+            await poll(control, (s) => s.modalBlocked);
+            await assert.rejects(
+              adapter.execute(
+                "click",
+                { nativeLocator: actionLocator },
+                target,
+              ),
+              (e) => e.details?.code === "MODAL_BLOCKED",
+            );
+            await control("/close-duplicate", "POST");
+            await poll(control, (s) => !s.modalBlocked);
+            await control("/ax-destroy", "POST");
+            await poll(control, (s) => !s.targets.action);
+            assert.equal(
+              (await adapter.inspectLocator(target, { locator: actionLocator }))
+                .status,
+              "missing",
+            );
+            await assert.rejects(
+              adapter.execute(
+                "click",
+                { nativeLocator: actionLocator },
+                target,
+              ),
+              (e) => e.details?.code === "ELEMENT_NOT_FOUND",
+            );
+            return {
+              modalBlocked: true,
+              removedControlRejected: true,
+              noCoordinateFallback: true,
+            };
+          });
+        }
         await check("duplicate-window-targeting", async () => {
           await control("/duplicate", "POST");
           await poll(
