@@ -29,7 +29,11 @@ jobs:
       - run: node node_modules/electron/install.js
       - run: npx playwright install --with-deps chromium
       - run: cargo build --manifest-path native/Cargo.toml
+      - run: cargo test --manifest-path native/Cargo.toml
       - run: npm run build:native
+      - name: Linux native contract and desktop harness
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:native -- --run --software-gpu --session-label=ci-xvfb
       - run: npm run check
       - run: npm run test:ui
       - run: npm run build

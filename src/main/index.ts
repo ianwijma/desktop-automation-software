@@ -16,6 +16,10 @@ import { randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import {
+  NativeServiceError,
+  nativeErrorSchema,
+} from "../shared/native-protocol";
 import { Storage } from "./storage";
 import { syncSavedFlow } from "./flow-sync";
 import {
@@ -726,8 +730,14 @@ else {
           if (!item) return;
           clearTimeout(item.timer);
           pending.delete(message.id);
-          if (message.error) item.reject(new Error(message.error));
-          else item.resolve(message.result);
+          if (message.error) {
+            const native = nativeErrorSchema.safeParse(message.nativeError);
+            item.reject(
+              native.success
+                ? new NativeServiceError(native.data)
+                : new Error(message.error),
+            );
+          } else item.resolve(message.result);
         } else if ("event" in message) {
           if (message.event.type === "run")
             store.put("runs", message.event.run);

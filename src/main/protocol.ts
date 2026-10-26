@@ -33,7 +33,12 @@ export type RunnerResponse =
         options?: RecordingInsertOptions;
       };
     }
-  | { id: string; result?: unknown; error?: string }
+  | {
+      id: string;
+      result?: unknown;
+      error?: string;
+      nativeError?: import("../shared/native-protocol").NativeErrorDetails;
+    }
   | { event: AppEvent }
   | {
       scheduleUpdates: Pick<

@@ -1,6 +1,6 @@
 # Native desktop service
 
-Build with `npm run build:native` (Rust/Cargo required). The Electron runner starts `relay-native` and exchanges JSON lines over stdin/stdout. Commands are serialized. Each response has the request ID and either `result` or `error.message`. Recording events are asynchronous JSON lines. The service never evaluates workflow text as a shell command: application launch takes an executable and argument array.
+Build with `npm run build:native` (Rust/Cargo required). The Electron runner starts `relay-native` and negotiates protocol 1 over JSON lines on stdin/stdout. Commands are serialized. Each response has the protocol version, request ID and either `result` or a structured error. Recording events are asynchronous JSON lines. The service never evaluates workflow text as a shell command: application launch takes an executable and argument array. See the [contract and desktop harness guide](../docs/native-contracts.md) for handshake, diagnostics, identities, transforms and qualification commands.
 
 ## Platform coverage
 
@@ -8,8 +8,8 @@ Build with `npm run build:native` (Rust/Cargo required). The Electron runner sta
 | ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Linux X11     | Window lookup/focus/input through `xdotool`, PNG capture through ImageMagick `import`, application class via `xprop`; direct recording through XInput2      | Real capture, geometry guards, focus/key input, direct recording, cancellation and key release tested on an isolated Xvfb display             |
 | Linux Wayland | Combined ScreenCast/RemoteDesktop portal session through `ashpd`; restricted PipeWire remote passed to GStreamer; portal pointer and keyboard notifications | Compiles on Linux; unavailable-backend gating tested. Actual compositor consent, PipeWire capture, and input require manual GNOME/KDE testing |
-| Windows       | Win32 window enumeration, foreground checks, PrintWindow, SendInput/keyboard/mouse events, WM_CLOSE through an embedded PowerShell/C# helper                | Source implemented; no Windows host was available for build/runtime testing                                                                   |
-| macOS         | CoreGraphics window enumeration and events, screencapture PNG, System Events window raise, permission checks                                                | Source implemented; no macOS host was available for build/runtime testing                                                                     |
+| Windows       | Win32 window enumeration, foreground checks, PrintWindow, SendInput/keyboard/mouse events, WM_CLOSE through an embedded PowerShell/C# helper                | Hosted CI compiles/tests the protocol; actual capture/input qualification remains pending (N02)                                               |
+| macOS         | CoreGraphics window enumeration and events, screencapture PNG, System Events window raise, permission checks                                                | Hosted CI compiles/tests the protocol; installed-app permissions/capture/input qualification remains pending (N03)                            |
 
 Native accessibility selectors and passive direct recording on Windows/macOS are not implemented. Use guided preview recording and visual/OCR detectors there. Browser DOM selectors, detection and semantic recording are provided separately by the browser adapter on all platforms.
 
@@ -33,6 +33,6 @@ The runner cancels native work by terminating the helper process group on Unix a
 
 ## Protocol
 
-Methods: `capabilities`, `listWindows`, `launch`, `capture`, `focus`, `input`, `close`, `releaseKeys`, `releaseAll`, `startRecording`, `stopRecording`, `ping`. Input kinds: `click`, `move`, `drag`, `scroll`, `type`, `key`. Desktop target matching is done by the TypeScript adapter; the helper receives a window handle or `portal:<targetId>`.
+Methods: `handshake`, `capabilities`, `listWindows`, `launch`, `capture`, `focus`, `input`, `close`, `releaseKeys`, `releaseAll`, `startRecording`, `stopRecording`, `ping`. Input kinds: `click`, `move`, `drag`, `scroll`, `type`, `key`. Desktop target matching is done by the TypeScript adapter; the helper receives a window handle or `portal:<targetId>`, plus expected application identity when known. Both binaries must use the same protocol; unsupported versions fail closed.
 
 The browser extension uses its own authenticated loopback bridge; it does not use native messaging. See [extension setup](../extension/README.md).

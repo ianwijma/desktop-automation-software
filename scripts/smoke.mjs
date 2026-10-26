@@ -28,6 +28,19 @@ try {
   await page.waitForFunction(() => Boolean(window.relay));
   const initial = await page.evaluate(() => window.relay.bootstrap());
   assert.equal(initial.desktop, true);
+  assert.equal(
+    initial.capabilities.native?.helper?.protocolVersion,
+    1,
+    "The production preload/main/utility boundary must expose the matching native handshake",
+  );
+  assert.ok(initial.capabilities.native.helper.instanceId);
+  assert.ok(initial.capabilities.native.helper.backend);
+  assert.ok(
+    Object.values(initial.capabilities.native.operations).every(
+      (operation) => operation.verification === "untested",
+    ),
+    "Passive capability lookup cannot qualify desktop capture/input",
+  );
   assert.equal(initial.flows.length, 3);
   assert.equal(initial.connections.length, 0);
   assert.equal(initial.keys, undefined);

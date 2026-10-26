@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" /><title>Relay native fixture</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      padding: 24px;
+      font: 16px sans-serif;
+      background: #161a23;
+      color: #eee;
+    }
+    h1 {
+      margin: 0 0 16px;
+      font-size: 22px;
+    }
+    button,
+    input {
+      font: inherit;
+      padding: 8px;
+      margin: 4px;
+    }
+    label {
+      display: block;
+    }
+    p {
+      max-width: 420px;
+    }
+    #marker {
+      position: absolute;
+      right: 24px;
+      top: 24px;
+      width: 44px;
+      height: 44px;
+      background: rgb(232, 56, 100);
+    }
+    #scroll {
+      height: 80px;
+      width: 240px;
+      overflow: auto;
+      background: #282e3e;
+      margin: 8px;
+    }
+    #scroll > div {
+      height: 600px;
+      padding: 10px;
+    }
+    #drag {
+      width: 280px;
+      height: 56px;
+      background: #40386c;
+      margin: 8px;
+      touch-action: none;
+    }
+    #gpu {
+      position: absolute;
+      right: 24px;
+      top: 240px;
+      width: 200px;
+      height: 160px;
+    }
+  </style>
+  <h1>Relay synthetic desktop fixture</h1>
+  <div id="marker"></div>
+  <button id="action">Activate</button
+  ><button>Duplicate label</button
+  ><button>Duplicate label</button>
+  <label>Text <input id="text" autocomplete="off" /></label
+  ><label
+    >Secure field <input id="secure" type="password" autocomplete="off"
+  /></label>
+  <div id="scroll"><div>Scroll fixture</div></div>
+  <div id="drag">Drag within this surface</div>
+  <canvas id="gpu" width="200" height="160"></canvas>
+  <p>Only synthetic input is used. Secure field values are never reported.</p>
+  <script>
+    const state = {
+      clicks: 0,
+      text: "",
+      secureHasValue: false,
+      scrollTop: 0,
+      drags: 0,
+      buttons: 0,
+      held: [],
+      animationFrames: 0,
+      gpu: false,
+    };
+    const held = new Map();
+    let start;
+    const gl = document.querySelector("#gpu").getContext("webgl");
+    state.gpu = Boolean(gl);
+    function report() {
+      state.targets = Object.fromEntries(
+        ["action", "text", "secure", "scroll", "drag", "marker", "gpu"].map(
+          (id) => {
+            const r = document.getElementById(id).getBoundingClientRect();
+            return [id, { x: r.x, y: r.y, width: r.width, height: r.height }];
+          },
+        ),
+      );
+      window.fixture.report({
+        ...state,
+        held: [...held.values()],
+        devicePixelRatio: devicePixelRatio,
+      });
+    }
+    document.querySelector("#action").onclick = () => {
+      state.clicks++;
+      report();
+    };
+    document.querySelector("#text").oninput = (event) => {
+      state.text = event.target.value;
+      report();
+    };
+    document.querySelector("#secure").oninput = (event) => {
+      state.secureHasValue = event.target.value.length > 0;
+      report();
+    };
+    document.querySelector("#scroll").onscroll = (event) => {
+      state.scrollTop = event.target.scrollTop;
+      report();
+    };
+    document.querySelector("#drag").onpointerdown = (event) => {
+      start = { x: event.clientX, y: event.clientY };
+      event.target.setPointerCapture(event.pointerId);
+    };
+    document.querySelector("#drag").onpointerup = (event) => {
+      if (
+        start &&
+        Math.hypot(event.clientX - start.x, event.clientY - start.y) > 20
+      )
+        state.drags++;
+      start = undefined;
+      report();
+    };
+    document.addEventListener("keydown", (event) => {
+      held.set(event.code, event.key);
+      report();
+    });
+    document.addEventListener("keyup", (event) => {
+      held.delete(event.code);
+      report();
+    });
+    document.addEventListener("pointerdown", (event) => {
+      state.buttons = event.buttons;
+      report();
+    });
+    document.addEventListener("pointerup", (event) => {
+      state.buttons = event.buttons;
+      report();
+    });
+    window.onresize = report;
+    function animate(time) {
+      state.animationFrames++;
+      if (gl) {
+        gl.clearColor(Math.floor(time / 250) % 2 ? 0.2 : 0.8, 0.6, 0.3, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+      }
+      if (state.animationFrames % 10 === 0) report();
+      requestAnimationFrame(animate);
+    }
+    requestAnimationFrame(animate);
+    report();
+  </script>
+</html>
