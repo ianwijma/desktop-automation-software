@@ -129,7 +129,14 @@ for (const mode of ["managed", "extension"] as const)
       await context?.close();
       if (server)
         await new Promise<void>((resolve) => server.close(() => resolve()));
-      if (directory) await rm(directory, { recursive: true, force: true });
+      if (directory)
+        await rm(directory, {
+          recursive: true,
+          force: true,
+          // Chromium can retain its log handle briefly after close on Windows.
+          maxRetries: 5,
+          retryDelay: 200,
+        });
     });
     it("inspects test attributes, roles, labels, IDs and CSS without input or focus changes", async () => {
       const before = await page.evaluate(() => ({
