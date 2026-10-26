@@ -58,8 +58,8 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
  if(wayland&&r.method==='capture')result={width:300,height:150,capturedAt:Date.now(),bounds:{x:0,y:0,width:200,height:100},dataUrl:'data:image/png;base64,synthetic',native:{helperInstanceId:instance,backend:info.backend,windowId:r.params.windowId,...(s.missingSource?{}:{sourceToken:s.sourceToken??'grant-1'}),geometry:{inputSpace:'portal-source',captureSpace:'pixels',boundsKind:'portal-source',pixelToInput:{scaleX:2/3,scaleY:2/3}}}};
  if(r.method==='input'){if(wayland&&s.hangInput)return;if(wayland&&s.revoked)error={code:'CAPTURE_LOST',message:'Granted source closed',operation:'input',backend:info.backend,permission:'required',retryable:false};else result=r.params;}
 
- if(r.method==='inspectNativeLocator')result={status:'unique',count:1,element:{locator:r.params.locator??{version:1,backend:'uia',selector:{automationId:'2',controlType:'edit'}},name:'Fixture',controlType:'edit',automationId:'2',className:'EDIT',enabled:true,offscreen:false,secure:false,virtualized:false,actions:['read','setValue'],bounds:window.bounds}};
- if(r.method==='nativeElement'){if(s.uiaError)error={code:s.uiaError,message:'Curated semantic failure',operation:'nativeElement',backend:'windows-uia',permission:'unknown',retryable:false};else result=r.params;}
+ if(r.method==='inspectNativeLocator')result={status:'unique',count:1,element:{locator:r.params.locator??{version:1,backend:s.mode==='macos'?'ax':'uia',selector:{automationId:'2',controlType:'edit'}},name:'Fixture',controlType:'edit',automationId:'2',className:'EDIT',enabled:true,offscreen:false,secure:false,virtualized:false,actions:['read','setValue'],bounds:window.bounds}};
+ if(r.method==='nativeElement'){if(s.uiaError)error={code:s.uiaError,message:'Curated semantic failure',operation:'nativeElement',backend:s.mode==='macos'?'macos-ax':'windows-uia',permission:'unknown',retryable:false};else result=r.params;}
  if(r.method==='focus')error={code:'PERMISSION_DENIED',message:'Input permission denied',operation:'focus',backend:'fixture',permission:'denied',retryable:false};
  process.stdout.write(s.mode==='malformed'?'null\\n':JSON.stringify({protocolVersion:2,id:r.id,...(error?{error}:{result})})+'\\n');
 });`,
@@ -579,5 +579,84 @@ describe("UIA adapter boundary", () => {
         windowsTarget,
       ),
     ).rejects.toThrow();
+  });
+});
+
+describe("macOS AX adapter boundary", () => {
+  const locator = {
+    version: 1,
+    backend: "ax",
+    selector: { automationId: "relay-text" },
+  } as const;
+  it("routes AX actions without capture/input and preserves permission revocation", async () => {
+    const { adapter, control, log } = await mock("macos");
+    await adapter.execute(
+      "type",
+      { nativeLocator: locator, text: "日本語" },
+      target,
+    );
+    await writeFile(
+      control,
+      JSON.stringify({ mode: "macos", pid: 1, uiaError: "PERMISSION_DENIED" }),
+    );
+    await expect(
+      adapter.execute("read", { nativeLocator: locator }, target),
+    ).rejects.toMatchObject({
+      details: { code: "PERMISSION_DENIED", backend: "macos-ax" },
+    });
+    const requests = (await readFile(log, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(requests.filter((r) => r.method === "nativeElement")).toHaveLength(
+      2,
+    );
+    expect(requests.some((r) => ["input", "capture"].includes(r.method))).toBe(
+      false,
+    );
+  });
+  it("rejects a locator from another platform before issuing a semantic RPC", async () => {
+    const { adapter, log } = await mock("macos");
+    await expect(
+      adapter.execute(
+        "read",
+        { nativeLocator: { ...locator, backend: "uia" } },
+        target,
+      ),
+    ).rejects.toMatchObject({ details: { code: "UNSUPPORTED_OPERATION" } });
+    await expect(
+      adapter.inspectLocator(target, {
+        locator: { ...locator, backend: "uia" },
+      }),
+    ).rejects.toMatchObject({ details: { code: "UNSUPPORTED_OPERATION" } });
+    expect(await readFile(log, "utf8")).not.toContain(
+      '"method":"nativeElement"',
+    );
+    expect(await readFile(log, "utf8")).not.toContain(
+      '"method":"inspectNativeLocator"',
+    );
+  });
+  it("maps Retina preview pixels to logical points and rejects changed display scale", async () => {
+    const { adapter, control, log } = await mock("macos");
+    const frame = await adapter.capture(target);
+    await adapter.inspectLocator(target, {
+      point: { x: 100, y: 40, frameId: frame.id },
+    });
+    const requests = (await readFile(log, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(
+      requests.find((r) => r.method === "inspectNativeLocator").params.point,
+    ).toEqual({ x: 0, y: 30 });
+    await writeFile(
+      control,
+      JSON.stringify({ mode: "macos", pid: 1, displayScale: 1 }),
+    );
+    await expect(
+      adapter.inspectLocator(target, {
+        point: { x: 100, y: 40, frameId: frame.id },
+      }),
+    ).rejects.toMatchObject({ details: { code: "STALE_CAPTURE" } });
   });
 });

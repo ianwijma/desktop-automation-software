@@ -695,6 +695,23 @@ export class NativeAdapter {
     this.bindingDescriptors.set(target.id, descriptor);
     return matches[0]!;
   }
+  private assertSemanticBackend(
+    backend: string | undefined,
+    operation: string,
+  ) {
+    const expected =
+      this.helper?.backend === "win32-wgc"
+        ? "uia"
+        : this.helper?.backend === "macos-screencapturekit"
+          ? "ax"
+          : undefined;
+    if (!expected || (backend !== undefined && backend !== expected))
+      throw this.serviceError(
+        "UNSUPPORTED_OPERATION",
+        operation,
+        "Choose a semantic locator matching this target platform (Windows UIA or macOS AX)",
+      );
+  }
   async inspectLocator(
     target: TargetDescriptor,
     query: NativeInspectionQuery,
@@ -704,12 +721,10 @@ export class NativeAdapter {
       throw new Error("Native inspection requires a desktop target");
     const parsed = nativeInspectionQuerySchema.parse(query);
     const window = await this.resolve(target, signal);
-    if (this.helper?.backend !== "win32-wgc")
-      throw this.serviceError(
-        "UNSUPPORTED_OPERATION",
-        "inspectNativeLocator",
-        "Native semantic targeting currently requires Windows UIA",
-      );
+    this.assertSemanticBackend(
+      "locator" in parsed ? parsed.locator.backend : undefined,
+      "inspectNativeLocator",
+    );
     let params: Record<string, unknown> = parsed;
     if ("point" in parsed) {
       const { x, y, frameId } = parsed.point;
@@ -717,10 +732,13 @@ export class NativeAdapter {
       if (
         !frame ||
         frame.id !== frameId ||
-        frame.native?.helperInstanceId !== this.helper.instanceId ||
+        !frame.native ||
+        frame.native.helperInstanceId !== this.helper?.instanceId ||
         frame.native.windowId !== window.id ||
         JSON.stringify(frame.bounds) !== JSON.stringify(window.bounds) ||
         frame.native.geometry.dpi !== window.dpi ||
+        (this.helper?.backend === "macos-screencapturekit" &&
+          frame.native.geometry.displayScale !== window.displayScale) ||
         x >= frame.width ||
         y >= frame.height
       )
@@ -890,13 +908,8 @@ export class NativeAdapter {
       return result;
     }
     if (config.nativeLocator !== undefined) {
-      if (this.helper?.backend !== "win32-wgc")
-        throw this.serviceError(
-          "UNSUPPORTED_OPERATION",
-          "nativeElement",
-          "Native semantic targeting currently requires Windows UIA",
-        );
       const locator = nativeLocatorSchema.parse(config.nativeLocator);
+      this.assertSemanticBackend(locator.backend, "nativeElement");
       if (
         config.locator ||
         config.selector ||

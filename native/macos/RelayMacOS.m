@@ -7,6 +7,7 @@
 #import <IOKit/hidsystem/IOLLEvent.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <math.h>
+#import <float.h>
 #import <stdlib.h>
 #import <string.h>
 #import <unistd.h>
@@ -221,6 +222,8 @@ static void Focus(NSDictionary *window) {
     }
     Fail(@"FOCUS_FAILED");
 }
+#include "RelayAX.inc"
+
 // Completion blocks may arrive on arbitrary queues. Pump the caller's main run loop
 // while waiting; never wait on a semaphore that would deadlock a main-queue callback.
 static NSError *Await(void (^start)(void (^)(NSError *))) {
@@ -864,7 +867,7 @@ static NSDictionary *Capabilities(void) {
         @"session" : @"desktop",
         @"capture" : screen && session ? @YES : @NO,
         @"input" : ax && session ? @YES : @NO,
-        @"accessibility" : @NO,
+        @"accessibility" : ax && session ? @YES : @NO,
         @"directRecording" : @NO,
         @"globalShortcuts" : @YES,
         @"windows" : Windows(),
@@ -886,6 +889,16 @@ static NSDictionary *Capabilities(void) {
     };
 }
 static id Selftest(void) {
+    AXValidateLocator(@{@"version":@1,@"backend":@"ax",@"selector":@{@"automationId":@"fixture"}});
+    if (!AXMatches(@{@"automationId":@"fixture"}, @{@"automationId":@"fixture",@"bounds":@{}}) ||
+        AXMatches(@{@"automationId":@"fixture"}, @{@"automationId":@"fixture-2"})) Fail(@"BACKEND_FAILURE");
+    for (NSString *field in @[@"pid",@"pointer",@"runtimeId",@"x"]) {
+        BOOL invalid = NO;
+        @try { AXValidateSelector(@{field:@42}); }
+        @catch (NSException *e) { invalid = [e.reason isEqual:@"INVALID_REQUEST"]; }
+        if (!invalid) Fail(@"BACKEND_FAILURE");
+    }
+
     if (Chord(@"Command+Shift+K").count != 3 || Chord(@"F12").firstObject.unsignedShortValue != 111)
         Fail(@"BACKEND_FAILURE");
     BOOL rejected = NO;
@@ -963,6 +976,8 @@ char *relay_macos_call(const char *method, const char *params) {
                 Fail(@"INVALID_REQUEST");
             if ([m isEqual:@"capabilities"])
                 result = Capabilities();
+            else if ([m isEqual:@"inspectNativeLocator"] || [m isEqual:@"nativeElement"])
+                result = AXSemantic(m, p);
             else if ([m isEqual:@"listWindows"])
                 result = Windows();
             else if ([m isEqual:@"capture"])
@@ -993,6 +1008,7 @@ char *relay_macos_call(const char *method, const char *params) {
                 Fail(@"UNSUPPORTED_OPERATION");
             reply = @{@"result" : result ?: @YES};
         } @catch (NSException *e) {
+            if (([m isEqual:@"nativeElement"] || [m isEqual:@"inspectNativeLocator"]) && [e.reason isEqual:@"TIMEOUT"]) AXPoisoned = YES;
             if ([m isEqual:@"capture"])
                 @try {
                     StopCapture();

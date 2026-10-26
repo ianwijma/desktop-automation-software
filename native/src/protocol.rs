@@ -33,7 +33,10 @@ pub fn handshake() -> Value {
         "backend":backend(),"coordinateSpace":space})
 }
 pub fn error(method: &str, message: String) -> Value {
-    if let Some(code) = message.strip_prefix("uia:") {
+    if let Some(code) = message
+        .strip_prefix("ax:")
+        .or_else(|| message.strip_prefix("uia:"))
+    {
         let safe = match code {
             "INVALID_REQUEST" => "Invalid semantic locator or UIA request",
             "ELEMENT_NOT_FOUND" => "No realized control matches; reveal virtualized items or update the locator",
@@ -71,7 +74,12 @@ pub fn error(method: &str, message: String) -> Value {
         } else {
             "BACKEND_FAILURE"
         };
-        return json!({"code":code,"message":safe,"operation":method,"backend":"windows-uia","permission":"unknown","retryable":false});
+        let safe = if message.starts_with("ax:") {
+            safe.replace("UIA", "AX")
+        } else {
+            safe.to_string()
+        };
+        return json!({"code":code,"message":safe,"operation":method,"backend":if message.starts_with("ax:") {"macos-ax"} else {"windows-uia"},"permission":"unknown","retryable":false});
     }
     if let Some(kind) = message.strip_prefix("wayland:") {
         let (code, safe, permission) = match kind {
@@ -229,11 +237,11 @@ pub fn capabilities(mut value: Value) -> Value {
         ),
         (
             "accessibility",
-            cfg!(target_os = "windows"),
+            cfg!(any(target_os = "windows", target_os = "macos")),
             value["accessibility"] == true,
         ),
     ] {
-        operations.insert(name.to_string(),json!({"availability":if !supported{"unsupported"}else if available{"available"}else{"unavailable"},"verification":"untested","backend":if name=="accessibility" && cfg!(target_os="windows") {"windows-uia"} else {backend()}}));
+        operations.insert(name.to_string(),json!({"availability":if !supported{"unsupported"}else if available{"available"}else{"unavailable"},"verification":"untested","backend":if name=="accessibility" && cfg!(target_os="windows") {"windows-uia"} else if name=="accessibility" && cfg!(target_os="macos") {"macos-ax"} else {backend()}}));
     }
     let capture = if cfg!(target_os = "macos") {
         if value["macosBackend"]["screenRecording"] == "granted" {
@@ -323,6 +331,20 @@ pub fn capture(mut value: Value, p: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ax_errors_are_curated_and_keep_permission_boundaries() {
+        let value = error("nativeElement", "ax:STALE_ELEMENT".into());
+        assert_eq!(value["backend"], "macos-ax");
+        assert_eq!(value["code"], "STALE_ELEMENT");
+        assert!(!value["message"].as_str().unwrap().contains("UIA"));
+        let value = error("nativeElement", "ax:secret-value".into());
+        assert_eq!(value["code"], "BACKEND_FAILURE");
+        assert!(!value.to_string().contains("secret-value"));
+        assert_eq!(
+            error("nativeElement", "macos:AX_REQUIRED".into())["code"],
+            "PERMISSION_DENIED"
+        );
+    }
     #[test]
     fn wayland_errors_keep_recovery_boundaries_and_redact_payloads() {
         for (kind, expected) in [
@@ -427,6 +449,9 @@ pub fn error_for(method: &str, message: String, p: &Value) -> Value {
             "capture" if str_field(p, "captureBackend") == "printwindow" => "win32-printwindow",
             _ => backend(),
         });
+    }
+    if cfg!(target_os = "macos") && ["nativeElement", "inspectNativeLocator"].contains(&method) {
+        value["backend"] = json!("macos-ax");
     }
     value
 }

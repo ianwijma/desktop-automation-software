@@ -9,6 +9,17 @@ const locator = {
   selector: { automationId: "apply", controlType: "button" },
 } as const;
 describe("persisted semantic locators", () => {
+  it("persists AX identifiers without converting Windows locators", () => {
+    const ax = nativeLocatorSchema.parse({ ...locator, backend: "ax" });
+    expect(ax.backend).toBe("ax");
+    expect(nativeLocatorSchema.parse(locator).backend).toBe("uia");
+    expect(
+      setNativeTargeting({ targetId: "desktop" }, true, "ax").nativeLocator,
+    ).toMatchObject({ backend: "ax" });
+    expect(
+      nativeLocatorSchema.safeParse({ ...ax, selector: { pid: 42 } }).success,
+    ).toBe(false);
+  });
   it("rejects transient identities rather than stripping them", () => {
     for (const key of ["runtimeId", "hwnd", "pointer", "pid", "x"]) {
       expect(
