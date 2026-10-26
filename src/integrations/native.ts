@@ -58,6 +58,7 @@ export class NativeAdapter {
   private cleanupTask: Promise<void> = Promise.resolve();
   private heldKeys = new Set<string>();
   private inputAttempted = false;
+  private portalCleanupFailed = false;
   readonly binaryPath: string;
   constructor(private options: NativeAdapterOptions = {}) {
     const resources = (process as NodeJS.Process & { resourcesPath?: string })
@@ -131,6 +132,7 @@ export class NativeAdapter {
           this.recording?.({ ...message.action, id: randomUUID() });
         return;
       }
+      if (message.event === "nativeCleanup") return;
       if (message.event === "recordingStopped") {
         if (message.recordingId === this.recordingId)
           this.recording = undefined;
@@ -163,6 +165,13 @@ export class NativeAdapter {
               "Native service returned an invalid error envelope",
             );
         this.lastError = error.details;
+        if (
+          this.platformSession === "wayland" &&
+          ["CAPTURE_LOST", "STALE_CAPTURE", "PERMISSION_DENIED"].includes(
+            error.details.code,
+          )
+        )
+          this.frames.clear();
         pending.reject(error);
         if (!parsed.success) this.fail(error);
       } else pending.resolve(message.result);
@@ -194,6 +203,9 @@ export class NativeAdapter {
   }
   private fail(error: Error, release = true) {
     const child = this.child;
+    const wayland =
+      this.platformSession === "wayland" ||
+      this.helper?.backend.startsWith("wayland-") === true;
     const mayHoldInput = this.inputAttempted || this.heldKeys.size > 0;
     this.child = undefined;
     this.handshake = undefined;
@@ -203,14 +215,19 @@ export class NativeAdapter {
     this.bindingIdentities.clear();
     this.frames.clear();
     if (error instanceof NativeServiceError) this.lastError = error.details;
-    const stopped = child ? this.terminate(child) : Promise.resolve();
+    const stopped = child ? this.terminate(child, wayland) : Promise.resolve();
     this.recording = undefined;
     this.recordingId = undefined;
     if (child)
       this.trackCleanup(
-        release && mayHoldInput
-          ? stopped.then(() => this.emergencyRelease())
-          : stopped,
+        wayland
+          ? stopped.catch((error) => {
+              this.portalCleanupFailed = true;
+              throw error;
+            })
+          : release && mayHoldInput
+            ? stopped.then(() => this.emergencyRelease())
+            : stopped,
       );
     for (const pending of this.pending.values()) {
       pending.cleanup();
@@ -234,7 +251,44 @@ export class NativeAdapter {
     this.lastError = error.details;
     return error;
   }
-  private terminate(child: ChildProcess): Promise<void> {
+  private terminate(child: ChildProcess, wayland = false): Promise<void> {
+    if (wayland) {
+      // Only the existing helper owns this grant. A fresh cleanup helper cannot
+      // release it and must not open a replacement chooser after cancellation.
+      let acknowledged = false;
+      const replies = child.stdout
+        ? createInterface({ input: child.stdout })
+        : undefined;
+      replies?.on("line", (line) => {
+        try {
+          const reply = JSON.parse(line);
+          if (
+            reply.protocolVersion === NATIVE_PROTOCOL_VERSION &&
+            reply.event === "nativeCleanup" &&
+            reply.result === true
+          )
+            acknowledged = true;
+        } catch {
+          /* Never log payloads. */
+        }
+      });
+      try {
+        // Keep capture/input connections alive until this helper has released
+        // them. Forced termination below still kills its whole process group.
+        child.kill("SIGTERM");
+      } catch {
+        child.kill();
+      }
+      return this.waitForExit(child, 6000).then(() => {
+        replies?.close();
+        if (!acknowledged || child.exitCode !== 0)
+          throw new Error(
+            "Wayland session cleanup was not acknowledged. Close the portal sharing session and restart Relay before sending more input.",
+          );
+        this.heldKeys.clear();
+        this.inputAttempted = false;
+      });
+    }
     if (process.platform === "win32" && child.pid && child.exitCode === null) {
       return new Promise((resolve) => {
         // The persistent Windows helper has no per-request subprocesses.
@@ -259,7 +313,7 @@ export class NativeAdapter {
     }
     return this.waitForExit(child);
   }
-  private waitForExit(child: ChildProcess): Promise<void> {
+  private waitForExit(child: ChildProcess, timeoutMs = 1000): Promise<void> {
     if (!child.pid || child.exitCode !== null || child.signalCode !== null)
       return Promise.resolve();
     return new Promise((resolve) => {
@@ -271,7 +325,7 @@ export class NativeAdapter {
         } catch {
           /* Already stopped. */
         }
-      }, 1000);
+      }, timeoutMs);
       child.once("exit", () => {
         clearTimeout(timer);
         resolve();
@@ -293,7 +347,7 @@ export class NativeAdapter {
     try {
       await previous;
     } catch (error) {
-      if (!retry) throw error;
+      if (!retry || this.portalCleanupFailed) throw error;
       if (this.cleanupTask === previous)
         this.trackCleanup(this.emergencyRelease());
       await this.cleanupTask;
@@ -698,6 +752,12 @@ export class NativeAdapter {
         "capture",
         "Native capture returned invalid identity or coordinate transform",
       );
+    if (this.platformSession === "wayland" && !metadata.sourceToken)
+      throw this.serviceError(
+        "INVALID_REQUEST",
+        "capture",
+        "Wayland capture did not identify its granted source",
+      );
     metadata.application = window.applicationIdentity;
     const frame: CaptureFrame = {
       ...result,
@@ -779,6 +839,16 @@ export class NativeAdapter {
       );
     const sourceFrame = this.frames.get(target.id);
     if (
+      this.platformSession === "wayland" &&
+      !sourceFrame?.native?.sourceToken &&
+      !(kind === "key" && config.action === "up")
+    )
+      throw this.serviceError(
+        "PERMISSION_DENIED",
+        "input",
+        "Capture this Wayland target to explicitly grant a source before sending input",
+      );
+    if (
       typeof config.frameId === "string" &&
       (!sourceFrame ||
         config.frameId !== sourceFrame.id ||
@@ -818,6 +888,8 @@ export class NativeAdapter {
         );
     }
     const input = { ...config };
+    if (this.platformSession === "wayland" && sourceFrame?.native?.sourceToken)
+      input.sourceToken = sourceFrame.native.sourceToken;
     const frame = this.frames.get(target.id);
     if (frame?.bounds) {
       const sx = frame.native!.geometry.pixelToInput.scaleX,
@@ -895,6 +967,12 @@ export class NativeAdapter {
     return operation;
   }
   async stopRecording(): Promise<void> {
+    if (
+      (this.platformSession === "wayland" ||
+        this.helper?.backend.startsWith("wayland-")) &&
+      this.pending.size
+    )
+      this.fail(this.serviceError("CANCELLED", "stop", "Cancelled"));
     this.recordingGeneration++;
     this.recording = undefined;
     this.recordingId = undefined;
@@ -908,10 +986,18 @@ export class NativeAdapter {
     return operation;
   }
   async releaseAll(): Promise<void> {
+    if (
+      (this.platformSession === "wayland" ||
+        this.helper?.backend.startsWith("wayland-")) &&
+      this.pending.size
+    )
+      this.fail(this.serviceError("CANCELLED", "stop", "Cancelled"));
     await this.finishCleanup(true);
+    if (this.platformSession === "wayland") this.frames.clear();
     if (this.child) {
       if (this.inputAttempted || this.heldKeys.size) {
-        await this.rpc("releaseKeys", { keys: [...this.heldKeys] });
+        if (this.platformSession !== "wayland")
+          await this.rpc("releaseKeys", { keys: [...this.heldKeys] });
         await this.rpc("releaseAll");
         this.heldKeys.clear();
         this.inputAttempted = false;

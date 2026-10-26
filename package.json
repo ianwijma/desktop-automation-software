@@ -1,6 +1,7 @@
 {
   "name": "relay-desktop",
   "productName": "Relay",
+  "desktopName": "dev.relay.desktop.desktop",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -23,7 +24,8 @@
     "test:native:windows": "node scripts/windows-native-matrix.mjs",
     "format": "prettier --write src tests scripts docs README.md package.json *.json *.ts *.html .github/workflows/*.yml",
     "install:browser": "playwright install chromium",
-    "test:native:macos": "node scripts/macos-native-matrix.mjs"
+    "test:native:macos": "node scripts/macos-native-matrix.mjs",
+    "test:native:wayland": "node scripts/wayland-native-matrix.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.85",
@@ -72,6 +74,7 @@
       }
     ],
     "linux": {
+      "syncDesktopName": true,
       "target": [
         "AppImage",
         "deb"

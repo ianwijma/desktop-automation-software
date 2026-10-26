@@ -1,4 +1,4 @@
-# Native contracts and desktop verification (N01–N03)
+# Native contracts and desktop verification (N01–N04)
 
 The native helper and TypeScript adapter use protocol **2**, independently of workflow/database version 2 and recording envelope version 1. There is no automatic input retry, backend fallback, or migration of coordinate workflows to semantic targeting.
 
@@ -22,7 +22,7 @@ Existing capability booleans remain for compatibility. `capabilities.native` add
 
 macOS uses nonprompting Screen Recording/Accessibility preflights, per-operation permission/session guards and a persistent ScreenCaptureKit stream. Permission state is separate from active-session availability. Windows input permission remains unknown because an unlocked desktop and target privilege level cannot be established by helper startup. X11 capture has no separate consent permission, while desktop/service availability is reported independently. Wayland grants remain required and operations remain unavailable in the passive probe until separately exercised; portal service discovery is not consent or session qualification. Global shortcuts are still checked by the Electron application.
 
-Current backend identifiers are `x11-command-tools`, `wayland-portal-gstreamer`, `win32-wgc` (capture default), `win32-printwindow` (explicit compatibility), `win32-sendinput` (input errors), and `macos-screencapturekit`. N02/N03 replace the Windows/macOS implementations; Wayland completion remains N04.
+Current backend identifiers are `x11-command-tools`, `wayland-portal-gstreamer`, `win32-wgc` (capture default), `win32-printwindow` (explicit compatibility), `win32-sendinput` (input errors), and `macos-screencapturekit`. N02/N03 replace the Windows/macOS implementations; N04 adds persistent Wayland grants, source tokens and fixed EIS/legacy input transport.
 
 ## Identity and coordinates
 
@@ -52,7 +52,7 @@ RELAY_NATIVE_BINARY=native/target/debug/relay-native xvfb-run -a \
   npm run test:native -- --run --software-gpu --session-label=xvfb
 ```
 
-This verifies graphics capture with a software renderer, not a hardware GPU or compositor. Omit `--software-gpu` for real graphics qualification; unavailable WebGL fails the graphics check instead of passing it. Wayland produces a not-run result without opening a chooser or injecting input; N04 must add portal source/session qualification. Windows and macOS may run the same source harness manually with the matching helper, an unlocked disposable session, and required permissions. Windows CI now attempts the [N02 matrix](windows-native.md), reporting incomplete cases when no interactive graphics desktop is available. macOS CI attempts the [N03 matrix](macos-native.md) only when Screen Recording/Accessibility and an active desktop are available; otherwise it records incomplete cases without opening permission prompts. Source and unpacked-app smoke checks confirm the linked helper and diagnostics separately.
+This verifies graphics capture with a software renderer, not a hardware GPU or compositor. Omit `--software-gpu` for real graphics qualification; unavailable WebGL fails the graphics check instead of passing it. This general harness leaves Wayland not-run without opening a chooser. The separate opt-in [N04 harness](wayland-native.md) exercises explicit portal selection and fixture effects in actual GNOME/KDE sessions; private wire-contract tests do not qualify a compositor. Windows and macOS may run the same source harness manually with the matching helper, an unlocked disposable session, and required permissions. Windows CI now attempts the [N02 matrix](windows-native.md), reporting incomplete cases when no interactive graphics desktop is available. macOS CI attempts the [N03 matrix](macos-native.md) only when Screen Recording/Accessibility and an active desktop are available; otherwise it records incomplete cases without opening permission prompts. Source and unpacked-app smoke checks confirm the linked helper and diagnostics separately.
 
 The eight checks cover launch/attach/focus; nonblank capture and transforms; observed click/type/secure-field/scroll/drag effects; changing graphics pixels; resize rejection; held-key/drag cancellation and actual release; helper restart/stale-frame rejection/input resumption; and duplicate-window rejection. Duplicate labels and a secure field are included for later semantic/recording slices; N01 does not qualify accessibility or secure-field recording.
 

@@ -108,7 +108,9 @@ function rpc<T = unknown>(method: string, ...args: unknown[]): Promise<T> {
           ),
         );
       },
-      method === "testDetector" ? 120000 : 45000,
+      ["testDetector", "capture", "startRecording"].includes(method)
+        ? 120000
+        : 45000,
     );
     pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
     runner.postMessage({ id, method, args });
@@ -159,7 +161,15 @@ async function capabilities(): Promise<PlatformCapabilities> {
     return {
       ...value,
       globalShortcuts: shortcutsAvailable,
-      reasons: [...value.reasons, ...shortcutProblems],
+      reasons: [
+        ...value.reasons,
+        ...shortcutProblems,
+        ...(value.session === "wayland"
+          ? [
+              "Wayland Stop/Pause shortcuts use the desktop portal. Accept any shortcut consent request and verify delivery in this desktop session before running unattended workflows.",
+            ]
+          : []),
+      ],
     };
   } catch (error) {
     return {
