@@ -7,6 +7,7 @@ import path from "node:path";
 import { targetSchema } from "../src/shared/validation";
 import { NativeAdapter } from "../src/integrations/native";
 import {
+  nativeCapabilitiesSchema,
   nativeErrorSchema,
   nativeHandshakeSchema,
 } from "../src/shared/native-protocol";
@@ -266,6 +267,7 @@ it.skipIf(!existsSync(binary))(
         method: "launch",
         params: { command: "must-not-launch" },
       },
+      { id: "caps", protocolVersion: 2, method: "capabilities", params: {} },
       {
         id: "unknown",
         protocolVersion: 2,
@@ -291,7 +293,14 @@ it.skipIf(!existsSync(binary))(
         (r) => nativeErrorSchema.parse(r.error).code,
       ),
     ).toEqual(["PROTOCOL_MISMATCH", "PROTOCOL_MISMATCH", "PROTOCOL_MISMATCH"]);
-    expect(nativeErrorSchema.parse(replies[4].error)).toMatchObject({
+    const caps = nativeCapabilitiesSchema.safeParse(replies[4].result);
+    expect(
+      caps.error?.issues.map((issue) => ({
+        code: issue.code,
+        path: issue.path,
+      })),
+    ).toBeUndefined();
+    expect(nativeErrorSchema.parse(replies[5].error)).toMatchObject({
       code: "UNSUPPORTED_OPERATION",
       operation: "unknown",
     });

@@ -231,6 +231,8 @@ if (!args.has("--run")) {
       (!capabilities.native.windows?.interactiveDesktop ||
         !capabilities.native.windows?.perMonitorV2 ||
         (captureBackend === "wgc" && !capabilities.capture));
+    if (capabilities.native?.helper?.backend === "macos-screencapturekit")
+      assert.ok(capabilities.native.macos, capabilities.reasons.join("; "));
     const unavailableMac =
       capabilities.native?.helper?.backend === "macos-screencapturekit" &&
       (!capabilities.capture ||
