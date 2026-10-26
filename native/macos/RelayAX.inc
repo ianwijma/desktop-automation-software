@@ -184,9 +184,9 @@ static NSDictionary *AXMetadata(RelayAXRequest *r, id element) {
         @"name" : name,
         @"className" : role,
         @"controlType" : type,
-        @"enabled" : enabled ?: @NO,
-        @"secure" : @(secure),
-        @"offscreen" : @(!visible),
+        @"enabled" : [enabled boolValue] ? @YES : @NO,
+        @"secure" : secure ? @YES : @NO,
+        @"offscreen" : visible ? @NO : @YES,
         @"virtualized" : @NO,
         @"actions" : actions,
         @"bounds" : Bounds(rect)
