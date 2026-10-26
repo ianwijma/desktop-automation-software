@@ -3319,3 +3319,27 @@ kbd {
 .value-field [aria-invalid="true"] {
   border-color: var(--error);
 }
+
+.connection-checks {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+.connection-check {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.connection-check small {
+  display: block;
+  color: var(--muted);
+  max-width: 540px;
+  margin-top: 3px;
+}
+.connection-check > span {
+  min-width: 0;
+}
+.connection-check button {
+  flex-shrink: 0;
+}

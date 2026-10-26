@@ -72,6 +72,14 @@ export interface AIConnection {
   capabilities: { text: boolean; vision: boolean; structured: boolean };
   hasKey: boolean;
   experimentalVision?: boolean;
+  revision?: number;
+  credentialRevision?: number;
+  checks?: Partial<
+    Record<
+      import("./ai-connections").AICheckOperation,
+      import("./ai-connections").AIConnectionCheck
+    >
+  >;
   lastTest?: { ok: boolean; message: string; at: string };
 }
 export interface TargetDescriptor {
@@ -312,7 +320,10 @@ export interface RelayAPI {
     apiKey?: string,
   ): Promise<AIConnection>;
   deleteConnection(id: string): Promise<void>;
-  testConnection(id: string): Promise<{ ok: boolean; message: string }>;
+  testConnection(
+    id: string,
+    operation?: import("./ai-connections").AICheckOperation,
+  ): Promise<import("./ai-connections").AICheckResult>;
   saveTarget(target: TargetDescriptor): Promise<TargetDescriptor>;
   deleteTarget(id: string): Promise<void>;
   saveSchedule(schedule: Schedule): Promise<Schedule>;

@@ -21,6 +21,13 @@ import {
   nativeErrorSchema,
 } from "../shared/native-protocol";
 import { Storage } from "./storage";
+import { ConnectionCheckTracker } from "./connection-checks";
+import {
+  aiCheckOperationSchema,
+  aiCheckSchema,
+  prepareConnectionSave,
+} from "../shared/ai-connections";
+import type { AICheckResult } from "../shared/ai-connections";
 import { syncSavedFlow } from "./flow-sync";
 import {
   migrateFlow,
@@ -89,6 +96,7 @@ const pending = new Map<
 >();
 const dataDir = process.env.RELAY_DATA_DIR ?? app.getPath("userData");
 const encryptedKeys = new Map<string, string>();
+const connectionChecks = new ConnectionCheckTracker();
 function rpc<T = unknown>(method: string, ...args: unknown[]): Promise<T> {
   return new Promise((resolve, reject) => {
     if (!runnerAlive) {
@@ -484,6 +492,11 @@ async function request(
         previous && previous.provider !== connection.provider;
       const key =
         args[1] === undefined ? undefined : z.string().max(8192).parse(args[1]);
+      const credentialChanged = Boolean(
+        key?.trim()
+          ? encryptedKeys.get(connection.id) !== key.trim()
+          : providerChanged && store.credential(connection.id),
+      );
       if (key?.trim()) {
         if (
           !safeStorage.isEncryptionAvailable() ||
@@ -502,9 +515,9 @@ async function request(
         store.deleteCredential(connection.id);
         encryptedKeys.delete(connection.id);
       }
+      connectionChecks.invalidate(connection.id);
       const result = store.put("connections", {
-        ...connection,
-        lastTest: providerChanged ? undefined : connection.lastTest,
+        ...prepareConnectionSave(previous, connection, credentialChanged),
         hasKey: Boolean(store.credential(connection.id)),
       });
       await sync();
@@ -512,6 +525,7 @@ async function request(
     }
     case "deleteConnection": {
       const key = id();
+      connectionChecks.invalidate(key);
       store.delete("connections", key);
       store.deleteCredential(key);
       encryptedKeys.delete(key);
@@ -520,18 +534,40 @@ async function request(
     }
     case "testConnection": {
       const key = id();
-      const result = await rpc<{ ok: boolean; message: string }>(
-        "testConnection",
-        key,
+      const snapshot = store.get("connections", key);
+      if (!snapshot) throw new Error("Connection not found.");
+      const operation = aiCheckOperationSchema.parse(
+        args[1] ?? (snapshot.provider === "jev" ? "decision" : "text"),
       );
-      const connection = store.get("connections", key);
-      if (connection)
-        store.put("connections", {
-          ...connection,
-          lastTest: { ...result, at: new Date().toISOString() },
-        });
+      const token = connectionChecks.begin(snapshot, operation);
+      const raw = await rpc<AICheckResult>("testConnection", key, operation, {
+        connectionRevision: snapshot.revision ?? 0,
+        credentialRevision: snapshot.credentialRevision ?? 0,
+      });
+      const { ok: _ok, ...evidence } = raw;
+      const result = aiCheckSchema.parse(evidence);
+      if (
+        result.operation !== operation ||
+        result.connectionRevision !== (snapshot.revision ?? 0) ||
+        result.credentialRevision !== (snapshot.credentialRevision ?? 0)
+      )
+        throw new Error("Connection probe returned mismatched evidence.");
+      const current = store.get("connections", key);
+      if (!connectionChecks.accept(snapshot, current, operation, token))
+        return {
+          ...result,
+          ok: false,
+          discarded: true,
+          message:
+            "Probe discarded because the connection changed or a newer check started.",
+        };
+      store.put("connections", {
+        ...current!,
+        checks: { ...current!.checks, [operation]: result },
+        lastTest: undefined,
+      });
       await sync();
-      return result;
+      return { ...result, ok: result.status === "passed" };
     }
     case "saveTarget": {
       const target = targetSchema.parse(args[0]);

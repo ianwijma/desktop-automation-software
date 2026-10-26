@@ -25,6 +25,12 @@ import type {
   Json,
   ProviderKind,
 } from "../shared/types";
+import {
+  aiCheckOperations,
+  aiCheckLabels,
+  connectionCheckState,
+  unsupportedCheck,
+} from "../shared/ai-connections";
 import { accents, uid } from "./catalog";
 import {
   Button,
@@ -451,40 +457,66 @@ function Connections({ workspace, api, refresh, onError, onSuccess }: Props) {
                   {providers[connection.provider]?.name ?? connection.provider}
                 </p>
                 <div className="capability-badges">
+                  <span>Enabled</span>
                   {connection.capabilities.text ? <span>Text</span> : null}
                   {connection.capabilities.vision ? <span>Vision</span> : null}
                   {connection.capabilities.structured ? (
                     <span>Structured output</span>
                   ) : null}
                 </div>
-                {connection.lastTest ? (
-                  <small
-                    className={
-                      connection.lastTest.ok ? "success-text" : "error-text"
-                    }
-                  >
-                    {connection.lastTest.message}
-                  </small>
-                ) : null}
+                <div
+                  className="connection-checks"
+                  aria-label={`Checks for ${connection.name}`}
+                >
+                  {aiCheckOperations.map((operation) => {
+                    const result = connectionCheckState(connection, operation);
+                    return (
+                      <div className="connection-check" key={operation}>
+                        <span>
+                          <strong>{aiCheckLabels[operation]}</strong> ·{" "}
+                          <span
+                            className={
+                              result.status === "passed"
+                                ? "success-text"
+                                : result.status === "failed"
+                                  ? "error-text"
+                                  : ""
+                            }
+                          >
+                            {result.status}
+                          </span>
+                          <small>{result.message}</small>
+                        </span>
+                        <Button
+                          aria-label={`Test ${aiCheckLabels[operation]} for ${connection.name}`}
+                          disabled={
+                            !workspace.desktop ||
+                            Boolean(testing) ||
+                            Boolean(unsupportedCheck(connection, operation))
+                          }
+                          busy={testing === `${connection.id}:${operation}`}
+                          onClick={() => {
+                            setTesting(`${connection.id}:${operation}`);
+                            void api
+                              .testConnection(connection.id, operation)
+                              .then(async (result) => {
+                                await refresh();
+                                if (result.ok && !result.discarded)
+                                  onSuccess(result.message);
+                                else onError(result.message);
+                              })
+                              .catch(onError)
+                              .finally(() => setTesting(null));
+                          }}
+                        >
+                          Test {aiCheckLabels[operation]}
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
               <div className="card-actions">
-                <Button
-                  busy={testing === connection.id}
-                  onClick={() => {
-                    setTesting(connection.id);
-                    void api
-                      .testConnection(connection.id)
-                      .then(async (result) => {
-                        await refresh();
-                        if (result.ok) onSuccess(result.message);
-                        else onError(result.message);
-                      })
-                      .catch(onError)
-                      .finally(() => setTesting(null));
-                  }}
-                >
-                  Test
-                </Button>
                 <IconButton
                   label={`Edit ${connection.name}`}
                   onClick={() => {
@@ -523,7 +555,9 @@ function Connections({ workspace, api, refresh, onError, onSuccess }: Props) {
       )}
       <Notice>
         Flows reference connections by name. API keys are never included when
-        you export a flow. Local models run on the server you configure.
+        you export a flow. Local models run on the server you configure. Each
+        Test sends one synthetic prompt or image to the selected connection and
+        may incur provider charges. No application capture is included.
       </Notice>
       <Modal
         open={!!editing}
@@ -557,7 +591,7 @@ function Connections({ workspace, api, refresh, onError, onSuccess }: Props) {
                     baseUrl: providers[provider].baseUrl,
                     model: providers[provider].model,
                     capabilities: {
-                      text: true,
+                      text: provider !== "jev",
                       vision: false,
                       structured: false,
                     },
@@ -628,7 +662,13 @@ function Connections({ workspace, api, refresh, onError, onSuccess }: Props) {
                 }
               />
             </Field>
-            <h4 className="setting-label">MODEL CAPABILITIES</h4>
+            <h4 className="setting-label">ENABLED MODEL CAPABILITIES</h4>
+            <p className="field-help">
+              These switches declare what this connection may do. Only
+              individual probes establish tested operations. Saving model,
+              endpoint, capability or credential changes makes previous results
+              stale.
+            </p>
             <div className="checkbox-row">
               {(["text", "vision", "structured"] as const).map((capability) => (
                 <label key={capability}>
