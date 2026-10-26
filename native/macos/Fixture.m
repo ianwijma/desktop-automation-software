@@ -263,6 +263,8 @@ static void Serve(int listener) {
                           [NSApp activateIgnoringOtherApps:YES];
                       } else if ([path isEqual:@"/duplicate"]) {
                           Duplicate = NewWindow();
+                          [Duplicate setFrameOrigin:NSMakePoint(NSMinX(Window.frame) + 80,
+                                                                NSMinY(Window.frame) - 40)];
                           [Duplicate makeKeyAndOrderFront:nil];
                       } else if ([path isEqual:@"/close-duplicate"]) {
                           [Duplicate close];

@@ -588,6 +588,11 @@ if (!args.has("--run")) {
             adapter.execute("attach", {}, { ...target, id: randomUUID() }),
             /Multiple windows/,
           );
+          if (process.platform === "darwin") {
+            // The saved binding identifies the original, despite duplicate titles.
+            await adapter.execute("focus", {}, target);
+            await poll(control, (state) => state.focused);
+          }
           await control("/close-duplicate", "POST");
           await poll(
             () => adapter.listWindows(),
