@@ -330,34 +330,47 @@ if (!args.has("--run")) {
         const captured = await check(
           "capture-content-and-transform",
           async () => {
-            frame = await adapter.capture(target);
-            const state = await control();
-            assert.equal(
-              frame.native.helperInstanceId,
-              capabilities.native.helper.instanceId,
-            );
-            const marker = await point("marker");
-            const { data } = await sharp(
-              Buffer.from(frame.dataUrl.split(",")[1], "base64"),
-            )
-              .extract({
-                left: Math.round(marker.x),
-                top: Math.round(marker.y),
-                width: 1,
-                height: 1,
-              })
-              .removeAlpha()
-              .raw()
-              .toBuffer({ resolveWithObject: true });
-            assert.ok(
-              Math.abs(data[0] - 232) < 12 &&
+            let matched = false;
+            const deadline = Date.now() + 5000;
+            // App load/DOM readiness can precede its first compositor paint.
+            // Read-only captures may wait for known fixture pixels; input never retries.
+            do {
+              frame = await adapter.capture(target);
+              assert.equal(
+                frame.native.helperInstanceId,
+                capabilities.native.helper.instanceId,
+              );
+              const marker = await point("marker");
+              const png = Buffer.from(frame.dataUrl.split(",")[1], "base64");
+              const { data } = await sharp(png)
+                .extract({
+                  left: Math.round(marker.x),
+                  top: Math.round(marker.y),
+                  width: 1,
+                  height: 1,
+                })
+                .removeAlpha()
+                .raw()
+                .toBuffer({ resolveWithObject: true });
+              report.startupCapture = {
+                width: frame.width,
+                height: frame.height,
+                bounds: frame.bounds,
+                native: frame.native,
+                marker: { point: marker, rgb: [...data] },
+              };
+              // Keep failed pre-input captures too: only this synthetic fixture is captured.
+              await writeFile(path.join(output, "fixture.png"), png);
+              matched =
+                Math.abs(data[0] - 232) < 12 &&
                 Math.abs(data[1] - 56) < 12 &&
-                Math.abs(data[2] - 100) < 12,
-              "Capture must contain the fixture marker, not a blank/incorrect window",
-            );
-            await writeFile(
-              path.join(output, "fixture.png"),
-              Buffer.from(frame.dataUrl.split(",")[1], "base64"),
+                Math.abs(data[2] - 100) < 12;
+              if (!matched)
+                await new Promise((resolve) => setTimeout(resolve, 100));
+            } while (!matched && Date.now() < deadline);
+            assert.ok(
+              matched,
+              `Capture must contain the fixture marker, not a blank/incorrect window (sample ${report.startupCapture.marker.rgb})`,
             );
             return {
               width: frame.width,
