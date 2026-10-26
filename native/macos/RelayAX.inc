@@ -212,11 +212,16 @@ static NSArray *AXFind(RelayAXRequest *r, id scope, NSDictionary *selector, NSDi
         NSDictionary *entry = stack.lastObject;
         [stack removeLastObject];
         id element = entry[@"e"];
-        if (entry[@"depth"] && AXEqual(element, scope))
-            Fail(@"SEARCH_LIMIT");
+        BOOL duplicate = NO;
         for (id previous in seen)
-            if (AXEqual(previous, element))
-                Fail(@"SEARCH_LIMIT");
+            if (AXEqual(previous, element)) {
+                duplicate = YES;
+                break;
+            }
+        // AX providers may expose the same element through more than one child path.
+        // Visit each identity once; this also terminates cycles without guessing a match.
+        if (duplicate)
+            continue;
         [seen addObject:element];
         if (++r.visited > 2048 || [entry[@"depth"] intValue] > 40)
             Fail(@"SEARCH_LIMIT");
