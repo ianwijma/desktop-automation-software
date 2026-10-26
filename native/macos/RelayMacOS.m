@@ -790,8 +790,8 @@ static NSDictionary *Capabilities(void) {
     return @{
         @"platform" : @"darwin",
         @"session" : @"desktop",
-        @"capture" : @(screen && session),
-        @"input" : @(ax && session),
+        @"capture" : screen && session ? @YES : @NO,
+        @"input" : ax && session ? @YES : @NO,
         @"accessibility" : @NO,
         @"directRecording" : @NO,
         @"globalShortcuts" : @YES,
@@ -804,7 +804,7 @@ static NSDictionary *Capabilities(void) {
         @"macosBackend" : @{
             @"screenRecording" : screen ? @"granted" : @"required",
             @"accessibility" : ax ? @"granted" : @"required",
-            @"interactiveSession" : @(session),
+            @"interactiveSession" : session ? @YES : @NO,
             @"framework" : @"ScreenCaptureKit",
             @"minimumOS" : @"14.0",
             @"processPath" : NSProcessInfo.processInfo.arguments.firstObject ?: @"",
