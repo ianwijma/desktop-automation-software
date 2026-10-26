@@ -71,7 +71,7 @@ Local detection uses OpenCV template matching, Tesseract OCR, region colors, and
 
 ## Current release boundaries
 
-- The Linux X11 implementation is exercised on an isolated X server. Windows uses a persistent Rust WGC/SendInput backend with an opt-in native-control/Electron matrix; mixed OS DPI, real GPU and installer qualification remain pending. macOS still requires OS-specific native runtime validation.
+- The Linux X11 implementation is exercised on an isolated X server. Windows uses a persistent Rust WGC/SendInput backend with an opt-in native-control/Electron matrix; mixed OS DPI, real GPU and installer qualification remain pending. macOS links an Objective-C ScreenCaptureKit/public-AX bridge into the persistent Rust helper. Capture pixels map to logical points with explicit display scale; source/unpacked-app identity is checked separately from permission-granted native qualification.
 - Native semantic accessibility targeting is not implemented uniformly. Browser DOM targeting is available; native applications use supported pixel/input methods.
 - Direct-use desktop recording is capability-gated. Wayland portal support and compositor restrictions differ from X11.
 - The companion extension is loaded unpacked during development; store publication is separate.

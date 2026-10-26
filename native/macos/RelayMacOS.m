@@ -33,10 +33,11 @@ static BOOL Same(CGRect a, CGRect b) {
 }
 static BOOL SessionActive(void) {
     NSDictionary *s = CFBridgingRelease(CGSessionCopyCurrentDictionary());
-    NSString *front = NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier;
+    NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
     return s && [s[(__bridge NSString *)kCGSessionOnConsoleKey] boolValue] &&
-           [s[(__bridge NSString *)kCGSessionLoginDoneKey] boolValue] && front &&
-           ![front isEqualToString:@"com.apple.loginwindow"];
+           [s[(__bridge NSString *)kCGSessionLoginDoneKey] boolValue] &&
+           front.processIdentifier > 0 &&
+           ![front.bundleIdentifier isEqualToString:@"com.apple.loginwindow"];
 }
 static void SessionGuard(void) {
     if (!SessionActive())
@@ -102,7 +103,7 @@ static NSArray *Windows(void) {
     return result;
 }
 static NSDictionary *Window(NSDictionary *p) {
-    NSString *identifier = p[@"windowId"];
+    NSString *identifier = p[@"windowId"] ?: p[@"id"];
     for (NSDictionary *w in Windows())
         if ([w[@"id"] isEqual:identifier]) {
             if (p[@"applicationIdentity"] &&
@@ -128,24 +129,32 @@ static BOOL AXBounds(AXUIElementRef w, CGRect *rect) {
     return AXValueGetValue((__bridge AXValueRef)position, kAXValueCGPointType, &rect->origin) &&
            AXValueGetValue((__bridge AXValueRef)size, kAXValueCGSizeType, &rect->size);
 }
+static id UniqueGeometry(NSArray *candidates, CGRect bounds) {
+    NSMutableArray *matches = [NSMutableArray array];
+    for (NSDictionary *candidate in candidates)
+        if (Same(RelayRect(candidate[@"bounds"]), bounds))
+            [matches addObject:candidate[@"element"]];
+    if (matches.count != 1)
+        Fail(matches.count ? @"AX_AMBIGUOUS" : @"AX_WINDOW_UNAVAILABLE");
+    return matches.firstObject;
+}
 static id AXWindow(NSDictionary *window) {
     InputGuard();
     AXUIElementRef application = AXUIElementCreateApplication([window[@"pid"] intValue]);
     AXUIElementSetMessagingTimeout(application, 0.5);
     NSArray *items = Attribute(application, kAXWindowsAttribute);
     CFRelease(application);
-    NSMutableArray *matches = [NSMutableArray array];
+    NSMutableArray *candidates = [NSMutableArray array];
     for (id candidate in items) {
         AXUIElementRef ax = (__bridge AXUIElementRef)candidate;
         AXUIElementSetMessagingTimeout(ax, 0.5);
         CGRect r = CGRectZero;
-        if (AXBounds(ax, &r) && Same(r, RelayRect(window[@"bounds"])))
-            [matches addObject:candidate];
+        if (AXBounds(ax, &r))
+            [candidates addObject:@{@"element" : candidate, @"bounds" : Bounds(r)}];
     }
-    if (matches.count != 1)
-        Fail(matches.count ? @"AX_AMBIGUOUS" : @"AX_WINDOW_UNAVAILABLE");
-    return matches.firstObject;
+    return UniqueGeometry(candidates, RelayRect(window[@"bounds"]));
 }
+
 static void Verify(NSDictionary *original, BOOL foreground) {
     InputGuard();
     NSDictionary *current = Window(original);
@@ -186,7 +195,7 @@ static void Focus(NSDictionary *window) {
             return;
         } @catch (NSException *e) {
             if (![e.reason isEqualToString:@"FOCUS_FAILED"])
-                @throw;
+                @throw e;
         }
         Pump();
     }
@@ -635,7 +644,7 @@ static void ReleaseKeys(NSArray *values) {
         } @catch (NSException *e) {
             if ([e.reason isEqualToString:@"UNSUPPORTED_KEY"])
                 continue;
-            @throw;
+            @throw e;
         }
         for (NSNumber *key in keys.reverseObjectEnumerator)
             Key(key.unsignedShortValue, NO);
@@ -772,7 +781,7 @@ static void Input(NSDictionary *p) {
             ReleaseAll();
         } @catch (NSException *ignored) {
         } @
-        throw;
+        throw e;
     }
 }
 static NSDictionary *Capabilities(void) {
@@ -820,6 +829,29 @@ static id Selftest(void) {
         Chord(@"Ctrl+Control");
     } @catch (NSException *e) {
         rejected = YES;
+    }
+    if (!rejected)
+        Fail(@"BACKEND_FAILURE");
+    CGRect negative = CGRectMake(-500, 20, 200, 100);
+    NSArray *candidates = @[
+        @{@"element" : @"first", @"bounds" : Bounds(negative)},
+        @{@"element" : @"second", @"bounds" : Bounds(CGRectMake(-200, 20, 200, 100))}
+    ];
+    if (![UniqueGeometry(candidates, negative) isEqual:@"first"])
+        Fail(@"BACKEND_FAILURE");
+    rejected = NO;
+    @try {
+        UniqueGeometry(@[ candidates[0], candidates[0] ], negative);
+    } @catch (NSException *e) {
+        rejected = [e.reason isEqual:@"AX_AMBIGUOUS"];
+    }
+    if (!rejected)
+        Fail(@"BACKEND_FAILURE");
+    rejected = NO;
+    @try {
+        UniqueGeometry(candidates, CGRectMake(0, 0, 10, 10));
+    } @catch (NSException *e) {
+        rejected = [e.reason isEqual:@"AX_WINDOW_UNAVAILABLE"];
     }
     if (!rejected)
         Fail(@"BACKEND_FAILURE");
