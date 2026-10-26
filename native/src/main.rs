@@ -143,11 +143,11 @@ fn dispatch(method: &str, p: &Value, recording: &mut Recording) -> Result<Value>
         "close" => platform::close(p),
         "releaseAll" => release_owned(),
         "releaseCapture" => {
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             {
                 return platform::release_capture();
             }
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             {
                 Ok(json!(true))
             }
@@ -249,7 +249,7 @@ fn main() {
         });
     }
     let _ = recording.stop();
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     platform::shutdown();
     if INPUT_USED.load(Ordering::SeqCst) {
         let _ = release_owned();

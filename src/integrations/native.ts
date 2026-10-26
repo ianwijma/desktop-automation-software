@@ -484,7 +484,17 @@ export class NativeAdapter {
         throw this.serviceError(
           "INVALID_REQUEST",
           "capabilities",
-          "Native helper returned invalid capability metadata",
+          `Native helper returned invalid capability metadata (${parsed.error.issues
+            .map((issue) => {
+              // Record keys can be arbitrary; report only fixed schema paths.
+              const limit =
+                issue.path[0] === "native" &&
+                ["permissions", "operations"].includes(String(issue.path[1]))
+                  ? 2
+                  : 4;
+              return issue.path.slice(0, limit).join(".");
+            })
+            .join(", ")})`,
         );
       const result: PlatformCapabilities = parsed.data;
       if (
@@ -781,6 +791,8 @@ export class NativeAdapter {
             : this.helper?.backend) ||
         (sourceFrame.native?.geometry.dpi !== undefined &&
           sourceFrame.native.geometry.dpi !== window.dpi) ||
+        (sourceFrame.native?.geometry.displayScale !== undefined &&
+          sourceFrame.native.geometry.displayScale !== window.displayScale) ||
         JSON.stringify(sourceFrame.native?.application ?? null) !==
           JSON.stringify(window.applicationIdentity ?? null) ||
         (sourceFrame.bounds &&

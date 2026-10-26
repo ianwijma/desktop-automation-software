@@ -7,6 +7,7 @@ import path from "node:path";
 import { targetSchema } from "../src/shared/validation";
 import { NativeAdapter } from "../src/integrations/native";
 import {
+  nativeCapabilitiesSchema,
   nativeErrorSchema,
   nativeHandshakeSchema,
 } from "../src/shared/native-protocol";
@@ -39,15 +40,16 @@ const fs=require('node:fs');const {randomUUID}=require('node:crypto');const inst
 const control=process.env.RELAY_PROTOCOL_CONTROL,log=process.env.RELAY_PROTOCOL_LOG;
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
  const r=JSON.parse(line),s=JSON.parse(fs.readFileSync(control,'utf8'));fs.appendFileSync(log,JSON.stringify({method:r.method,params:r.params})+'\\n');
- const info={protocolVersion:2,helperVersion:'mock',instanceId:instance,platform:process.platform,backend:s.mode==='windows'?'win32-wgc':'fixture',coordinateSpace:s.mode==='windows'?'physical-pixels':'logical-points'};
- const window={id:'7',title:'Fixture',application:'test',applicationIdentity:{id:'test',kind:'process-name',pid:s.pid},bounds:{x:-50,y:10,width:200,height:100},dpi:s.dpi??96};
+ const info={protocolVersion:2,helperVersion:'mock',instanceId:instance,platform:process.platform,backend:s.mode==='windows'?'win32-wgc':s.mode==='macos'?'macos-screencapturekit':'fixture',coordinateSpace:s.mode==='windows'?'physical-pixels':'logical-points'};
+ const window={id:'7',title:'Fixture',application:'test',applicationIdentity:{id:'test',kind:s.mode==='macos'?'bundle-id':'process-name',pid:s.pid},displayScale:s.displayScale??2,bounds:{x:-50,y:10,width:200,height:100},dpi:s.dpi??96};
  let result=true,error;
  if(r.method==='handshake') {if(s.mode==='hang')return;result={...info,...(s.mode==='bad-handshake'?{protocolVersion:3}:{})};}
  if(r.method==='capabilities')result={platform:process.platform,session:'fixture',capture:true,input:true,accessibility:false,directRecording:false,globalShortcuts:false,windows:[],reasons:[]};
+ if(r.method==='capabilities'&&s.mode==='bad-caps')result.native={helper:info,permissions:{'private-credential-label':123},operations:{}};
  if(r.method==='listWindows')result=[window];
  if(r.method==='capture') {
   const cropped=s.mode==='crop';const backend=s.forceFallback?'win32-printwindow':r.params.captureBackend==='printwindow'?'win32-printwindow':info.backend;
-  result={width:cropped?380:400,height:cropped?360:400,capturedAt:Date.now(),bounds:window.bounds,dataUrl:'data:image/png;base64,synthetic',native:{helperInstanceId:instance,backend,windowId:'7',geometry:{inputSpace:info.coordinateSpace,captureSpace:'pixels',boundsKind:'window',dpi:window.dpi,...(cropped?{captureBounds:{x:-45,y:15,width:190,height:90}}:{}),pixelToInput:{scaleX:s.mode==='bad-scale'?2:0.5,scaleY:0.25,...(cropped?{offsetX:5,offsetY:5}:{})}}}};
+  result={width:cropped?380:400,height:cropped?360:s.mode==='macos'?200:400,capturedAt:Date.now(),bounds:window.bounds,dataUrl:'data:image/png;base64,synthetic',native:{helperInstanceId:instance,backend,windowId:'7',geometry:{inputSpace:info.coordinateSpace,captureSpace:'pixels',boundsKind:'window',dpi:window.dpi,...(s.mode==='macos'?{displayScale:window.displayScale}:{}),...(cropped?{captureBounds:{x:-45,y:15,width:190,height:90}}:{}),pixelToInput:{scaleX:s.mode==='bad-scale'?2:0.5,scaleY:s.mode==='macos'?0.5:0.25,...(cropped?{offsetX:5,offsetY:5}:{})}}}};
  }
 
  if(r.method==='input')result=r.params;
@@ -203,6 +205,31 @@ describe("native adapter protocol boundary", () => {
       }),
     ).toThrow();
   });
+  it("reports invalid capability paths without exposing arbitrary permission keys", async () => {
+    const { adapter } = await mock("bad-caps");
+    const caps = await adapter.capabilities();
+    expect(caps.capture).toBe(false);
+    expect(caps.native?.lastError?.message).toContain("native.permissions");
+    expect(caps.native?.lastError?.message).not.toContain(
+      "private-credential-label",
+    );
+  });
+  it("maps Retina pixels to logical points and rejects a frame after a display-scale change", async () => {
+    const { adapter, control } = await mock("macos");
+    const frame = await adapter.capture(target);
+    expect(frame.native?.application?.kind).toBe("bundle-id");
+    expect(frame.native?.geometry.displayScale).toBe(2);
+    await expect(
+      adapter.execute("move", { x: 50, y: 30, frameId: frame.id }, target),
+    ).resolves.toMatchObject({ x: 25, y: 15 });
+    await writeFile(
+      control,
+      JSON.stringify({ mode: "macos", pid: 1, displayScale: 1 }),
+    );
+    await expect(
+      adapter.execute("click", { x: 50, y: 30, frameId: frame.id }, target),
+    ).rejects.toMatchObject({ details: { code: "STALE_CAPTURE" } });
+  });
   it("cancels a stalled handshake without sending input", async () => {
     const { adapter, log } = await mock("hang");
     const abort = new AbortController();
@@ -250,6 +277,7 @@ it.skipIf(!existsSync(binary))(
         method: "launch",
         params: { command: "must-not-launch" },
       },
+      { id: "caps", protocolVersion: 2, method: "capabilities", params: {} },
       {
         id: "unknown",
         protocolVersion: 2,
@@ -275,7 +303,14 @@ it.skipIf(!existsSync(binary))(
         (r) => nativeErrorSchema.parse(r.error).code,
       ),
     ).toEqual(["PROTOCOL_MISMATCH", "PROTOCOL_MISMATCH", "PROTOCOL_MISMATCH"]);
-    expect(nativeErrorSchema.parse(replies[4].error)).toMatchObject({
+    const caps = nativeCapabilitiesSchema.safeParse(replies[4].result);
+    expect(
+      caps.error?.issues.map((issue) => ({
+        code: issue.code,
+        path: issue.path,
+      })),
+    ).toBeUndefined();
+    expect(nativeErrorSchema.parse(replies[5].error)).toMatchObject({
       code: "UNSUPPORTED_OPERATION",
       operation: "unknown",
     });

@@ -28,7 +28,10 @@ assert.ok(
   ),
   "Invalid fixture position",
 );
-assert.ok(["electron", "win32"].includes(fixtureKind), "Unknown fixture");
+assert.ok(
+  ["electron", "win32", "appkit"].includes(fixtureKind),
+  "Unknown fixture",
+);
 assert.ok(
   ["wgc", "printwindow"].includes(captureBackend),
   "Unknown capture backend",
@@ -66,7 +69,7 @@ const report = {
   artifact: {},
   checks: [],
   limitations: [
-    "Electron fixture; native toolkit and hardware GPU qualification remain separate.",
+    "Fixture toolkit and render surface are recorded per case; hardware GPU qualification remains separate.",
     "Only the selected session, display scale and backend are tested. Missing permissions or unsupported operations are not passing results.",
   ],
 };
@@ -132,14 +135,19 @@ if (!args.has("--run")) {
       return false;
     }
   };
-  const poll = async (operation, predicate, timeout = 20000) => {
+  const poll = async (
+    operation,
+    predicate,
+    timeout = 20000,
+    description = "Fixture observation timed out",
+  ) => {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
       const result = await operation();
       if (predicate(result)) return result;
       await new Promise((r) => setTimeout(r, 50));
     }
-    throw new Error("Fixture observation timed out");
+    throw new Error(description);
   };
   const control = async (route = "/state", method = "GET") => {
     const response = await fetch(`http://127.0.0.1:${port}${route}`, {
@@ -172,15 +180,19 @@ if (!args.has("--run")) {
         "win32",
         "The native control fixture requires Windows",
       );
+    if (fixtureKind === "appkit")
+      assert.equal(process.platform, "darwin", "AppKit fixture requires macOS");
     const fixture =
-      fixtureKind === "win32"
-        ? path.resolve(
-            path.dirname(adapter.binaryPath),
-            "relay-native-fixture.exe",
-          )
-        : path.resolve("tests/fixtures/native-desktop/main.cjs");
+      fixtureKind === "appkit"
+        ? path.resolve(path.dirname(adapter.binaryPath), "relay-appkit-fixture")
+        : fixtureKind === "win32"
+          ? path.resolve(
+              path.dirname(adapter.binaryPath),
+              "relay-native-fixture.exe",
+            )
+          : path.resolve("tests/fixtures/native-desktop/main.cjs");
     const fixtureHash = createHash("sha256");
-    if (fixtureKind === "win32") fixtureHash.update(await readFile(fixture));
+    if (fixtureKind !== "electron") fixtureHash.update(await readFile(fixture));
     else
       for (const name of ["main.cjs", "preload.cjs", "index.html"])
         fixtureHash.update(
@@ -224,7 +236,17 @@ if (!args.has("--run")) {
       (!capabilities.native.windows?.interactiveDesktop ||
         !capabilities.native.windows?.perMonitorV2 ||
         (captureBackend === "wgc" && !capabilities.capture));
-    if (unavailableWindows && args.has("--allow-unavailable")) {
+    if (capabilities.native?.helper?.backend === "macos-screencapturekit")
+      assert.ok(capabilities.native.macos, capabilities.reasons.join("; "));
+    const unavailableMac =
+      capabilities.native?.helper?.backend === "macos-screencapturekit" &&
+      (!capabilities.capture ||
+        !capabilities.input ||
+        !capabilities.native?.macos?.interactiveSession);
+    if (
+      (unavailableWindows || unavailableMac) &&
+      args.has("--allow-unavailable")
+    ) {
       report.checks.push({
         name: "desktop-capture-and-input",
         status: "not-run",
@@ -264,11 +286,11 @@ if (!args.has("--run")) {
         launch: {
           [process.platform]: {
             command:
-              fixtureKind === "win32"
+              fixtureKind !== "electron"
                 ? fixture
                 : createRequire(import.meta.url)("electron"),
             args:
-              fixtureKind === "win32"
+              fixtureKind !== "electron"
                 ? [configFile]
                 : [
                     "--no-sandbox",
@@ -383,10 +405,9 @@ if (!args.has("--run")) {
             };
           },
         );
-        const sampleText =
-          process.platform === "win32"
-            ? "Relay fixture 日本語 😀42"
-            : "Relay fixture text 42";
+        const sampleText = ["win32", "darwin"].includes(process.platform)
+          ? "Relay fixture 日本語 😀42"
+          : "Relay fixture text 42";
         if (captured) {
           await check("click-type-secure-field-scroll-drag", async () => {
             await adapter.execute(
@@ -426,7 +447,8 @@ if (!args.has("--run")) {
           await check("animated-graphics-capture", async () => {
             const initial = await control();
             assert.ok(
-              initial.gpu || initial.renderSurface === "native-gdi",
+              initial.gpu ||
+                ["native-gdi", "native-appkit"].includes(initial.renderSurface),
               "Graphics surface unavailable",
             );
             const gpu = await point("gpu");
@@ -451,7 +473,8 @@ if (!args.has("--run")) {
             );
             return {
               surface: initial.renderSurface ?? "webgl",
-              webgl: Boolean(initial.gpu),
+              webgl:
+                initial.gpu && (initial.renderSurface ?? "webgl") === "webgl",
               capturedPixelsChanged: true,
               hardwareGpuQualified: false,
             };
@@ -484,48 +507,111 @@ if (!args.has("--run")) {
             );
             return { before: old.bounds, after: frame.bounds };
           });
-          if (process.platform === "win32")
+          if (["win32", "darwin"].includes(process.platform))
             await check("capture-loss-and-explicit-recovery", async () => {
               await control("/minimize", "POST");
               await poll(control, (s) => s.minimized);
               await assert.rejects(adapter.capture(target), (error) =>
-                ["CAPTURE_LOST", "CAPTURE_UNAVAILABLE"].includes(
-                  error.details?.code,
-                ),
+                [
+                  "CAPTURE_LOST",
+                  "CAPTURE_UNAVAILABLE",
+                  "TARGET_UNAVAILABLE",
+                ].includes(error.details?.code),
               );
               await control("/restore", "POST");
               await poll(control, (s) => !s.minimized && s.focused);
-              frame = await adapter.capture(target);
+              await poll(
+                async () => {
+                  try {
+                    frame = await adapter.capture(target);
+                    return true;
+                  } catch (error) {
+                    if (
+                      [
+                        "CAPTURE_LOST",
+                        "CAPTURE_UNAVAILABLE",
+                        "TARGET_UNAVAILABLE",
+                      ].includes(error.details?.code)
+                    )
+                      return false;
+                    throw error;
+                  }
+                },
+                Boolean,
+                5000,
+                "Capture did not recover after restore",
+              );
               assert.equal(
                 frame.native.backend,
-                captureBackend === "wgc" ? "win32-wgc" : "win32-printwindow",
+                process.platform === "darwin"
+                  ? "macos-screencapturekit"
+                  : captureBackend === "wgc"
+                    ? "win32-wgc"
+                    : "win32-printwindow",
               );
             });
           await check("held-input-cancellation-and-release", async () => {
-            await adapter.execute(
-              "key",
-              { key: "Shift", action: "down" },
-              target,
-            );
-            await poll(control, (s) => s.held.includes("Shift"));
-            const abort = new AbortController(),
-              from = await point("drag", -70),
-              to = await point("drag", 70);
-            const work = adapter.execute(
-              "drag",
-              { ...from, toX: to.x, toY: to.y, durationMs: 10000 },
-              target,
-              abort.signal,
-            );
-            const rejection = assert.rejects(work, /Cancelled/);
+            const abort = new AbortController();
+            let outcome;
             try {
-              await poll(control, (s) => s.buttons === 1);
+              await adapter.execute(
+                "key",
+                { key: "Shift", action: "down" },
+                target,
+              );
+              await adapter.execute("move", await point("drag"), target);
+              await poll(
+                control,
+                (s) => s.held.includes("Shift"),
+                5000,
+                "Application did not observe Shift down",
+              );
+              const from = await point("drag", -70),
+                to = await point("drag", 70);
+              outcome = adapter
+                .execute(
+                  "drag",
+                  { ...from, toX: to.x, toY: to.y, durationMs: 10000 },
+                  target,
+                  abort.signal,
+                )
+                .then(
+                  () => ({ completed: true }),
+                  (error) => ({ error }),
+                );
+              await poll(
+                control,
+                (s) => s.buttons === 1,
+                5000,
+                "Application did not observe held drag button",
+              );
+              abort.abort();
+              const result = await outcome;
+              assert.match(
+                result.error?.message ?? "Input completed before cancellation",
+                /Cancelled/,
+              );
             } finally {
               abort.abort();
+              if (outcome) await outcome;
+              await adapter.releaseAll();
             }
-            await rejection;
-            await adapter.releaseAll();
-            await poll(control, (s) => s.buttons === 0 && s.held.length === 0);
+            await adapter.execute("move", await point("drag"), target);
+            let observed;
+            try {
+              await poll(
+                async () => (observed = await control()),
+                (s) => s.buttons === 0 && s.held.length === 0,
+                5000,
+                "Application did not observe input release",
+              );
+            } catch (error) {
+              // Only button/modifier diagnostics; never report field contents.
+              throw new Error(
+                `${error.message}; buttons=${observed?.buttons}; systemButtons=${observed?.systemButtons}; observedButtonUps=${observed?.observedButtonUps}; modifiers=${JSON.stringify(observed?.held?.filter((key) => ["Shift", "Control", "Alt", "Meta"].includes(key)))}`,
+              );
+            }
+            return { buttonsReleased: true, modifiersReleased: true };
           });
           await check("helper-restart-invalidates-capture", async () => {
             const old = await adapter.capture(target),
@@ -565,6 +651,11 @@ if (!args.has("--run")) {
             adapter.execute("attach", {}, { ...target, id: randomUUID() }),
             /Multiple windows/,
           );
+          if (process.platform === "darwin") {
+            // The saved binding identifies the original, despite duplicate titles.
+            await adapter.execute("focus", {}, target);
+            await poll(control, (state) => state.focused);
+          }
           await control("/close-duplicate", "POST");
           await poll(
             () => adapter.listWindows(),

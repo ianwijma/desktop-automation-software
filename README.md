@@ -28,7 +28,7 @@ Open Settings to add desktop targets, configure providers, and check capabilitie
 ## Desktop prerequisites
 
 - **Linux X11:** `xdotool`, `xwininfo`, `xprop`, and ImageMagick (`import`), with `xinput` for direct recording. Install Tesseract and its language data for OCR. On Debian/Ubuntu: `sudo apt install xdotool x11-utils xinput imagemagick tesseract-ocr`.
-- **macOS:** grant Screen Recording and Accessibility permissions to Relay. The native adapter uses macOS system APIs and tools.
+- **macOS 14+:** grant Screen Recording and Accessibility to Relay and its bundled helper in System Settings → Privacy & Security. The persistent helper links ScreenCaptureKit and public Accessibility APIs directly. See [macOS setup and qualification](docs/macos-native.md).
 - **Windows:** the persistent Rust adapter uses Windows Graphics Capture and checked SendInput. Choose a capture method per target in Settings → Applications; PrintWindow is an explicit compatibility choice. Input requires an unlocked interactive desktop and a target at equal or lower integrity. See [Windows setup and qualification](docs/windows-native.md).
 - **Wayland:** support is capability-based and requires a compositor implementing the RemoteDesktop and ScreenCast portals. See the native implementation notes for the current backend requirements. Direct global recording is not universally available.
 

@@ -35,6 +35,27 @@ try {
   );
   assert.ok(initial.capabilities.native.helper.instanceId);
   assert.ok(initial.capabilities.native.helper.backend);
+  if (process.platform === "darwin") {
+    assert.equal(
+      initial.capabilities.native.helper.backend,
+      "macos-screencapturekit",
+    );
+    assert.equal(
+      initial.capabilities.native.macos?.framework,
+      "ScreenCaptureKit",
+    );
+    assert.equal(
+      initial.capabilities.native.macos?.focusIdentification,
+      "public-ax-owner-geometry",
+    );
+    if (process.env.RELAY_SMOKE_EXECUTABLE)
+      assert.ok(
+        initial.capabilities.native.macos.processPath.includes(
+          "Relay.app/Contents/Resources/native/relay-native",
+        ),
+        "Packaged app must use its bundled framework helper",
+      );
+  }
   assert.ok(
     Object.values(initial.capabilities.native.operations).every(
       (operation) => operation.verification === "untested",

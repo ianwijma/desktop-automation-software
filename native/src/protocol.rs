@@ -16,7 +16,7 @@ pub fn backend() -> &'static str {
     }
     #[cfg(target_os = "macos")]
     {
-        "coregraphics-screencapture"
+        "macos-screencapturekit"
     }
 }
 pub fn handshake() -> Value {
@@ -33,6 +33,27 @@ pub fn handshake() -> Value {
         "backend":backend(),"coordinateSpace":space})
 }
 pub fn error(method: &str, message: String) -> Value {
+    if let Some(kind) = message.strip_prefix("macos:") {
+        let (code, safe, permission) = match kind {
+            "SCREEN_REQUIRED" => ("PERMISSION_DENIED", "Screen Recording permission is required for Relay and its helper; grant it in System Settings > Privacy & Security, then restart Relay", "required"),
+            "AX_REQUIRED" => ("PERMISSION_DENIED", "Accessibility permission is required for Relay and its helper; cleanup cannot be acknowledged while permission is revoked", "required"),
+            "SESSION_INACTIVE" => ("PERMISSION_DENIED", "The user session is locked, inactive, or unavailable; unlock and select an interactive desktop", "required"),
+            "AX_AMBIGUOUS" => ("AMBIGUOUS_TARGET", "Multiple Accessibility windows match the selected owner's geometry; no window title fallback was attempted", "unknown"),
+            "AX_WINDOW_UNAVAILABLE" => ("TARGET_UNAVAILABLE", "The selected window could not be identified uniquely through public Accessibility attributes", "unknown"),
+            "TARGET_UNAVAILABLE" => ("TARGET_UNAVAILABLE", "The selected macOS window or owning application is no longer available", "unknown"),
+            "TARGET_OBSCURED" => ("TARGET_UNAVAILABLE", "Another window obscures the selected input point", "unknown"),
+            "CAPTURE_GEOMETRY" => ("STALE_CAPTURE", "Window geometry or display scale changed; capture and detect again", "unknown"),
+            "CAPTURE_UNAVAILABLE" => ("CAPTURE_UNAVAILABLE", "ScreenCaptureKit could not capture the selected window; no backend fallback was attempted", "unknown"),
+            "CAPTURE_TIMEOUT" => ("TIMEOUT", "ScreenCaptureKit did not acknowledge the operation or provide a matching complete frame in time", "unknown"),
+            "CAPTURE_LOST" => ("CAPTURE_LOST", "The ScreenCaptureKit stream stopped or lost its source", "unknown"),
+            "FOCUS_FAILED" => ("FOCUS_FAILED", "Accessibility could not raise and verify the exact selected window", "unknown"),
+            "INPUT_REJECTED" | "INPUT_BUSY" => ("INPUT_REJECTED", "A macOS input event could not be posted, or a key/modifier is already held outside this action. Input was not repeated", "unknown"),
+            "INVALID_REQUEST" | "INVALID_COORDINATES" => ("INVALID_REQUEST", "Invalid macOS request or coordinates outside the selected window/displays", "unknown"),
+            "UNSUPPORTED_KEY" | "UNSUPPORTED_OPERATION" => ("UNSUPPORTED_OPERATION", "This macOS operation or named key is unsupported; use Unicode Type for text", "not-required"),
+            _ => ("BACKEND_FAILURE", "A macOS framework operation failed", "unknown"),
+        };
+        return json!({"code":code,"message":safe,"operation":method,"backend":backend(),"permission":permission,"retryable":false});
+    }
     if let Some(kind) = message.strip_prefix("win32:") {
         let (code, safe, permission) = match kind {
             "ELEVATED_TARGET" => ("PERMISSION_DENIED", "The target runs at a higher integrity level; use an unelevated target or matching privileges", "denied"),
@@ -105,6 +126,9 @@ pub fn error(method: &str, message: String) -> Value {
 pub fn windows(mut value: Value) -> Value {
     if let Some(items) = value.as_array_mut() {
         for window in items {
+            if window["applicationIdentity"]["kind"] == "bundle-id" {
+                continue;
+            }
             if let Some(app) = window["application"].as_str().filter(|s| !s.is_empty()) {
                 let mut identity = json!({"id":app,"kind":if cfg!(target_os="windows"){"process-name"}else if cfg!(target_os="macos"){"owner-name"}else{"wm-class"}});
                 if let Some(pid) = window["pid"].as_u64() {
@@ -139,7 +163,7 @@ pub fn capabilities(mut value: Value) -> Value {
         operations.insert(name.to_string(),json!({"availability":if !supported{"unsupported"}else if available{"available"}else{"unavailable"},"verification":"untested","backend":backend()}));
     }
     let capture = if cfg!(target_os = "macos") {
-        if value["capture"] == true {
+        if value["macosBackend"]["screenRecording"] == "granted" {
             "granted"
         } else {
             "required"
@@ -152,7 +176,7 @@ pub fn capabilities(mut value: Value) -> Value {
         "not-required"
     };
     let input = if cfg!(target_os = "macos") {
-        if value["input"] == true {
+        if value["macosBackend"]["accessibility"] == "granted" {
             "granted"
         } else {
             "required"
@@ -165,6 +189,9 @@ pub fn capabilities(mut value: Value) -> Value {
     value["native"] = json!({"helper":handshake(),"operations":operations,"permissions":{"capture":capture,"input":input}});
     if value["windowsBackend"].is_object() {
         value["native"]["windows"] = value["windowsBackend"].take();
+    }
+    if value["macosBackend"].is_object() {
+        value["native"]["macos"] = value["macosBackend"].take();
     }
     value
 }
@@ -200,6 +227,9 @@ pub fn capture(mut value: Value, p: &Value) -> Result<Value> {
     if let Some(dpi) = value["dpi"].as_u64() {
         value["native"]["geometry"]["dpi"] = json!(dpi);
     }
+    if let Some(scale) = value["displayScale"].as_f64() {
+        value["native"]["geometry"]["displayScale"] = json!(scale);
+    }
     Ok(value)
 }
 
@@ -220,6 +250,31 @@ mod tests {
         );
         assert_eq!(frame["bounds"]["x"], -500);
         assert!(capture(json!({"width":0}), &json!({})).is_err());
+    }
+    #[test]
+    fn macos_errors_fail_closed_without_raw_payloads() {
+        for (kind, code) in [
+            ("SCREEN_REQUIRED", "PERMISSION_DENIED"),
+            ("AX_REQUIRED", "PERMISSION_DENIED"),
+            ("SESSION_INACTIVE", "PERMISSION_DENIED"),
+            ("AX_AMBIGUOUS", "AMBIGUOUS_TARGET"),
+            ("CAPTURE_LOST", "CAPTURE_LOST"),
+            ("CAPTURE_GEOMETRY", "STALE_CAPTURE"),
+        ] {
+            let e = error("capture", format!("macos:{kind}"));
+            assert_eq!(e["code"], code);
+            assert_eq!(e["retryable"], false);
+        }
+        assert!(!error("input", "macos:private typed secret".into())
+            .to_string()
+            .contains("secret"));
+    }
+    #[test]
+    fn bundle_identity_is_distinct_from_owner_label() {
+        let list = windows(
+            json!([{"id":"1", "application":"Same visible label", "applicationIdentity":{"id":"dev.relay.fixture", "kind":"bundle-id", "pid":7}}]),
+        );
+        assert_eq!(list[0]["applicationIdentity"]["id"], "dev.relay.fixture");
     }
     #[test]
     fn errors_do_not_include_tool_payloads() {
