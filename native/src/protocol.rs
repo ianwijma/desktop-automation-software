@@ -424,7 +424,14 @@ mod tests {
                 &json!({"text":"private fixture text"}),
             );
             assert_eq!(value["code"], code);
-            assert_eq!(value["backend"], "windows-uia");
+            assert_eq!(
+                value["backend"],
+                if cfg!(target_os = "macos") {
+                    "macos-ax"
+                } else {
+                    "windows-uia"
+                }
+            );
             assert!(!value.to_string().contains("private fixture text"));
         }
         let value = error("nativeElement", "uia:provider-private-value".into());
