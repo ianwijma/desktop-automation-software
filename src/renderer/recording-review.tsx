@@ -25,6 +25,7 @@ import {
   recordingInsertionPoints,
   recordingPointKey,
 } from "../shared/recording";
+import { RecordingWarning } from "./recording-warning";
 import { RecordingPointSelect } from "./recording-point";
 import {
   BrowserLocatorField,
@@ -419,6 +420,9 @@ export function RecordingReview({
                   onClick={() => setEditing(structuredClone(action))}
                 >
                   <strong>{action.label}</strong>
+                  {action.config.requiresConfiguration === true ? (
+                    <small>Needs configuration before running</small>
+                  ) : null}
                   <small>
                     {spec.label}
                     {target
@@ -685,6 +689,14 @@ function StepEditor({
               }
             />
           </Field>
+          <RecordingWarning
+            config={draft.config}
+            onChange={(config) => {
+              setDraft({ ...draft, config });
+              setJson(JSON.stringify(config, null, 2));
+              setError("");
+            }}
+          />
           <div className="recorded-step-fields">
             {fields
               .filter(

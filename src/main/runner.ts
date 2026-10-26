@@ -439,14 +439,10 @@ async function handle(method: string, args: unknown[]): Promise<unknown> {
           target,
           callback,
         ),
-      stopDirect: async () => {
-        const results = await Promise.allSettled([
-          native.stopRecording(),
-          browser.stopRecording(),
-        ]);
-        const failed = results.find((result) => result.status === "rejected");
-        if (failed?.status === "rejected") throw failed.reason;
-      },
+      stopDirect: (target) =>
+        target?.kind === "browser"
+          ? browser.stopRecording()
+          : native.stopRecording(),
       execute: (action, target, signal, ownerId) =>
         (target.kind === "browser" ? browser : native).execute(
           action.kind,

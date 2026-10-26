@@ -26,7 +26,7 @@ export interface RecordingControllerOptions {
     target: TargetDescriptor,
     onAction: (action: RecordedAction) => void,
   ): Promise<void>;
-  stopDirect(): Promise<void>;
+  stopDirect(target?: TargetDescriptor): Promise<void | RecordedAction[]>;
   execute(
     action: RecordedAction,
     target: TargetDescriptor,
@@ -211,9 +211,22 @@ export class RecordingController {
     if (!this.ownsInputs && !this.cleanupBlocked) return;
     const owner = this.working().sessionId!;
     const results = await Promise.allSettled([
-      this.options.stopDirect(),
+      this.options.stopDirect(this.target),
       this.options.releaseInputs(owner),
     ]);
+    const stopped = results[0];
+    if (stopped.status === "fulfilled" && stopped.value?.length) {
+      const actions = [
+        ...this.working().actions,
+        ...stopped.value.map((source) => this.makeAction(source, this.target!)),
+      ];
+      if (actions.length > 2000)
+        throw new Error(
+          "Recording reached the 2000-step limit while flushing pending input.",
+        );
+      this.preflightActions(actions);
+      await this.change({ actions });
+    }
     const failed = results.find((result) => result.status === "rejected");
     this.cleanupBlocked = failed?.status === "rejected";
     if (failed?.status === "rejected")
@@ -246,7 +259,7 @@ export class RecordingController {
   private callback(
     sessionId: string,
     epoch: number,
-  ): (action: RecordedAction) => void {
+  ): (action: RecordedAction) => boolean {
     return (source) => {
       if (
         this.epoch !== epoch ||
@@ -254,7 +267,7 @@ export class RecordingController {
         this.working().phase !== "capturing" ||
         this.working().sessionId !== sessionId
       )
-        return;
+        return false;
       if (this.working().actions.length + this.queuedEvents >= 2000) {
         if (!this.limitStopping) {
           this.limitStopping = true;
@@ -274,7 +287,7 @@ export class RecordingController {
             }
           }, true).catch(() => undefined);
         }
-        return;
+        return false;
       }
       this.queuedEvents++;
       void this.enqueue(async () => {
@@ -296,6 +309,7 @@ export class RecordingController {
           this.queuedEvents--;
         }
       }).catch(() => undefined);
+      return true;
     };
   }
   private makeAction(

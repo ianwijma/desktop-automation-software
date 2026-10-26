@@ -288,8 +288,8 @@ export function browserRuntime(request) {
     if (!visible(element))
       throw new Error("The matched element is not visible");
     const rect = element.getBoundingClientRect();
-    let x = rect.x + rect.width / 2,
-      y = rect.y + rect.height / 2;
+    let x = rect.x + rect.width * (request.offset?.x ?? 0.5),
+      y = rect.y + rect.height * (request.offset?.y ?? 0.5);
     verifyPoint(element, x, y);
     let view = element.ownerDocument.defaultView;
     while (view !== window) {
@@ -305,6 +305,13 @@ export function browserRuntime(request) {
     }
     return { x, y };
   };
+  if (request.operation === "recordAck") {
+    if (window.__relayRecorder?.recordingId === request.recordingId)
+      window.__relayRecorder.ack(request.id);
+    return true;
+  }
+  if (request.operation === "recordFlush")
+    return window.__relayRecorder?.drain() ?? [];
   if (request.operation === "record") {
     const previous = window.__relayRecorder;
     if (
@@ -314,16 +321,44 @@ export function browserRuntime(request) {
       previous.recordingId !== request.expectedRecordingId
     )
       throw new Error("Recording session has changed in the target tab");
-    previous?.stop();
+    if (request.recordingId && previous?.recordingId === request.recordingId)
+      return true;
+    if (!request.recordingId && !previous) {
+      const stopped = window.__relayStoppedRecorder;
+      if (
+        request.expectedRecordingId &&
+        stopped &&
+        stopped.recordingId !== request.expectedRecordingId
+      )
+        throw new Error("Recording session has changed in the target tab");
+      return stopped?.tail ?? [];
+    }
+    const tail = previous?.stop() ?? [];
     delete window.__relayRecorder;
-    if (!request.recordingId) return true;
+    if (!request.recordingId) {
+      window.__relayStoppedRecorder = {
+        recordingId: previous?.recordingId,
+        tail,
+      };
+      return tail;
+    }
+    delete window.__relayStoppedRecorder;
     const listeners = new AbortController(),
       documents = new WeakSet(),
       roots = new WeakSet(),
       frames = new WeakSet(),
       handled = new WeakSet(),
+      fileWarnings = new WeakSet(),
       observers = [];
-    const send = (kind, label, config) => {
+    let pending, pendingTimer, collecting;
+    const outbox = new Map();
+    const keys = new Map(),
+      lastText = new WeakMap(),
+      composing = new WeakSet();
+    let pointer,
+      scrollIntentUntil = 0,
+      suppressClick = false;
+    const emit = (kind, label, config) => {
       if (listeners.signal.aborted) return;
       const action = {
         id: crypto.randomUUID(),
@@ -332,6 +367,11 @@ export function browserRuntime(request) {
         label: label.slice(0, 200),
         config,
       };
+      if (collecting) {
+        collecting.push(action);
+        return;
+      }
+      outbox.set(action.id, action);
       if (request.transport === "binding")
         window.relayBrowserRecord(
           JSON.stringify({ recordingId: request.recordingId, action }),
@@ -345,10 +385,97 @@ export function browserRuntime(request) {
           })
           .catch(() => {});
       else
-        void window.relayRecordEvent?.({
-          ...action,
-          recordingId: request.recordingId,
-        });
+        void window
+          .relayRecordEvent?.({ ...action, recordingId: request.recordingId })
+          .then((accepted) => {
+            if (accepted) outbox.delete(action.id);
+          })
+          .catch(() => {});
+    };
+    const flush = () => {
+      clearTimeout(pendingTimer);
+      const item = pending;
+      pending = undefined;
+      if (!item) return;
+      if (item.kind === "type") {
+        if (lastText.get(item.element) === item.raw) return;
+        lastText.set(item.element, item.raw);
+        if (collecting && composing.has(item.element))
+          Object.assign(item.config, {
+            requiresConfiguration: true,
+            recordingWarning:
+              "Composition was interrupted. Verify the final text before running.",
+          });
+      }
+      emit(item.kind, item.label, item.config);
+    };
+    const queue = (item, delay) => {
+      if (
+        pending &&
+        (pending.kind !== item.kind || pending.element !== item.element)
+      )
+        flush();
+      pending = item;
+      clearTimeout(pendingTimer);
+      if (delay) pendingTimer = setTimeout(flush, delay);
+    };
+    const mods = (event) =>
+      ["Control", "Alt", "Shift", "Meta"].filter(
+        (key) =>
+          event[
+            {
+              Control: "ctrlKey",
+              Alt: "altKey",
+              Shift: "shiftKey",
+              Meta: "metaKey",
+            }[key]
+          ],
+      );
+    const editable = (element) =>
+      element.isContentEditable ||
+      element.localName === "textarea" ||
+      (element.localName === "input" &&
+        ![
+          "checkbox",
+          "radio",
+          "button",
+          "submit",
+          "reset",
+          "hidden",
+          "file",
+          "range",
+          "color",
+        ].includes(element.type));
+    const textChange = (element, path) => {
+      const raw = element.isContentEditable
+        ? element.textContent
+        : element.value;
+      const secret = element.type === "password";
+      queue({
+        kind: "type",
+        element,
+        raw,
+        label: secret ? "Enter password (configure value)" : "Type text",
+        config: {
+          locator: describe(element, path),
+          text: secret ? "" : raw,
+          ...(secret
+            ? {
+                secret: true,
+                requiresConfiguration: true,
+                recordingWarning:
+                  "Password values are omitted. Configure a value before running.",
+              }
+            : {}),
+        },
+      });
+    };
+    const offset = (element, event) => {
+      const box = element.getBoundingClientRect();
+      return {
+        x: Math.max(0, Math.min(1, (event.clientX - box.x) / box.width)),
+        y: Math.max(0, Math.min(1, (event.clientY - box.y) / box.height)),
+      };
     };
     const install = (doc, path) => {
       const attach = (root) => {
@@ -358,42 +485,360 @@ export function browserRuntime(request) {
           if (!event.isTrusted || handled.has(event)) return;
           handled.add(event);
           let element = event.composedPath()[0];
+          if (event.type === "scroll" && element?.nodeType === 9)
+            element = element.scrollingElement;
           if (element?.nodeType !== 1) return;
+          const original = element;
           element =
-            element.closest('button,a,input,select,textarea,[role="button"]') ??
-            element;
-          if (event.type === "keydown") {
-            if (["Enter", "Tab", "Escape"].includes(event.key))
-              send("key", `Press ${event.key}`, {
-                key: event.key,
-                locator: describe(element, path),
+            element.closest(
+              'button,a,input,select,textarea,[contenteditable="true"],[role="button"]',
+            ) ?? element;
+          try {
+            if (
+              request.transport === "managed" &&
+              ["pointerdown", "keydown", "input", "focusin"].includes(
+                event.type,
+              )
+            )
+              emit("tab", "Switch browser tab", {
+                action: "switch",
+                recordingActivation: true,
+                url: location.href,
+                exact: true,
+                waitForExisting: true,
               });
-          } else if (event.type === "click")
-            send(
-              "click",
-              `Click ${(name(element) || element.localName).slice(0, 40)}`,
-              { locator: describe(element, path), button: "left" },
-            );
-          else if (element.localName === "select")
-            send("select", "Select option", {
-              locator: describe(element, path),
-              value: element.value,
+            if (event.type === "wheel") {
+              flush();
+              scrollIntentUntil = Date.now() + 1000;
+              return;
+            }
+            if (event.type === "compositionstart") {
+              composing.add(element);
+              return;
+            }
+            if (event.type === "compositionend") {
+              composing.delete(element);
+              queueMicrotask(() => {
+                if (!listeners.signal.aborted && editable(element)) {
+                  textChange(element, path);
+                  flush();
+                }
+              });
+              return;
+            }
+            if (event.type === "focusin") {
+              if (editable(element) && !lastText.has(element))
+                lastText.set(
+                  element,
+                  element.isContentEditable
+                    ? element.textContent
+                    : element.value,
+                );
+              return;
+            }
+            if (event.type === "focusout") {
+              flush();
+              return;
+            }
+            if (event.type === "input" || event.type === "change") {
+              if (editable(element)) {
+                textChange(element, path);
+                if (event.type === "change" && !composing.has(element)) flush();
+                return;
+              }
+              if (event.type !== "change") return;
+              flush();
+              if (["checkbox", "radio"].includes(element.type))
+                emit(
+                  "click",
+                  element.checked ? "Check option" : "Uncheck option",
+                  {
+                    locator: describe(element, path),
+                    checked: element.checked,
+                  },
+                );
+              else if (element.localName === "select")
+                emit("select", "Select option", {
+                  locator: describe(element, path),
+                  value: element.multiple
+                    ? [...element.selectedOptions].map((option) => option.value)
+                    : element.value,
+                });
+              else if (element.type === "file" && !fileWarnings.has(element))
+                emit("type", "Choose file (configure manually)", {
+                  locator: describe(element, path),
+                  text: "",
+                  requiresConfiguration: true,
+                  recordingWarning:
+                    "Native file dialogs and file contents are not recorded. Replace this step before running.",
+                });
+              else if (["range", "color"].includes(element.type))
+                emit("type", "Set control (configure manually)", {
+                  locator: describe(element, path),
+                  text: "",
+                  requiresConfiguration: true,
+                  recordingWarning:
+                    "This specialized control requires manual configuration.",
+                });
+              return;
+            }
+            if (event.type === "keydown") {
+              if (
+                event.repeat ||
+                event.isComposing ||
+                composing.has(element) ||
+                ["Control", "Shift", "Alt", "Meta"].includes(event.key)
+              )
+                return;
+              const modifiers = mods(event);
+              if (
+                !editable(element) &&
+                [
+                  "PageDown",
+                  "PageUp",
+                  "Home",
+                  "End",
+                  "ArrowDown",
+                  "ArrowUp",
+                  " ",
+                ].includes(event.key)
+              )
+                scrollIntentUntil = Date.now() + 1000;
+              const editShortcut =
+                editable(element) &&
+                ((modifiers.some((key) => ["Control", "Meta"].includes(key)) &&
+                  ["a", "c", "v", "x", "z", "y"].includes(
+                    event.key.toLowerCase(),
+                  )) ||
+                  [
+                    "Backspace",
+                    "Delete",
+                    "ArrowLeft",
+                    "ArrowRight",
+                    "ArrowUp",
+                    "ArrowDown",
+                    "Home",
+                    "End",
+                  ].includes(event.key));
+              if (
+                editShortcut ||
+                (editable(element) &&
+                  event.key.length === 1 &&
+                  !modifiers.some((key) => key !== "Shift"))
+              )
+                return;
+              flush();
+              const key = [
+                ...modifiers,
+                event.key === " " ? "Space" : event.key,
+              ].join("+");
+              const config = {
+                key,
+                ...(editable(element) ||
+                ["button", "a", "select"].includes(element.localName) ||
+                element.tabIndex >= 0
+                  ? { locator: describe(element, path) }
+                  : {}),
+              };
+              if (
+                ["Enter", "Tab", "Escape"].includes(event.key) &&
+                !modifiers.length
+              ) {
+                emit("key", `Press ${key}`, config);
+                return;
+              }
+              keys.set(event.code || event.key, config);
+              emit("key", `Hold ${key}`, { ...config, action: "down" });
+              return;
+            }
+            if (event.type === "keyup") {
+              const config = keys.get(event.code || event.key);
+              if (config) {
+                flush();
+                keys.delete(event.code || event.key);
+                emit("key", `Release ${config.key}`, {
+                  key: config.key,
+                  action: "up",
+                });
+              }
+              return;
+            }
+            if (event.type === "scroll") {
+              if (Date.now() > scrollIntentUntil) return;
+              queue(
+                {
+                  kind: "scroll",
+                  element: original,
+                  label: "Scroll element",
+                  config: {
+                    locator: describe(original, path),
+                    scrollTop: original.scrollTop,
+                    scrollLeft: original.scrollLeft,
+                  },
+                },
+                160,
+              );
+              return;
+            }
+            if (event.type === "pointerdown") {
+              if (
+                original.scrollHeight > original.clientHeight ||
+                original.scrollWidth > original.clientWidth
+              )
+                scrollIntentUntil = Date.now() + 1000;
+              if (!(
+                pending?.kind === "click" &&
+                pending.element === element &&
+                true
+              ))
+                flush();
+              pointer = {
+                element: original,
+                locator: describe(original, path),
+                fromOffset: offset(original, event),
+                x: event.clientX,
+                y: event.clientY,
+                at: Date.now(),
+                button: event.button,
+                path,
+              };
+              suppressClick = false;
+              return;
+            }
+            if (event.type === "dragstart") {
+              if (pointer) pointer.specialized = true;
+              return;
+            }
+            if (event.type === "dragend") {
+              if (pointer?.specialized) {
+                pointer = undefined;
+                suppressClick = true;
+                flush();
+                emit("wait", "Configure HTML drag-and-drop", {
+                  durationMs: 0,
+                  requiresConfiguration: true,
+                  recordingWarning:
+                    "HTML drag-and-drop data transfer requires manual configuration.",
+                });
+              }
+              return;
+            }
+            if (event.type === "pointerup") {
+              const start = pointer;
+              pointer = undefined;
+              if (
+                !start ||
+                Math.hypot(event.clientX - start.x, event.clientY - start.y) < 5
+              )
+                return;
+              flush();
+              suppressClick = true;
+              let endpoint = doc.elementFromPoint(event.clientX, event.clientY);
+              while (
+                endpoint?.shadowRoot?.elementFromPoint(
+                  event.clientX,
+                  event.clientY,
+                )
+              ) {
+                const inner = endpoint.shadowRoot.elementFromPoint(
+                  event.clientX,
+                  event.clientY,
+                );
+                if (inner === endpoint) break;
+                endpoint = inner;
+              }
+              if (!endpoint)
+                throw new Error("The drag destination is outside the document");
+              emit("drag", "Drag element", {
+                locator: start.locator,
+                fromOffset: start.fromOffset,
+                toLocator: describe(endpoint, path),
+                toOffset: offset(endpoint, event),
+                button: ["left", "middle", "right"][start.button] ?? "left",
+                durationMs: Math.min(120000, Date.now() - start.at),
+                ...(start.specialized
+                  ? {
+                      requiresConfiguration: true,
+                      recordingWarning:
+                        "HTML drag-and-drop data transfer requires manual configuration.",
+                    }
+                  : {}),
+              });
+              return;
+            }
+            if (event.type === "click" || event.type === "auxclick") {
+              if (event.detail === 0) return;
+              if (element.type === "file") {
+                flush();
+                fileWarnings.add(element);
+                emit("type", "Choose file (configure manually)", {
+                  locator: describe(element, path),
+                  text: "",
+                  requiresConfiguration: true,
+                  recordingWarning:
+                    "Native file dialogs and file contents are not recorded. Replace this step before running.",
+                });
+                return;
+              }
+              if (suppressClick) {
+                suppressClick = false;
+                return;
+              }
+              if (
+                ["checkbox", "radio", "file"].includes(element.type) ||
+                element.localName === "select" ||
+                element.closest("label")?.control
+              )
+                return;
+              const clickCount = Math.min(4, Math.max(1, event.detail));
+              if (!(
+                pending?.kind === "click" &&
+                pending.element === element &&
+                clickCount > (pending.config.clickCount ?? 1)
+              ))
+                flush();
+              queue(
+                {
+                  kind: "click",
+                  element,
+                  label: `Click ${(name(element) || element.localName).slice(0, 40)}`,
+                  config: {
+                    locator: describe(element, path),
+                    button: ["left", "middle", "right"][event.button] ?? "left",
+                    ...(clickCount > 1 ? { clickCount } : {}),
+                    ...(mods(event).length ? { modifiers: mods(event) } : {}),
+                  },
+                },
+                250,
+              );
+            }
+          } catch (cause) {
+            flush();
+            emit("wait", "Configure unsupported interaction", {
+              durationMs: 0,
+              requiresConfiguration: true,
+              recordingWarning: `A target could not be recorded: ${cause.message}. Configure this interaction manually before running.`,
             });
-          else if (["input", "textarea"].includes(element.localName)) {
-            if (["checkbox", "radio", "hidden"].includes(element.type)) return;
-            const secret = element.type === "password";
-            send(
-              "type",
-              secret ? "Enter password (configure value)" : "Type text",
-              {
-                locator: describe(element, path),
-                text: secret ? "" : element.value,
-                ...(secret ? { secret: true } : {}),
-              },
-            );
           }
         };
-        for (const type of ["click", "change", "keydown"])
+        for (const type of [
+          "click",
+          "auxclick",
+          "pointerdown",
+          "pointerup",
+          "dragstart",
+          "dragend",
+          "input",
+          "change",
+          "keydown",
+          "keyup",
+          "compositionstart",
+          "compositionend",
+          "focusin",
+          "focusout",
+          "scroll",
+          "wheel",
+        ])
           root.addEventListener(type, handler, {
             capture: true,
             signal: listeners.signal,
@@ -404,6 +849,14 @@ export function browserRuntime(request) {
       };
       if (!documents.has(doc)) {
         documents.add(doc);
+        // A resumed session can begin with a populated field still focused.
+        // Its later change event must not record an edit from the prior session.
+        for (const element of rootElements(doc))
+          if (editable(element))
+            lastText.set(
+              element,
+              element.isContentEditable ? element.textContent : element.value,
+            );
         attach(doc);
       }
       for (const element of rootElements(doc)) {
@@ -439,12 +892,55 @@ export function browserRuntime(request) {
       () => scan(document, request.basePath ?? []),
       500,
     );
+    window.addEventListener("pagehide", flush, { signal: listeners.signal });
+    window.addEventListener("beforeunload", flush, {
+      signal: listeners.signal,
+    });
+    if (request.transport === "managed" && !request.basePath?.length) {
+      const activate = () => {
+        if (document.visibilityState !== "visible") return;
+        flush();
+        emit("tab", "Switch browser tab", {
+          action: "switch",
+          recordingActivation: true,
+          url: location.href,
+          exact: true,
+          waitForExisting: true,
+        });
+      };
+      window.addEventListener("focus", activate, { signal: listeners.signal });
+      document.addEventListener("visibilitychange", activate, {
+        signal: listeners.signal,
+      });
+    }
     window.__relayRecorder = {
       recordingId: request.recordingId,
+      ack: (id) => outbox.delete(id),
+      flush,
+      drain: () => {
+        collecting = [];
+        flush();
+        const tail = [...outbox.values(), ...collecting].filter(
+          (action) => !action.config.recordingActivation,
+        );
+        collecting = undefined;
+        return tail;
+      },
       stop: () => {
+        collecting = [];
+        flush();
+        for (const config of keys.values())
+          emit("key", `Release ${config.key}`, {
+            key: config.key,
+            action: "up",
+          });
+        keys.clear();
         listeners.abort();
         clearInterval(timer);
         observers.forEach((observer) => observer.disconnect());
+        return [...outbox.values(), ...collecting].filter(
+          (action) => !action.config.recordingActivation,
+        );
       },
     };
     return true;
@@ -541,14 +1037,41 @@ export function browserRuntime(request) {
       scaleY <= 0
     )
       throw new Error("Frame geometry is unavailable");
-    return {
-      x: bounds.x + element.clientLeft * scaleX,
-      y: bounds.y + element.clientTop * scaleY,
-      scaleX,
-      scaleY,
-    };
+    // The child renderer may receive CDP input before a parent's scroll is composited.
+    return new Promise((resolve) =>
+      view.requestAnimationFrame(() =>
+        view.requestAnimationFrame(() =>
+          resolve({
+            x: bounds.x + element.clientLeft * scaleX,
+            y: bounds.y + element.clientTop * scaleY,
+            scaleX,
+            scaleY,
+          }),
+        ),
+      ),
+    );
   }
   if (request.operation === "point") return point(element);
+  if (request.operation === "checked") {
+    if (
+      element.localName !== "input" ||
+      !["checkbox", "radio"].includes(element.type)
+    )
+      throw new Error("Checked state requires a checkbox or radio input");
+    if (!visible(element) || element.matches(":disabled"))
+      throw new Error("The matched option is not editable");
+    if (element.type === "radio" && request.checked === false)
+      throw new Error("Select another radio option instead of unchecking it");
+    return element.checked;
+  }
+  if (request.operation === "scroll") {
+    element.scrollTo({
+      left: request.scrollLeft,
+      top: request.scrollTop,
+      behavior: "instant",
+    });
+    return true;
+  }
   if (request.operation === "read")
     return element.innerText ?? element.textContent ?? "";
   if (request.operation === "focus") {
@@ -591,14 +1114,29 @@ export function browserRuntime(request) {
       throw new Error("The matched element is not a select");
     if (!visible(element) || element.matches(":disabled"))
       throw new Error("The matched select is not editable");
-    const value = String(request.value ?? "");
-    if (![...element.options].some((option) => option.value === value))
-      throw new Error("The requested option does not exist");
-    element.value = value;
+    const values = Array.isArray(request.value)
+      ? request.value
+      : [String(request.value ?? "")];
+    if (!element.multiple && values.length !== 1)
+      throw new Error("Multiple values require a multiple select");
+    if (
+      values.some(
+        (value) =>
+          ![...element.options].some(
+            (option) =>
+              option.value === value &&
+              !option.disabled &&
+              !option.parentElement?.disabled,
+          ),
+      )
+    )
+      throw new Error("The requested option does not exist or is disabled");
+    for (const option of element.options)
+      option.selected = values.includes(option.value);
     const view = element.ownerDocument.defaultView;
     element.dispatchEvent(new view.Event("input", { bubbles: true }));
     element.dispatchEvent(new view.Event("change", { bubbles: true }));
-    return [value];
+    return values;
   }
   throw new Error("Unsupported browser DOM operation");
 }

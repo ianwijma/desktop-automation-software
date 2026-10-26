@@ -12,15 +12,39 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   ) {
     try {
       const message = JSON.parse(params.payload);
+      const current = recording;
       if (
-        recording?.active &&
-        source.tabId === recording.tabId &&
-        message.recordingId === recording.id
-      )
-        void call("/result", {
-          action: message.action,
-          recordingId: message.recordingId,
-        }).catch(() => {});
+        current?.active &&
+        message.recordingId === current.id &&
+        current.tabs?.has(source.tabId)
+      ) {
+        if (message.action.kind === "tab") {
+          if (source.tabId !== current.tabId)
+            void switchRecordedTab(current, source.tabId).catch(() => {});
+          void inContext(
+            source.tabId,
+            {
+              sessionId: source.sessionId,
+              contextId: params.executionContextId,
+            },
+            {
+              operation: "recordAck",
+              recordingId: current.id,
+              id: message.action.id,
+            },
+          ).catch(() => {});
+        } else
+          queueRecorded(current, async () => {
+            if (source.tabId === current.tabId)
+              deliverRecorded(current, message.action, {
+                tabId: source.tabId,
+                context: {
+                  sessionId: source.sessionId,
+                  contextId: params.executionContextId,
+                },
+              });
+          });
+      }
     } catch {}
   }
 
@@ -133,11 +157,23 @@ async function cdp(tabId, method, params = {}, sessionId) {
   }
   if (method === "Input.dispatchMouseEvent" && params.modifiers === undefined)
     params = { ...params, modifiers: modifierMask(tabId) };
-  return chrome.debugger.sendCommand(
-    { tabId, ...(sessionId ? { sessionId } : {}) },
-    method,
-    params,
-  );
+  try {
+    return await chrome.debugger.sendCommand(
+      { tabId, ...(sessionId ? { sessionId } : {}) },
+      method,
+      params,
+    );
+  } catch (error) {
+    // A successful click can close its own tab before the mouse-release reply arrives.
+    // Do not repeat input; accept only this release acknowledgement when the tab is gone.
+    if (
+      method === "Input.dispatchMouseEvent" &&
+      params.type === "mouseReleased" &&
+      !(await chrome.tabs.get(tabId).catch(() => null))
+    )
+      return {};
+    throw error;
+  }
 }
 async function evaluate(tabId, fn, args = []) {
   const response = await cdp(tabId, "Runtime.evaluate", {
@@ -238,6 +274,10 @@ async function dom(tabId, operation, config = {}) {
       selector: config.selector,
       text: config.text,
       value: config.value,
+      checked: config.checked,
+      offset: config.pointOffset,
+      scrollTop: config.scrollTop,
+      scrollLeft: config.scrollLeft,
     });
     if (operation === "inspect" && result.element && prefix.length)
       result.element.locator.path = [
@@ -253,6 +293,7 @@ async function dom(tabId, operation, config = {}) {
             objectId: owner.objectId,
             functionDeclaration: `function(){return (${browserRuntime.toString()})({ operation: "visibility", element: this });}`,
             returnByValue: true,
+            awaitPromise: true,
           },
           owner.context.sessionId,
         );
@@ -272,6 +313,7 @@ async function dom(tabId, operation, config = {}) {
             objectId: owner.objectId,
             functionDeclaration: `function(){ return (${browserRuntime.toString()})({ operation: "frameGeometry", element: this }); }`,
             returnByValue: true,
+            awaitPromise: true,
           },
           owner.context.sessionId,
         );
@@ -290,6 +332,7 @@ async function dom(tabId, operation, config = {}) {
             objectId: owner.objectId,
             functionDeclaration: `function(){return (${browserRuntime.toString()})({ operation: "verifyPoint", element: this, x: ${result.x}, y: ${result.y} });}`,
             returnByValue: true,
+            awaitPromise: true,
           },
           owner.context.sessionId,
         );
@@ -314,10 +357,16 @@ async function dom(tabId, operation, config = {}) {
     );
   }
 }
-async function point(tabId, config) {
+function pointerModifiers(config) {
+  return (config.modifiers || []).reduce(
+    (mask, key) => mask | ({ Alt: 1, Control: 2, Meta: 4, Shift: 8 }[key] || 0),
+    0,
+  );
+}
+async function point(tabId, config, pointOffset) {
   if (!config.selector && !config.locator)
     return { x: Number(config.x || 0), y: Number(config.y || 0) };
-  return dom(tabId, "point", config);
+  return dom(tabId, "point", { ...config, pointOffset });
 }
 async function key(tabId, config) {
   const aliases = {
@@ -485,6 +534,7 @@ async function ownerPath(tabId, frame, frames) {
 }
 async function record(tabId, recordingId, expectedRecordingId) {
   const frames = await allFrames(tabId);
+  const tail = [];
   for (const frame of frames.values()) {
     const context = await frameContext(tabId, frame.id);
     if (recordingId)
@@ -495,7 +545,7 @@ async function record(tabId, recordingId, expectedRecordingId) {
         context.sessionId,
       );
     const basePath = recordingId ? await ownerPath(tabId, frame, frames) : [];
-    await inContext(tabId, context, {
+    const result = await inContext(tabId, context, {
       operation: "record",
       recordingId,
       expectedRecordingId,
@@ -503,7 +553,93 @@ async function record(tabId, recordingId, expectedRecordingId) {
       basePath,
       singleDocument: true,
     });
+    if (Array.isArray(result)) tail.push(...result);
   }
+  return tail;
+}
+function deliverRecorded(current, action, source) {
+  if (recording !== current || !current.active) return;
+  current.undelivered ??= new Map();
+  current.undelivered.set(action.id, action);
+  current.deliver = (current.deliver ?? Promise.resolve())
+    .then(async () => {
+      const result = await call("/result", { action, recordingId: current.id });
+      if (result.accepted) current.undelivered.delete(action.id);
+      if (result.accepted && source)
+        await inContext(source.tabId, source.context, {
+          operation: "recordAck",
+          recordingId: current.id,
+          id: action.id,
+        }).catch(() => {});
+    })
+    .catch(() => {});
+}
+function observed(kind, label, config) {
+  return { id: crypto.randomUUID(), at: Date.now(), kind, label, config };
+}
+async function saveRecordingOwner(current) {
+  await chrome.storage.session.set({
+    relayRecording: {
+      id: current.id,
+      tabId: current.tabId,
+      tabIds: [...current.tabs],
+      stopped: false,
+    },
+  });
+}
+async function flushRecordedTab(current, tabId) {
+  for (const frame of (await allFrames(tabId)).values()) {
+    const context = await frameContext(tabId, frame.id);
+    for (const action of await inContext(tabId, context, {
+      operation: "recordFlush",
+    }))
+      deliverRecorded(current, action);
+  }
+  await current.deliver;
+}
+async function switchRecordedTab(current, tabId) {
+  if (
+    recording !== current ||
+    !current.active ||
+    current.tabId === tabId ||
+    !current.tabs.has(tabId)
+  )
+    return;
+  if (!(await chrome.tabs.get(current.tabId).catch(() => null))) return;
+  await flushRecordedTab(current, current.tabId).catch(() => {});
+  if (recording !== current || !current.active || current.tabId === tabId)
+    return;
+  const tab = await chrome.tabs.get(tabId);
+  if (
+    recording !== current ||
+    !current.active ||
+    !/^https?:|^file:/.test(tab.url || "")
+  )
+    return;
+  current.tabId = tabId;
+  current.urls.set(tabId, tab.url);
+  targets.set(current.targetId, tabId);
+  await saveRecordingOwner(current);
+  deliverRecorded(
+    current,
+    observed("tab", "Switch browser tab", {
+      action: "switch",
+      url: tab.url,
+      exact: true,
+      waitForExisting: true,
+    }),
+  );
+  await installRecording(current);
+}
+async function readyTab(tabId, url, timeout = 15000) {
+  const deadline = Date.now() + timeout;
+  do {
+    const tab = await chrome.tabs.get(tabId);
+    if ((!url || tab.url === url) && tab.status === "complete") return tab;
+    if (activeSignal?.aborted) throw new Error("Cancelled");
+    await pause(25);
+  } while (Date.now() < deadline);
+  throw new Error("The browser tab did not reach the expected URL");
 }
 async function installRecording(current) {
   if (recording !== current || !current.active) return;
@@ -533,7 +669,7 @@ async function stopRecording(recordingId) {
     }
     if (recordingId && relayRecording.id !== recordingId)
       throw new Error("Recording session has changed");
-    if (relayRecording.stopped) return true;
+    if (relayRecording.stopped) return relayRecording.tail ?? [];
     // The service worker can restart while an isolated-world listener survives.
     // Resume only its cleanup ownership; capture never restarts implicitly.
     current = recording = {
@@ -546,17 +682,52 @@ async function stopRecording(recordingId) {
     throw new Error("Recording session has changed");
   current.active = false;
   await Promise.allSettled([...current.pending]);
-  const tab = await chrome.tabs.get(current.tabId).catch(() => null);
-  if (tab) await record(current.tabId, null, current.id);
+  await current.deliver;
+  const tail = [...(current.undelivered?.values() ?? [])];
+  for (const tabId of current.tabs ?? current.tabIds ?? [current.tabId]) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (tab)
+      tail.push(
+        ...(await record(tabId, null, current.id)).filter(
+          (action) => !action.config.recordingActivation,
+        ),
+      );
+  }
   await chrome.storage.session.set({
-    relayRecording: { id: current.id, tabId: current.tabId, stopped: true },
+    relayRecording: {
+      id: current.id,
+      tabId: current.tabId,
+      stopped: true,
+      tail: [...new Map(tail.map((action) => [action.id, action])).values()],
+    },
   });
   if (recording === current) recording = undefined;
-  return true;
+  return [...new Map(tail.map((action) => [action.id, action])).values()];
 }
 async function command(command) {
   const { method, target, kind, config = {} } = command;
+  if (config.requiresConfiguration)
+    throw new Error(
+      config.recordingWarning || "Configure this recorded step before running",
+    );
   if (method === "recordStop") return stopRecording(config.recordingId);
+  if (kind === "tab" && config.action === "close" && config.closedUrl) {
+    const tabs = await chrome.tabs.query({});
+    const closing = tabs.filter(
+      (candidate) => candidate.url === config.closedUrl,
+    );
+    if (closing.length > 1) throw new Error("The closing tab is ambiguous");
+    if (!closing.length) {
+      const returns = config.returnUrl
+        ? tabs.filter((candidate) => candidate.url === config.returnUrl)
+        : [];
+      if (config.returnUrl && returns.length !== 1)
+        throw new Error("The return tab is missing or ambiguous");
+      if (returns[0]) targets.set(target.id, returns[0].id);
+      return true;
+    }
+    targets.set(target.id, closing[0].id);
+  }
   const tab = await tabFor(target, kind === "launch");
   const tabId = tab.id;
   if (method === "inspectLocator") return dom(tabId, "inspect", config);
@@ -574,14 +745,16 @@ async function command(command) {
       tabId,
       active: true,
       pending: new Set(),
+      tabs: new Set([tabId]),
+      targetId: target.id,
+      urls: new Map([[tabId, tab.url]]),
+      deliver: Promise.resolve(),
     };
     recording = current;
     try {
       // Save the exact owner before installing any listener. URL matching is
       // insufficient after navigation or a service-worker restart.
-      await chrome.storage.session.set({
-        relayRecording: { id: current.id, tabId, stopped: false },
-      });
+      await saveRecordingOwner(current);
       await installRecording(current);
       return true;
     } catch (error) {
@@ -615,11 +788,21 @@ async function command(command) {
   }
   switch (kind) {
     case "launch":
-    case "navigate":
-      await chrome.tabs.update(tabId, {
-        url: String(config.url || target.url || "about:blank"),
-      });
+    case "navigate": {
+      const url = String(config.url || target.url || "about:blank");
+      if (
+        config.action === "ensure" &&
+        (await chrome.tabs.get(tabId)).url !== url
+      )
+        await readyTab(tabId, url, 1000).catch(() => {});
+      if (
+        config.action !== "ensure" ||
+        (await chrome.tabs.get(tabId)).url !== url
+      )
+        await chrome.tabs.update(tabId, { url });
+      await readyTab(tabId, url);
       return true;
+    }
     case "attach":
       return { tabId, url: tab.url, title: tab.title };
     case "focus":
@@ -633,41 +816,89 @@ async function command(command) {
     case "click":
     case "move":
     case "drag": {
-      const start = await point(tabId, config);
+      if (
+        typeof config.checked === "boolean" &&
+        (await dom(tabId, "checked", config)) === config.checked
+      )
+        return true;
+      const start = await point(
+        tabId,
+        config,
+        kind === "drag" ? config.fromOffset : undefined,
+      );
+      let destination = { x: Number(config.toX), y: Number(config.toY) };
+      if (kind === "drag" && config.toLocator) {
+        destination = await point(
+          tabId,
+          { locator: config.toLocator },
+          config.toOffset,
+        );
+        const current = await point(tabId, config, config.fromOffset);
+        if (
+          Math.abs(current.x - start.x) > 1 ||
+          Math.abs(current.y - start.y) > 1
+        )
+          throw new Error(
+            "Both drag endpoints must remain visible in the viewport",
+          );
+      }
       const button = config.button || "left";
       await cdp(tabId, "Input.dispatchMouseEvent", {
         type: "mouseMoved",
         ...start,
+        modifiers: modifierMask(tabId) | pointerModifiers(config),
       });
       if (kind === "move") return true;
       await cdp(tabId, "Input.dispatchMouseEvent", {
         type: "mousePressed",
         ...start,
+        modifiers: modifierMask(tabId) | pointerModifiers(config),
         button,
         clickCount: Number(config.clickCount || 1),
       });
       let end = start;
       try {
         if (kind === "drag") {
-          end = { x: Number(config.toX), y: Number(config.toY) };
-          await cdp(tabId, "Input.dispatchMouseEvent", {
-            type: "mouseMoved",
-            ...end,
-            button,
-            buttons: button === "left" ? 1 : button === "right" ? 2 : 4,
-          });
+          for (let step = 1; step <= 20; step++) {
+            end = {
+              x: start.x + ((destination.x - start.x) * step) / 20,
+              y: start.y + ((destination.y - start.y) * step) / 20,
+            };
+            await cdp(tabId, "Input.dispatchMouseEvent", {
+              type: "mouseMoved",
+              ...end,
+              button,
+              buttons: button === "left" ? 1 : button === "right" ? 2 : 4,
+            });
+            if (config.durationMs)
+              await pause(Math.min(120000, Number(config.durationMs)) / 20);
+          }
         }
       } finally {
         await cdp(tabId, "Input.dispatchMouseEvent", {
           type: "mouseReleased",
           ...end,
+          modifiers: modifierMask(tabId) | pointerModifiers(config),
           button,
           clickCount: Number(config.clickCount || 1),
         });
       }
+      if (typeof config.checked === "boolean") {
+        const deadline =
+          Date.now() + Math.min(15000, Number(config.timeoutMs ?? 1000));
+        while ((await dom(tabId, "checked", config)) !== config.checked) {
+          if (Date.now() >= deadline)
+            throw new Error(
+              "The application did not accept the requested checked state",
+            );
+          await pause(25);
+        }
+      }
       return true;
     }
     case "scroll": {
+      if (config.scrollTop !== undefined || config.scrollLeft !== undefined)
+        return dom(tabId, "scroll", config);
       const position = await point(tabId, config);
       await cdp(tabId, "Input.dispatchMouseEvent", {
         type: "mouseWheel",
@@ -700,7 +931,7 @@ async function command(command) {
       });
     case "select": {
       const values = await dom(tabId, "select", config);
-      return config.locator ? values : values[0];
+      return config.locator || Array.isArray(config.value) ? values : values[0];
     }
     case "tab":
       if (config.action === "new") {
@@ -711,9 +942,35 @@ async function command(command) {
         return { tabId: next.id };
       }
       if (config.action === "close") {
+        const matches = config.returnUrl
+          ? (await chrome.tabs.query({})).filter(
+              (candidate) =>
+                candidate.id !== tabId && candidate.url === config.returnUrl,
+            )
+          : [];
+        if (config.returnUrl && matches.length !== 1)
+          throw new Error("The return tab is missing or ambiguous");
         await chrome.tabs.remove(tabId);
-        targets.delete(target.id);
+        if (matches[0]) targets.set(target.id, matches[0].id);
+        else targets.delete(target.id);
         return true;
+      }
+      if (config.exact || config.waitForExisting) {
+        const deadline = Date.now() + 15000;
+        let matches;
+        do {
+          matches = (await chrome.tabs.query({})).filter(
+            (candidate) => candidate.url === config.url,
+          );
+          if (matches.length || !config.waitForExisting) break;
+          if (activeSignal?.aborted) throw new Error("Cancelled");
+          await pause(25);
+        } while (Date.now() < deadline);
+        if (matches.length !== 1)
+          throw new Error("Tab selection is missing or ambiguous");
+        targets.set(target.id, matches[0].id);
+        await chrome.tabs.update(matches[0].id, { active: true });
+        return { tabId: matches[0].id };
       }
       targets.delete(target.id);
       return {
@@ -809,10 +1066,89 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     respond({ ok: true });
   }
 });
-chrome.webNavigation.onCompleted.addListener(({ tabId, frameId }) => {
+function queueRecorded(current, operation) {
+  const work = (current.timeline ?? Promise.resolve()).then(async () => {
+    if (recording === current && current.active) await operation();
+  });
+  current.timeline = work.catch(() => {});
+  trackRecording(current, work);
+  return work;
+}
+function trackRecording(current, operation) {
+  current.pending.add(operation);
+  void operation
+    .catch(() => {})
+    .finally(() => current.pending.delete(operation));
+}
+chrome.webNavigation.onCompleted.addListener(({ tabId }) => {
   const current = recording;
   if (current?.active && tabId === current.tabId)
     void installRecording(current).catch(() => {});
+});
+const recordNavigation = ({ tabId, frameId, url }) => {
+  const current = recording;
+  if (
+    current?.active &&
+    tabId === current.tabId &&
+    frameId === 0 &&
+    /^https?:|^file:/.test(url)
+  ) {
+    current.urls.set(tabId, url);
+    const action = observed("navigate", "Navigate browser", {
+      url,
+      action: "ensure",
+    });
+    queueRecorded(current, async () => {
+      await flushRecordedTab(current, tabId).catch(() => {});
+      deliverRecorded(current, action);
+    });
+  }
+};
+chrome.webNavigation.onCommitted.addListener(recordNavigation);
+chrome.webNavigation.onHistoryStateUpdated.addListener(recordNavigation);
+chrome.webNavigation.onReferenceFragmentUpdated.addListener(recordNavigation);
+chrome.tabs.onCreated.addListener((tab) => {
+  const current = recording;
+  if (!current?.active || !current.tabs.has(tab.openerTabId)) return;
+  current.tabs.add(tab.id);
+  queueRecorded(current, async () => {
+    await saveRecordingOwner(current);
+    await readyTab(tab.id);
+    await switchRecordedTab(current, tab.id);
+  });
+});
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  const current = recording;
+  if (current?.active && current.tabs.has(tabId))
+    queueRecorded(current, () => switchRecordedTab(current, tabId));
+});
+chrome.tabs.onRemoved.addListener((tabId) => {
+  const current = recording;
+  if (
+    !current?.active ||
+    !current.tabs.delete(tabId) ||
+    tabId !== current.tabId
+  )
+    return;
+  queueRecorded(current, async () => {
+    const nextId = [...current.tabs][0];
+    const next = nextId
+      ? await chrome.tabs.get(nextId).catch(() => null)
+      : null;
+    deliverRecorded(
+      current,
+      observed("tab", "Close browser tab", {
+        action: "close",
+        closedUrl: current.urls.get(tabId),
+        ...(next ? { returnUrl: next.url } : {}),
+      }),
+    );
+    current.tabId = nextId;
+    if (next) {
+      targets.set(current.targetId, nextId);
+      await saveRecordingOwner(current);
+    }
+  });
 });
 chrome.alarms.create("relay-connect", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(() => {

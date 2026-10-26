@@ -20,7 +20,7 @@ Editing, reordering, undo, and redo never send input to an application. Preview 
 
 One draft is stored locally in SQLite. Relaunching Relay recovers the latest acknowledged sequence into **review**, even if the app closed during capture. Recovery never installs recording listeners or replays actions. An action interrupted before its save was acknowledged may be absent or incomplete; check the sequence before running it.
 
-Browser steps share the editor's structured locator controls and **Test match**. Direct browser recording generates semantic locators with explicit frame/open-shadow scopes where possible, using the same extraction in managed Chromium and the extension. Password values are omitted. See [browser locators](browser-locators.md) for matching behavior and the event coverage still tracked in B02.
+Browser steps share the editor's structured locator controls and **Test match**. Direct browser recording generates semantic locators with explicit frame/open-shadow scopes where possible, using the same extraction in managed Chromium and the extension. Password values are omitted. Browser recording coalesces text edits, flushes pending actions on Pause/Stop, captures stateful controls and supported pointer/key/navigation/tab interactions, and marks unsupported actions for configuration before running. See [browser locators](browser-locators.md) and [browser recording coverage](browser-recording.md).
 
 ## Insert or discard
 

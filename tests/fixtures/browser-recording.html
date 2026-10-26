@@ -1,0 +1,150 @@
+<!doctype html><meta charset="utf-8" /><title>B02 recording fixture</title>
+<style>
+  body {
+    font: 14px sans-serif;
+    margin: 12px;
+  }
+  label {
+    display: inline-block;
+    margin: 4px;
+  }
+  input,
+  textarea {
+    width: 140px;
+  }
+  #rich {
+    display: inline-block;
+    border: 1px solid;
+    width: 140px;
+    height: 30px;
+  }
+  #scrollbox {
+    width: 300px;
+    height: 65px;
+    overflow: auto;
+    border: 1px solid;
+  }
+  #scrollbox > div {
+    height: 700px;
+    width: 600px;
+  }
+  #stage {
+    display: flex;
+    gap: 70px;
+    margin: 8px;
+    width: 400px;
+    height: 65px;
+  }
+  #source,
+  #drop {
+    width: 90px;
+    height: 55px;
+    background: #ddd;
+  }
+  button {
+    margin: 4px;
+  }
+</style>
+<label>Text<input id="text" /></label
+><label>Multiline<textarea id="multi"></textarea></label
+><label>Composed<input id="ime" /></label>
+<div id="rich" contenteditable="true" aria-label="Rich text"></div>
+<label>Enabled<input id="enabled" type="checkbox" /></label>
+<label
+  >First<input
+    id="first"
+    type="radio"
+    name="choice"
+    value="first"
+    checked /></label
+><label
+  >Second<input id="second" type="radio" name="choice" value="second"
+/></label>
+<label
+  >Options<select id="options" multiple>
+    <option value="a">A</option>
+    <option value="b">B</option>
+    <option value="c">C</option>
+  </select></label
+>
+<button id="double">Double action</button
+><button id="right">Right action</button
+><button id="middle">Middle action</button
+><button id="modified">Modified action</button>
+<div id="scrollbox"><div>Scrollable area</div></div>
+<div id="stage">
+  <div id="source">Drag source</div>
+  <div id="drop">Drop target</div>
+</div>
+<label>Private<input id="private" type="password" /></label
+><label>File<input id="file" type="file" /></label>
+<button id="history">History change</button
+><a id="navigate" href="/coverage?next=1">Next document</a
+><a id="popup" href="/coverage?popup=1" target="_blank">Open popup</a
+><button id="close" onclick="window.close()">Close popup</button>
+<script>
+  const state = {
+    double: 0,
+    right: 0,
+    middle: 0,
+    modified: 0,
+    shortcut: 0,
+    keyHeld: false,
+    drag: 0,
+  };
+  document
+    .querySelector("#double")
+    .addEventListener("dblclick", () => state.double++);
+  document.querySelector("#right").addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    state.right++;
+  });
+  document.querySelector("#middle").addEventListener("auxclick", (event) => {
+    event.preventDefault();
+    if (event.button === 1) state.middle++;
+  });
+  document.querySelector("#modified").addEventListener("click", (event) => {
+    if (event.shiftKey) state.modified++;
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key.toLowerCase() === "k" && event.ctrlKey && event.shiftKey) {
+      event.preventDefault();
+      if (!event.repeat) state.shortcut++;
+      state.keyHeld = true;
+    }
+  });
+  document.addEventListener("keyup", (event) => {
+    if (event.key.toLowerCase() === "k") state.keyHeld = false;
+  });
+  let dragging = false;
+  document.querySelector("#source").addEventListener("pointerdown", () => {
+    dragging = true;
+  });
+  document.addEventListener("pointerup", (event) => {
+    const box = document.querySelector("#drop").getBoundingClientRect();
+    if (
+      dragging &&
+      event.clientX > box.x &&
+      event.clientX < box.right &&
+      event.clientY > box.y &&
+      event.clientY < box.bottom
+    )
+      state.drag++;
+    dragging = false;
+  });
+  document.querySelector("#history").onclick = () =>
+    history.pushState({}, "", "/coverage?history=1");
+  window.snapshot = () => ({
+    ...state,
+    text: document.querySelector("#text").value,
+    multi: document.querySelector("#multi").value,
+    ime: document.querySelector("#ime").value,
+    rich: document.querySelector("#rich").textContent,
+    enabled: document.querySelector("#enabled").checked,
+    choice: document.querySelector("input[name=choice]:checked").value,
+    selected: [...document.querySelector("#options").selectedOptions].map(
+      (option) => option.value,
+    ),
+    scrollTop: document.querySelector("#scrollbox").scrollTop,
+  });
+</script>
