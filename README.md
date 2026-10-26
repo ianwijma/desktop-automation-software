@@ -101,3 +101,5 @@ The smoke launcher disables the Chromium sandbox **only for the isolated test pr
 The CI workflow builds and checks Windows, macOS, and Linux separately. Only tests actually run on a platform validate it; adding the workflow does not establish support for untested native APIs.
 
 Architecture and implementation boundaries are documented in [docs/architecture.md](docs/architecture.md). The [native contract and harness guide](docs/native-contracts.md) explains protocol negotiation, backend/permission diagnostics, coordinate transforms, and explicit desktop qualification runs. Browser and native adapters include platform-specific tests; cloud-provider behavior is tested with mocked requests so the test suite does not require API keys or consume inference credits.
+
+[AI connection checks](docs/ai-connection-checks.md) track text, decision, structured, image and localization evidence separately. Model, endpoint, capability and credential changes make previous results stale; probes run only from labeled actions.

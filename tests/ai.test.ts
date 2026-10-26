@@ -390,3 +390,122 @@ describe("bring-your-own AI adapters", () => {
     expect(safeAIError(new Error("token sk-12345"))).not.toContain("sk-12345");
   });
 });
+
+describe("validated connection probes", () => {
+  it("redacts long configured secrets before truncating probe errors", () => {
+    const secret = "custom-secret-".repeat(100);
+    expect(safeAIError(new Error(`Denied ${secret}`), secret)).toBe(
+      "Denied [redacted]",
+    );
+  });
+  it("rejects a text response that merely returned HTTP success", async () => {
+    const service = new AIService(
+      () => undefined,
+      mockFetch({ message: { content: "Hello" } }),
+    );
+    expect(await service.test(connection("ollama"), "text")).toMatchObject({
+      ok: false,
+      status: "failed",
+      operation: "text",
+    });
+  });
+  it("runs a fresh Jev decision without claiming text or arbitrary schema generation", async () => {
+    const fetcher = mockFetch({ answers: { present: { noul: 0.99 } } });
+    const service = new AIService(() => "test-key", fetcher);
+    const jev = connection("jev", {
+      capabilities: { text: false, vision: false, structured: false },
+    });
+    expect(await service.test(jev, "decision")).toMatchObject({
+      ok: true,
+      status: "passed",
+      operation: "decision",
+    });
+    expect(await service.test(jev, "text")).toMatchObject({
+      ok: false,
+      status: "unsupported",
+    });
+    expect(await service.test(jev, "structured")).toMatchObject({
+      ok: false,
+      status: "unsupported",
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await expect(
+      service.generate(connection("jev"), {
+        prompt: "schema",
+        mode: "structured",
+        schema: { type: "object" },
+      }),
+    ).rejects.toThrow("decision model");
+  });
+  it("validates structured probes and isolates image results", async () => {
+    const fetcher = mockFetch({
+      message: { content: JSON.stringify({ relay: "connected" }) },
+    });
+    const service = new AIService(() => undefined, fetcher),
+      local = connection("ollama");
+    expect(await service.test(local, "structured")).toMatchObject({
+      ok: true,
+      operation: "structured",
+    });
+    fetcher.mockImplementationOnce(async () =>
+      json({ message: { content: "blue" } }),
+    );
+    expect(await service.test(local, "image")).toMatchObject({
+      ok: false,
+      status: "failed",
+      operation: "image",
+    });
+    const body = JSON.parse(String(fetcher.mock.calls[1][1]?.body));
+    expect(body.messages[0].images).toHaveLength(1);
+    expect(body.options.num_predict).toBe(256);
+  });
+  it("requires a localization box overlapping the known synthetic target", async () => {
+    const fetcher = mockFetch({
+      message: {
+        content: JSON.stringify({
+          outcome: "match",
+          evidence: "red",
+          box: { x: 24 / 128, y: 40 / 128, width: 48 / 128, height: 32 / 128 },
+        }),
+      },
+    });
+    const service = new AIService(() => undefined, fetcher);
+    const probe = await service.test(connection("ollama"), "localization");
+    expect(probe, probe.message).toMatchObject({
+      ok: true,
+      operation: "localization",
+    });
+    fetcher.mockImplementationOnce(async () =>
+      json({
+        message: {
+          content: JSON.stringify({
+            outcome: "match",
+            evidence: "red",
+            box: { x: 0, y: 0, width: 1, height: 1 },
+          }),
+        },
+      }),
+    );
+    expect(
+      await service.test(connection("ollama"), "localization"),
+    ).toMatchObject({ ok: false, status: "failed" });
+  });
+  it("never sends an unsupported operation or leaks a nonstandard API key", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => {
+      throw new Error("Rejected secret-custom-credential");
+    });
+    const service = new AIService(() => "secret-custom-credential", fetcher);
+    expect(
+      await service.test(
+        connection("ollama", {
+          capabilities: { text: false, vision: false, structured: false },
+        }),
+        "image",
+      ),
+    ).toMatchObject({ status: "unsupported" });
+    expect(fetcher).not.toHaveBeenCalled();
+    const result = await service.test(openrouter(), "text");
+    expect(result.status).toBe("failed");
+    expect(result.message).not.toContain("secret-custom-credential");
+  });
+});

@@ -8,6 +8,7 @@ import {
 } from "../engine";
 import { NativeAdapter } from "../integrations/native";
 import { BrowserAdapter } from "../integrations/browser";
+import { aiCheckOperationSchema } from "../shared/ai-connections";
 import { AIService, safeAIError } from "../integrations/ai";
 import { NativeServiceError } from "../shared/native-protocol";
 import { detectionCoordinates } from "../integrations/locations";
@@ -566,7 +567,23 @@ async function handle(method: string, args: unknown[]): Promise<unknown> {
   if (method === "testConnection") {
     const connection = workspace.connections.find((c) => c.id === args[0]);
     if (!connection) throw new Error("Connection not found.");
-    return ai.test(connection);
+    const expected = args[2] as {
+      connectionRevision: number;
+      credentialRevision: number;
+    };
+    if (
+      (connection.revision ?? 0) !== expected.connectionRevision ||
+      (connection.credentialRevision ?? 0) !== expected.credentialRevision
+    )
+      throw new Error(
+        "Connection changed before the probe started. Try again.",
+      );
+    const snapshot = structuredClone(connection),
+      key = workspace.keys[connection.id];
+    return new AIService(() => key).test(
+      snapshot,
+      aiCheckOperationSchema.parse(args[1]),
+    );
   }
   if (method === "startRecording")
     return recording.start(args[0] as RecordingStartOptions);

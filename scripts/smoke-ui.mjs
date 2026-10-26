@@ -15,6 +15,7 @@ import { runStructuredInspectorSmoke } from "./structured-inspector-smoke.mjs";
 import { runRecordingReviewSmoke } from "./recording-review-smoke.mjs";
 import { runNativeLocatorSmoke } from "./native-locator-smoke.mjs";
 import { runBrowserLocatorSmoke } from "./browser-locator-smoke.mjs";
+import { runConnectionChecksUISmoke } from "./connection-checks-ui-smoke.mjs";
 import { runWindowsSettingsSmoke } from "./windows-settings-smoke.mjs";
 
 let url = process.env.RELAY_WEB_URL;
@@ -432,6 +433,7 @@ try {
   await runNativeLocatorSmoke({ browser, url });
   await runNativeLocatorSmoke({ browser, url, platform: "darwin" });
   await runWindowsSettingsSmoke({ browser, url });
+  await runConnectionChecksUISmoke({ browser, url });
   console.log(
     "PASS: editor and references; undo/redo across revisions; child groups; theme/OpenRouter persistence; schedules; preview rejection; cross-tab conflicts; future-schema preservation; committed-save warning recovery with no automatic run; no page errors.",
   );

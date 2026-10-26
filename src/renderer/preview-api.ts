@@ -1,3 +1,4 @@
+import { prepareConnectionSave } from "../shared/ai-connections";
 import type {
   RelayAPI,
   WorkspaceState,
@@ -186,8 +187,15 @@ export const previewAPI: RelayAPI = {
       throw new Error(
         "API keys cannot be saved in the web preview. Add your key in the desktop application.",
       );
-    const next = { ...connection, hasKey: false };
     return mutate((state) => {
+      const next = {
+        ...prepareConnectionSave(
+          state.connections.find((c) => c.id === connection.id),
+          connection,
+          false,
+        ),
+        hasKey: false,
+      };
       upsert(state.connections, next);
       return next;
     });

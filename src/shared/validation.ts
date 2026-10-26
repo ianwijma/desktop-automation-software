@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { aiCheckOperationSchema, aiCheckSchema } from "./ai-connections";
 import type { Json } from "./types";
 import { nativeLocatorSchema } from "./native-locators";
 import { nodeKinds, hasReference } from "./node-definitions";
@@ -103,6 +104,9 @@ export const connectionSchema = z.object({
   }),
   hasKey: z.boolean(),
   experimentalVision: z.boolean().optional(),
+  revision: z.number().int().nonnegative().optional(),
+  credentialRevision: z.number().int().nonnegative().optional(),
+  checks: z.partialRecord(aiCheckOperationSchema, aiCheckSchema).optional(),
   lastTest: z
     .object({ ok: z.boolean(), message: z.string(), at: z.string() })
     .optional(),
