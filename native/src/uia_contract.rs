@@ -69,7 +69,7 @@ pub fn control_name(id: i32) -> &'static str {
     ]
     .into_iter()
     .find(|name| control_id(name) == Some(id))
-    .unwrap_or("custom")
+    .unwrap_or("unknown")
 }
 pub fn matches(selector: &Value, properties: &Value) -> bool {
     selector.as_object().is_some_and(|fields| {
@@ -106,6 +106,8 @@ mod tests {
     fn locators_reject_pointers_and_unbounded_paths() {
         let good = json!({"version":1,"backend":"uia","selector":{"automationId":"2","controlType":"edit"}});
         validate(&good).unwrap();
+        assert_eq!(control_name(50000), "button");
+        assert_eq!(control_name(59999), "unknown");
         for field in ["runtimeId", "pointer", "hwnd", "pid", "x"] {
             let mut bad = good.clone();
             bad["selector"][field] = json!(42);

@@ -233,7 +233,7 @@ pub fn capabilities(mut value: Value) -> Value {
             value["accessibility"] == true,
         ),
     ] {
-        operations.insert(name.to_string(),json!({"availability":if !supported{"unsupported"}else if available{"available"}else{"unavailable"},"verification":"untested","backend":backend()}));
+        operations.insert(name.to_string(),json!({"availability":if !supported{"unsupported"}else if available{"available"}else{"unavailable"},"verification":"untested","backend":if name=="accessibility" && cfg!(target_os="windows") {"windows-uia"} else {backend()}}));
     }
     let capture = if cfg!(target_os = "macos") {
         if value["macosBackend"]["screenRecording"] == "granted" {
@@ -380,6 +380,34 @@ mod tests {
             json!([{"id":"1", "application":"Same visible label", "applicationIdentity":{"id":"dev.relay.fixture", "kind":"bundle-id", "pid":7}}]),
         );
         assert_eq!(list[0]["applicationIdentity"]["id"], "dev.relay.fixture");
+    }
+    #[test]
+    fn uia_errors_keep_semantic_codes_and_never_echo_provider_payloads() {
+        for code in [
+            "ELEMENT_NOT_FOUND",
+            "AMBIGUOUS_ELEMENT",
+            "ELEMENT_DISABLED",
+            "ELEMENT_OFFSCREEN",
+            "SECURE_ELEMENT",
+            "VIRTUALIZED_ELEMENT",
+            "STALE_ELEMENT",
+            "UNSUPPORTED_PATTERN",
+            "MODAL_BLOCKED",
+            "SEARCH_LIMIT",
+            "TIMEOUT",
+        ] {
+            let value = error_for(
+                "nativeElement",
+                format!("uia:{code}"),
+                &json!({"text":"private fixture text"}),
+            );
+            assert_eq!(value["code"], code);
+            assert_eq!(value["backend"], "windows-uia");
+            assert!(!value.to_string().contains("private fixture text"));
+        }
+        let value = error("nativeElement", "uia:provider-private-value".into());
+        assert_eq!(value["code"], "BACKEND_FAILURE");
+        assert!(!value.to_string().contains("provider-private-value"));
     }
     #[test]
     fn errors_do_not_include_tool_payloads() {

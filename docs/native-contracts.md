@@ -1,4 +1,4 @@
-# Native contracts and desktop verification (N01–N04)
+# Native contracts and desktop verification (N01–N05)
 
 The native helper and TypeScript adapter use protocol **2**, independently of workflow/database version 2 and recording envelope version 1. There is no automatic input retry, backend fallback, or migration of coordinate workflows to semantic targeting.
 
@@ -22,7 +22,7 @@ Existing capability booleans remain for compatibility. `capabilities.native` add
 
 macOS uses nonprompting Screen Recording/Accessibility preflights, per-operation permission/session guards and a persistent ScreenCaptureKit stream. Permission state is separate from active-session availability. Windows input permission remains unknown because an unlocked desktop and target privilege level cannot be established by helper startup. X11 capture has no separate consent permission, while desktop/service availability is reported independently. Wayland grants remain required and operations remain unavailable in the passive probe until separately exercised; portal service discovery is not consent or session qualification. Global shortcuts are still checked by the Electron application.
 
-Current backend identifiers are `x11-command-tools`, `wayland-portal-gstreamer`, `win32-wgc` (capture default), `win32-printwindow` (explicit compatibility), `win32-sendinput` (input errors), and `macos-screencapturekit`. N02/N03 replace the Windows/macOS implementations; N04 adds persistent Wayland grants, source tokens and fixed EIS/legacy input transport.
+Current backend identifiers are `x11-command-tools`, `wayland-portal-gstreamer`, `win32-wgc` (capture default), `win32-printwindow` (explicit compatibility), `win32-sendinput` (input errors), `windows-uia` (semantic inspection/actions), and `macos-screencapturekit`. N02/N03 replace the Windows/macOS implementations; N04 adds persistent Wayland grants, source tokens and fixed EIS/legacy input transport. N05 adds pointer-free semantic locators and a dedicated UIA worker; see [native locators](native-locators.md).
 
 ## Identity and coordinates
 

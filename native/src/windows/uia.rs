@@ -367,7 +367,10 @@ impl Context<'_> {
                 return Err("uia:ELEMENT_NOT_FOUND".into());
             }
             let properties = self.properties(&element)?;
-            let mut selector = json!({"controlType":properties["controlType"]});
+            let mut selector = json!({});
+            if contract::control_id(properties["controlType"].as_str().unwrap_or("")).is_some() {
+                selector["controlType"] = properties["controlType"].clone();
+            }
             for key in ["automationId", "className"] {
                 if properties[key].as_str().is_some_and(|s| !s.is_empty()) {
                     selector[key] = properties[key].clone();
