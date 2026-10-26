@@ -59,7 +59,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
     binaryPath: process.execPath,
     binaryArgs: [script],
     env: { RELAY_PROTOCOL_CONTROL: control, RELAY_PROTOCOL_LOG: log },
-    timeoutMs: 2000,
+    timeoutMs: mode === "hang" ? 10000 : 2000,
   });
   resources.push({ directory, adapter });
   return { adapter, control, log };
@@ -205,14 +205,19 @@ describe("native adapter protocol boundary", () => {
   });
   it("cancels a stalled handshake without sending input", async () => {
     const { adapter, log } = await mock("hang");
-    await expect(
-      adapter.execute(
-        "click",
-        { x: 10, y: 10 },
-        target,
-        AbortSignal.timeout(100),
-      ),
+    const abort = new AbortController();
+    const rejected = expect(
+      adapter.execute("click", { x: 10, y: 10 }, target, abort.signal),
     ).rejects.toThrow("Cancelled");
+    try {
+      // Wait for the actual stalled handshake rather than racing process startup.
+      await expect
+        .poll(() => readFile(log, "utf8").catch(() => ""), { timeout: 3000 })
+        .toContain('"method":"handshake"');
+    } finally {
+      abort.abort();
+      await rejected;
+    }
     await adapter.releaseAll();
     const requests = await readFile(log, "utf8");
     expect(requests).not.toContain('"method":"input"');

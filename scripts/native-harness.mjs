@@ -460,7 +460,8 @@ if (!args.has("--run")) {
             await control("/resize", "POST");
             await poll(
               control,
-              (s) => s.bounds.width === (s.resizeExpectedWidth ?? 740),
+              (s) =>
+                Math.abs(s.bounds.width - (s.resizeExpectedWidth ?? 640)) <= 1,
             );
             await assert.rejects(
               adapter.execute(

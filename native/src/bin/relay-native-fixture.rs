@@ -257,8 +257,8 @@ mod fixture {
                     null_mut(),
                     0,
                     0,
-                    px(740),
-                    px(580),
+                    px(640),
+                    px(500),
                     SWP_NOMOVE | SWP_NOZORDER,
                 );
                 0
@@ -449,15 +449,25 @@ mod fixture {
         } else {
             vec![]
         };
-        json!({"coordinateSpace":"window-input","resizeExpectedWidth":n(740.),"clicks":s.clicks,"text":s.text,"secureHasValue":s.secure,"scrollTop":s.scroll,"drags":s.drags,"buttons":s.buttons,"held":held,"animationFrames":s.frames,"gpu":false,"renderSurface":"native-gdi","nativeControls":true,"contentScale":scale,"devicePixelRatio":f64::from(GetDpiForWindow(window))/96.,"targets":targets,"minimized":IsIconic(window)!=0,"focused":focused,"duplicate":s.duplicate!=0,"bounds":{"x":outer.left,"y":outer.top,"width":outer.right-outer.left,"height":outer.bottom-outer.top},"displays":[{"scaleFactor":f64::from(GetDpiForWindow(window))/96.}],"versions":{"fixture":"Win32 controls","version":env!("CARGO_PKG_VERSION")}})
+        json!({"coordinateSpace":"window-input","resizeExpectedWidth":n(640.),"clicks":s.clicks,"text":s.text,"secureHasValue":s.secure,"scrollTop":s.scroll,"drags":s.drags,"buttons":s.buttons,"held":held,"animationFrames":s.frames,"gpu":false,"renderSurface":"native-gdi","nativeControls":true,"contentScale":scale,"devicePixelRatio":f64::from(GetDpiForWindow(window))/96.,"targets":targets,"minimized":IsIconic(window)!=0,"focused":focused,"duplicate":s.duplicate!=0,"bounds":{"x":outer.left,"y":outer.top,"width":outer.right-outer.left,"height":outer.bottom-outer.top},"displays":[{"scaleFactor":f64::from(GetDpiForWindow(window))/96.}],"versions":{"fixture":"Win32 controls","version":env!("CARGO_PKG_VERSION")}})
     }
     fn connection(mut socket: TcpStream, token: &str) {
+        // Windows accept inherits the listener's nonblocking mode. Each accepted
+        // connection uses bounded blocking reads, including fragmented headers.
+        let _ = socket.set_nonblocking(false);
         let _ = socket.set_read_timeout(Some(Duration::from_secs(2)));
-        let mut bytes = [0u8; 8192];
-        let Ok(length) = socket.read(&mut bytes) else {
-            return;
-        };
-        let text = String::from_utf8_lossy(&bytes[..length]);
+        let mut bytes = Vec::new();
+        while !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+            if bytes.len() >= 8192 {
+                return;
+            }
+            let mut chunk = [0u8; 1024];
+            match socket.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(length) => bytes.extend_from_slice(&chunk[..length]),
+            }
+        }
+        let text = String::from_utf8_lossy(&bytes);
         let authorized = text
             .lines()
             .filter_map(|l| l.split_once(':'))

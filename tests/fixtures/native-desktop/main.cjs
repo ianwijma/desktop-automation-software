@@ -69,7 +69,7 @@ app.whenReady().then(async () => {
       window.focus();
       res.end("{}");
     } else if (req.method === "POST" && req.url === "/resize") {
-      window.setSize(740, 580);
+      window.setSize(640, 500);
       res.end("{}");
     } else if (req.method === "POST" && req.url === "/duplicate") {
       duplicate = createWindow();
