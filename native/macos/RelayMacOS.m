@@ -4,6 +4,7 @@
 #import <CoreImage/CoreImage.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
+#import <IOKit/hidsystem/IOLLEvent.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <math.h>
 #import <stdlib.h>
@@ -456,17 +457,21 @@ static NSMutableSet<NSNumber *> *Keys, *Buttons;
 static CGEventFlags Modifier(CGKeyCode code) {
     switch (code) {
     case 54:
+        return kCGEventFlagMaskCommand | NX_DEVICERCMDKEYMASK;
     case 55:
-        return kCGEventFlagMaskCommand;
+        return kCGEventFlagMaskCommand | NX_DEVICELCMDKEYMASK;
     case 56:
+        return kCGEventFlagMaskShift | NX_DEVICELSHIFTKEYMASK;
     case 60:
-        return kCGEventFlagMaskShift;
+        return kCGEventFlagMaskShift | NX_DEVICERSHIFTKEYMASK;
     case 58:
+        return kCGEventFlagMaskAlternate | NX_DEVICELALTKEYMASK;
     case 61:
-        return kCGEventFlagMaskAlternate;
+        return kCGEventFlagMaskAlternate | NX_DEVICERALTKEYMASK;
     case 59:
+        return kCGEventFlagMaskControl | NX_DEVICELCTLKEYMASK;
     case 62:
-        return kCGEventFlagMaskControl;
+        return kCGEventFlagMaskControl | NX_DEVICERCTLKEYMASK;
     default:
         return 0;
     }
@@ -599,7 +604,10 @@ static void Key(CGKeyCode code, BOOL down) {
     for (NSNumber *owned in Keys)
         if (down || owned.unsignedShortValue != code)
             flags |= Modifier(owned.unsignedShortValue);
-    PostFlags(CGEventCreateKeyboardEvent(NULL, code, down), flags);
+    CGEventRef event = CGEventCreateKeyboardEvent(NULL, code, down);
+    if (event && Modifier(code))
+        CGEventSetType(event, kCGEventFlagsChanged);
+    PostFlags(event, flags);
     if (!down)
         [Keys removeObject:@(code)];
 }

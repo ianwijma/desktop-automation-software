@@ -135,14 +135,19 @@ if (!args.has("--run")) {
       return false;
     }
   };
-  const poll = async (operation, predicate, timeout = 20000) => {
+  const poll = async (
+    operation,
+    predicate,
+    timeout = 20000,
+    description = "Fixture observation timed out",
+  ) => {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
       const result = await operation();
       if (predicate(result)) return result;
       await new Promise((r) => setTimeout(r, 50));
     }
-    throw new Error("Fixture observation timed out");
+    throw new Error(description);
   };
   const control = async (route = "/state", method = "GET") => {
     const response = await fetch(`http://127.0.0.1:${port}${route}`, {
@@ -514,7 +519,27 @@ if (!args.has("--run")) {
               );
               await control("/restore", "POST");
               await poll(control, (s) => !s.minimized && s.focused);
-              frame = await adapter.capture(target);
+              await poll(
+                async () => {
+                  try {
+                    frame = await adapter.capture(target);
+                    return true;
+                  } catch (error) {
+                    if (
+                      [
+                        "CAPTURE_LOST",
+                        "CAPTURE_UNAVAILABLE",
+                        "TARGET_UNAVAILABLE",
+                      ].includes(error.details?.code)
+                    )
+                      return false;
+                    throw error;
+                  }
+                },
+                Boolean,
+                5000,
+                "Capture did not recover after restore",
+              );
               assert.equal(
                 frame.native.backend,
                 process.platform === "darwin"
@@ -525,30 +550,56 @@ if (!args.has("--run")) {
               );
             });
           await check("held-input-cancellation-and-release", async () => {
-            await adapter.execute(
-              "key",
-              { key: "Shift", action: "down" },
-              target,
-            );
-            await poll(control, (s) => s.held.includes("Shift"));
-            const abort = new AbortController(),
-              from = await point("drag", -70),
-              to = await point("drag", 70);
-            const work = adapter.execute(
-              "drag",
-              { ...from, toX: to.x, toY: to.y, durationMs: 10000 },
-              target,
-              abort.signal,
-            );
-            const rejection = assert.rejects(work, /Cancelled/);
+            const abort = new AbortController();
+            let outcome;
             try {
-              await poll(control, (s) => s.buttons === 1);
+              await adapter.execute(
+                "key",
+                { key: "Shift", action: "down" },
+                target,
+              );
+              await poll(
+                control,
+                (s) => s.held.includes("Shift"),
+                5000,
+                "Application did not observe Shift down",
+              );
+              const from = await point("drag", -70),
+                to = await point("drag", 70);
+              outcome = adapter
+                .execute(
+                  "drag",
+                  { ...from, toX: to.x, toY: to.y, durationMs: 10000 },
+                  target,
+                  abort.signal,
+                )
+                .then(
+                  () => ({ completed: true }),
+                  (error) => ({ error }),
+                );
+              await poll(
+                control,
+                (s) => s.buttons === 1,
+                5000,
+                "Application did not observe held drag button",
+              );
+              abort.abort();
+              const result = await outcome;
+              assert.match(
+                result.error?.message ?? "Input completed before cancellation",
+                /Cancelled/,
+              );
             } finally {
               abort.abort();
+              if (outcome) await outcome;
+              await adapter.releaseAll();
             }
-            await rejection;
-            await adapter.releaseAll();
-            await poll(control, (s) => s.buttons === 0 && s.held.length === 0);
+            await poll(
+              control,
+              (s) => s.buttons === 0 && s.held.length === 0,
+              5000,
+              "Application did not observe input release",
+            );
           });
           await check("helper-restart-invalidates-capture", async () => {
             const old = await adapter.capture(target),

@@ -12,7 +12,7 @@ static NSMutableDictionary<NSString *, NSView *> *Controls;
 static NSTextField *Text;
 static NSSecureTextField *Secure;
 static NSUInteger Clicks, Drags, Frames;
-static BOOL Pressed;
+static BOOL Pressed, ShiftObserved;
 static atomic_bool Active = true;
 static double ContentScale = 1;
 static CGRect CGWindowBounds(void) {
@@ -166,7 +166,7 @@ static NSDictionary *Snapshot(void) {
     NSScrollView *scroll = (NSScrollView *)Controls[@"scroll"];
     Animated *gpu = (Animated *)Controls[@"gpu"];
     NSMutableArray *held = [NSMutableArray array];
-    if (CGEventSourceKeyState(kCGEventSourceStateCombinedSessionState, 56))
+    if (ShiftObserved)
         [held addObject:@"Shift"];
     NSMutableArray *displays = [NSMutableArray array];
     for (NSScreen *s in NSScreen.screens)
@@ -335,6 +335,12 @@ static void Serve(int listener) {
     Animated *gpu = [[Animated alloc] initWithFrame:R(450, 240, 200, 160)];
     [root addSubview:gpu];
     Controls[@"gpu"] = gpu;
+    [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskFlagsChanged
+                                          handler:^NSEvent *(NSEvent *event) {
+                                            ShiftObserved = (event.modifierFlags &
+                                                             NSEventModifierFlagShift) != 0;
+                                            return event;
+                                          }];
     [Window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
     [NSTimer scheduledTimerWithTimeInterval:1. / 15

@@ -31,7 +31,6 @@ if (!enabled || process.platform !== "darwin") {
       [
         "scripts/native-harness.mjs",
         "--run",
-        "--software-gpu",
         "--window-x=0",
         "--window-y=60",
         "--session-label=macos-matrix",
