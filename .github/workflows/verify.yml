@@ -36,6 +36,9 @@ jobs:
       - name: Windows native controls and graphics matrix
         if: runner.os == 'Windows'
         run: npm run test:native:windows -- --run --allow-unavailable
+      - name: macOS native AppKit and graphics matrix
+        if: runner.os == 'macOS'
+        run: npm run test:native:macos -- --run --allow-unavailable
       - run: npx playwright install --with-deps chromium
       - run: npm run check
       - run: npm run test:ui
@@ -51,6 +54,11 @@ jobs:
       - run: npx electron-builder --dir
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      - name: macOS packaged application and helper smoke test
+        if: runner.os == 'macOS'
+        run: npm run test:smoke
+        env:
+          RELAY_SMOKE_EXECUTABLE: ${{ github.workspace }}/release/mac-arm64/Relay.app/Contents/MacOS/Relay
       - name: Linux packaged application smoke test
         if: runner.os == 'Linux'
         run: xvfb-run -a npm run test:smoke

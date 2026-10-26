@@ -94,6 +94,7 @@ export interface NativeWindow {
   application?: string;
   applicationIdentity?: import("./native-protocol").NativeApplicationIdentity;
   dpi?: number;
+  displayScale?: number;
   bounds: { x: number; y: number; width: number; height: number };
 }
 export interface CaptureFrame {

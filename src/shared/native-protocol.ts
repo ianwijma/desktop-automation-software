@@ -65,11 +65,18 @@ export const nativeWindowSchema = z.object({
   title: z.string(),
   application: z.string().optional(),
   dpi: z.number().int().positive().optional(),
+  displayScale: z.number().positive().optional(),
   bounds: boundsSchema,
   applicationIdentity: z
     .object({
       id: z.string().min(1),
-      kind: z.enum(["wm-class", "process-name", "owner-name", "pid-only"]),
+      kind: z.enum([
+        "wm-class",
+        "process-name",
+        "owner-name",
+        "pid-only",
+        "bundle-id",
+      ]),
       pid: z.number().int().positive().optional(),
     })
     .optional(),
@@ -93,6 +100,18 @@ export const nativeCapabilitiesSchema = z.object({
           interactiveDesktop: z.boolean(),
           perMonitorV2: z.boolean(),
           captureLibraryVersion: z.string().optional(),
+        })
+        .optional(),
+      macos: z
+        .object({
+          screenRecording: nativeErrorSchema.shape.permission,
+          accessibility: nativeErrorSchema.shape.permission,
+          interactiveSession: z.boolean(),
+          framework: z.literal("ScreenCaptureKit"),
+          minimumOS: z.string(),
+          processPath: z.string(),
+          bundleId: z.string(),
+          focusIdentification: z.literal("public-ax-owner-geometry"),
         })
         .optional(),
       permissions: z.record(z.string(), nativeErrorSchema.shape.permission),
@@ -123,6 +142,7 @@ export const nativeCaptureSchema = z.object({
       boundsKind: z.enum(["window", "portal-source"]),
       captureBounds: boundsSchema.optional(),
       dpi: z.number().int().positive().optional(),
+      displayScale: z.number().positive().optional(),
       pixelToInput: z.object({
         scaleX: z.number().positive(),
         scaleY: z.number().positive(),
@@ -134,7 +154,7 @@ export const nativeCaptureSchema = z.object({
 });
 export interface NativeApplicationIdentity {
   id: string;
-  kind: "wm-class" | "process-name" | "owner-name" | "pid-only";
+  kind: "wm-class" | "process-name" | "owner-name" | "pid-only" | "bundle-id";
   pid?: number;
 }
 export interface NativeDiagnostics {
@@ -144,6 +164,16 @@ export interface NativeDiagnostics {
     interactiveDesktop: boolean;
     perMonitorV2: boolean;
     captureLibraryVersion?: string;
+  };
+  macos?: {
+    screenRecording: NativeErrorDetails["permission"];
+    accessibility: NativeErrorDetails["permission"];
+    interactiveSession: boolean;
+    framework: "ScreenCaptureKit";
+    minimumOS: string;
+    processPath: string;
+    bundleId: string;
+    focusIdentification: "public-ax-owner-geometry";
   };
   permissions?: Record<string, NativeErrorDetails["permission"]>;
   operations?: Record<
@@ -167,6 +197,7 @@ export interface NativeCaptureMetadata {
     boundsKind: "window" | "portal-source";
     captureBounds?: { x: number; y: number; width: number; height: number };
     dpi?: number;
+    displayScale?: number;
     pixelToInput: {
       scaleX: number;
       scaleY: number;

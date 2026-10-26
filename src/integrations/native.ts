@@ -781,6 +781,8 @@ export class NativeAdapter {
             : this.helper?.backend) ||
         (sourceFrame.native?.geometry.dpi !== undefined &&
           sourceFrame.native.geometry.dpi !== window.dpi) ||
+        (sourceFrame.native?.geometry.displayScale !== undefined &&
+          sourceFrame.native.geometry.displayScale !== window.displayScale) ||
         JSON.stringify(sourceFrame.native?.application ?? null) !==
           JSON.stringify(window.applicationIdentity ?? null) ||
         (sourceFrame.bounds &&

@@ -22,7 +22,8 @@
     "test:native": "node scripts/native-harness.mjs",
     "test:native:windows": "node scripts/windows-native-matrix.mjs",
     "format": "prettier --write src tests scripts docs README.md package.json *.json *.ts *.html .github/workflows/*.yml",
-    "install:browser": "playwright install chromium"
+    "install:browser": "playwright install chromium",
+    "test:native:macos": "node scripts/macos-native-matrix.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.85",
@@ -88,9 +89,9 @@
       ],
       "category": "public.app-category.productivity",
       "extendInfo": {
-        "NSAppleEventsUsageDescription": "Relay controls applications you select for automation.",
         "NSScreenCaptureUsageDescription": "Relay captures selected windows for recording and visual detection."
-      }
+      },
+      "minimumSystemVersion": "14.0.0"
     }
   },
   "devDependencies": {

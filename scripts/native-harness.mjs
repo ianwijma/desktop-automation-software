@@ -28,7 +28,10 @@ assert.ok(
   ),
   "Invalid fixture position",
 );
-assert.ok(["electron", "win32"].includes(fixtureKind), "Unknown fixture");
+assert.ok(
+  ["electron", "win32", "appkit"].includes(fixtureKind),
+  "Unknown fixture",
+);
 assert.ok(
   ["wgc", "printwindow"].includes(captureBackend),
   "Unknown capture backend",
@@ -172,15 +175,19 @@ if (!args.has("--run")) {
         "win32",
         "The native control fixture requires Windows",
       );
+    if (fixtureKind === "appkit")
+      assert.equal(process.platform, "darwin", "AppKit fixture requires macOS");
     const fixture =
-      fixtureKind === "win32"
-        ? path.resolve(
-            path.dirname(adapter.binaryPath),
-            "relay-native-fixture.exe",
-          )
-        : path.resolve("tests/fixtures/native-desktop/main.cjs");
+      fixtureKind === "appkit"
+        ? path.resolve(path.dirname(adapter.binaryPath), "relay-appkit-fixture")
+        : fixtureKind === "win32"
+          ? path.resolve(
+              path.dirname(adapter.binaryPath),
+              "relay-native-fixture.exe",
+            )
+          : path.resolve("tests/fixtures/native-desktop/main.cjs");
     const fixtureHash = createHash("sha256");
-    if (fixtureKind === "win32") fixtureHash.update(await readFile(fixture));
+    if (fixtureKind !== "electron") fixtureHash.update(await readFile(fixture));
     else
       for (const name of ["main.cjs", "preload.cjs", "index.html"])
         fixtureHash.update(
@@ -224,7 +231,15 @@ if (!args.has("--run")) {
       (!capabilities.native.windows?.interactiveDesktop ||
         !capabilities.native.windows?.perMonitorV2 ||
         (captureBackend === "wgc" && !capabilities.capture));
-    if (unavailableWindows && args.has("--allow-unavailable")) {
+    const unavailableMac =
+      capabilities.native?.helper?.backend === "macos-screencapturekit" &&
+      (!capabilities.capture ||
+        !capabilities.input ||
+        !capabilities.native?.macos?.interactiveSession);
+    if (
+      (unavailableWindows || unavailableMac) &&
+      args.has("--allow-unavailable")
+    ) {
       report.checks.push({
         name: "desktop-capture-and-input",
         status: "not-run",
@@ -264,11 +279,11 @@ if (!args.has("--run")) {
         launch: {
           [process.platform]: {
             command:
-              fixtureKind === "win32"
+              fixtureKind !== "electron"
                 ? fixture
                 : createRequire(import.meta.url)("electron"),
             args:
-              fixtureKind === "win32"
+              fixtureKind !== "electron"
                 ? [configFile]
                 : [
                     "--no-sandbox",
@@ -383,10 +398,9 @@ if (!args.has("--run")) {
             };
           },
         );
-        const sampleText =
-          process.platform === "win32"
-            ? "Relay fixture 日本語 😀42"
-            : "Relay fixture text 42";
+        const sampleText = ["win32", "darwin"].includes(process.platform)
+          ? "Relay fixture 日本語 😀42"
+          : "Relay fixture text 42";
         if (captured) {
           await check("click-type-secure-field-scroll-drag", async () => {
             await adapter.execute(
@@ -426,7 +440,8 @@ if (!args.has("--run")) {
           await check("animated-graphics-capture", async () => {
             const initial = await control();
             assert.ok(
-              initial.gpu || initial.renderSurface === "native-gdi",
+              initial.gpu ||
+                ["native-gdi", "native-appkit"].includes(initial.renderSurface),
               "Graphics surface unavailable",
             );
             const gpu = await point("gpu");
@@ -484,21 +499,27 @@ if (!args.has("--run")) {
             );
             return { before: old.bounds, after: frame.bounds };
           });
-          if (process.platform === "win32")
+          if (["win32", "darwin"].includes(process.platform))
             await check("capture-loss-and-explicit-recovery", async () => {
               await control("/minimize", "POST");
               await poll(control, (s) => s.minimized);
               await assert.rejects(adapter.capture(target), (error) =>
-                ["CAPTURE_LOST", "CAPTURE_UNAVAILABLE"].includes(
-                  error.details?.code,
-                ),
+                [
+                  "CAPTURE_LOST",
+                  "CAPTURE_UNAVAILABLE",
+                  "TARGET_UNAVAILABLE",
+                ].includes(error.details?.code),
               );
               await control("/restore", "POST");
               await poll(control, (s) => !s.minimized && s.focused);
               frame = await adapter.capture(target);
               assert.equal(
                 frame.native.backend,
-                captureBackend === "wgc" ? "win32-wgc" : "win32-printwindow",
+                process.platform === "darwin"
+                  ? "macos-screencapturekit"
+                  : captureBackend === "wgc"
+                    ? "win32-wgc"
+                    : "win32-printwindow",
               );
             });
           await check("held-input-cancellation-and-release", async () => {
