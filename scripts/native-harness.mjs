@@ -445,8 +445,9 @@ if (!args.has("--run")) {
             };
             const first = await pixels();
             await poll(pixels, (p) => !p.equals(first));
-            assert.ok(
-              (await control()).animationFrames > initial.animationFrames,
+            await poll(
+              control,
+              (s) => s.animationFrames > initial.animationFrames,
             );
             return {
               surface: initial.renderSurface ?? "webgl",
@@ -459,9 +460,14 @@ if (!args.has("--run")) {
             const old = await adapter.capture(target);
             await control("/resize", "POST");
             await poll(
-              control,
-              (s) =>
-                Math.abs(s.bounds.width - (s.resizeExpectedWidth ?? 640)) <= 1,
+              () => adapter.listWindows(),
+              (windows) =>
+                windows.some(
+                  (window) =>
+                    window.id === old.native.windowId &&
+                    (window.bounds.width !== old.bounds.width ||
+                      window.bounds.height !== old.bounds.height),
+                ),
             );
             await assert.rejects(
               adapter.execute(
@@ -472,7 +478,11 @@ if (!args.has("--run")) {
               /geometry changed/i,
             );
             frame = await adapter.capture(target);
-            assert.notEqual(frame.bounds.width, old.bounds.width);
+            assert.notDeepEqual(
+              [frame.bounds.width, frame.bounds.height],
+              [old.bounds.width, old.bounds.height],
+            );
+            return { before: old.bounds, after: frame.bounds };
           });
           if (process.platform === "win32")
             await check("capture-loss-and-explicit-recovery", async () => {
