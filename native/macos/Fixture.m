@@ -134,12 +134,12 @@ static NSRect R(double x, double y, double w, double h) {
     return NSMakeRect(x * ContentScale, y * ContentScale, w * ContentScale, h * ContentScale);
 }
 static NSWindow *NewWindow(void) {
-    NSWindow *w =
-        [[NSWindow alloc] initWithContentRect:R(0, 0, 700, 560)
-                                    styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
-                                              NSWindowStyleMaskResizable
-                                      backing:NSBackingStoreBuffered
-                                        defer:NO];
+    NSWindow *w = [[NSWindow alloc]
+        initWithContentRect:R(0, 0, 700, 560)
+                  styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                            NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
     w.releasedWhenClosed = NO;
     w.title = Config[@"title"];
     [w setFrameTopLeftPoint:NSMakePoint([Config[@"position"][@"x"] doubleValue],
@@ -335,12 +335,14 @@ static void Serve(int listener) {
     Animated *gpu = [[Animated alloc] initWithFrame:R(450, 240, 200, 160)];
     [root addSubview:gpu];
     Controls[@"gpu"] = gpu;
-    [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskFlagsChanged
+    [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskFlagsChanged | NSEventMaskMouseMoved |
+                                                  NSEventMaskLeftMouseDragged
                                           handler:^NSEvent *(NSEvent *event) {
                                             ShiftObserved = (event.modifierFlags &
                                                              NSEventModifierFlagShift) != 0;
                                             return event;
                                           }];
+    Window.acceptsMouseMovedEvents = YES;
     [Window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
     [NSTimer scheduledTimerWithTimeInterval:1. / 15

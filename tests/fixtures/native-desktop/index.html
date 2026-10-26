@@ -153,6 +153,12 @@
       state.buttons = event.buttons;
       report();
     });
+    document.addEventListener("pointermove", (event) => {
+      // Observe modifier effects on actual application pointer events as well as keys.
+      if (event.shiftKey) held.set("pointer-shift", "Shift");
+      else held.delete("pointer-shift");
+      report();
+    });
     window.onresize = report;
     function animate(time) {
       state.animationFrames++;

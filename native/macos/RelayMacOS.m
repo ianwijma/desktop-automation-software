@@ -235,6 +235,10 @@ static BOOL FrameLost(SCFrameStatus status) {
     return status != SCFrameStatusComplete && status != SCFrameStatusIdle &&
            status != SCFrameStatusStarted;
 }
+static BOOL AlreadyStopped(NSError *error) {
+    return [error.domain isEqual:SCStreamErrorDomain] &&
+           error.code == SCStreamErrorAttemptToStopStreamState;
+}
 @interface RelayCapture : NSObject <SCStreamOutput, SCStreamDelegate> {
     CVPixelBufferRef latest;
 }
@@ -312,9 +316,11 @@ static BOOL FrameLost(SCFrameStatus status) {
         latest = NULL;
     }
     [_lock unlock];
-    if (s && Await(^(void (^done)(NSError *)) {
-          [s stopCaptureWithCompletionHandler:done];
-        }))
+    NSError *error = s ? Await(^(void (^done)(NSError *)) {
+      [s stopCaptureWithCompletionHandler:done];
+    })
+                       : nil;
+    if (error && !AlreadyStopped(error))
         Fail(@"CAPTURE_LOST");
 }
 - (void)start:(NSDictionary *)w {
@@ -592,7 +598,7 @@ static void PostFlags(CGEventRef event, CGEventFlags flags) {
         Fail(@"AX_REQUIRED");
     }
     CGEventSetIntegerValueField(event, kCGEventSourceUserData, 0x52454c4159);
-    CGEventSetFlags(event, flags);
+    CGEventSetFlags(event, flags | kCGEventFlagMaskNonCoalesced);
     CGEventPost(kCGHIDEventTap, event);
     CFRelease(event);
 }
@@ -605,8 +611,6 @@ static void Key(CGKeyCode code, BOOL down) {
         if (down || owned.unsignedShortValue != code)
             flags |= Modifier(owned.unsignedShortValue);
     CGEventRef event = CGEventCreateKeyboardEvent(NULL, code, down);
-    if (event && Modifier(code))
-        CGEventSetType(event, kCGEventFlagsChanged);
     PostFlags(event, flags);
     if (!down)
         [Keys removeObject:@(code)];
@@ -890,6 +894,13 @@ static id Selftest(void) {
     if (FrameLost(SCFrameStatusComplete) || FrameLost(SCFrameStatusIdle) ||
         !FrameLost(SCFrameStatusBlank) || !FrameLost(SCFrameStatusSuspended) ||
         !FrameLost(SCFrameStatusStopped))
+        Fail(@"BACKEND_FAILURE");
+    if (!AlreadyStopped([NSError errorWithDomain:SCStreamErrorDomain
+                                            code:SCStreamErrorAttemptToStopStreamState
+                                        userInfo:nil]) ||
+        AlreadyStopped([NSError errorWithDomain:SCStreamErrorDomain
+                                           code:SCStreamErrorInternalError
+                                       userInfo:nil]))
         Fail(@"BACKEND_FAILURE");
     return @YES;
 }

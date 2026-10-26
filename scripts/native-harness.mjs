@@ -558,6 +558,7 @@ if (!args.has("--run")) {
                 { key: "Shift", action: "down" },
                 target,
               );
+              await adapter.execute("move", await point("drag"), target);
               await poll(
                 control,
                 (s) => s.held.includes("Shift"),
@@ -594,6 +595,7 @@ if (!args.has("--run")) {
               if (outcome) await outcome;
               await adapter.releaseAll();
             }
+            await adapter.execute("move", await point("drag"), target);
             await poll(
               control,
               (s) => s.buttons === 0 && s.held.length === 0,
