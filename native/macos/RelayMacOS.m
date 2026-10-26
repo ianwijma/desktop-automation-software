@@ -624,6 +624,11 @@ static void Mouse(CGEventType type, CGPoint point, CGMouseButton button, BOOL do
         [Buttons removeObject:@(button)];
 }
 static void ExternalModifiers(void) {
+    for (NSNumber *key in @[ @54, @55, @56, @58, @59, @60, @61, @62 ])
+        if (CGEventSourceKeyState(kCGEventSourceStateCombinedSessionState,
+                                  key.unsignedShortValue) &&
+            ![Keys containsObject:key])
+            Fail(@"INPUT_BUSY");
     CGEventFlags mask = kCGEventFlagMaskCommand | kCGEventFlagMaskControl | kCGEventFlagMaskShift |
                         kCGEventFlagMaskAlternate;
     if (CGEventSourceFlagsState(kCGEventSourceStateCombinedSessionState) & mask & ~OwnedFlags())

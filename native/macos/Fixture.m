@@ -179,7 +179,7 @@ static NSDictionary *Snapshot(void) {
         @"secureHasValue" : Secure.stringValue.length > 0 ? @YES : @NO,
         @"scrollTop" : @(scroll.contentView.bounds.origin.y),
         @"drags" : @(Drags),
-        @"buttons" : Pressed ? @YES : @NO,
+        @"buttons" : @(Pressed ? 1 : 0),
         @"held" : held,
         @"animationFrames" : @(Frames),
         @"gpu" : gpu.metal != nil ? @YES : @NO,
