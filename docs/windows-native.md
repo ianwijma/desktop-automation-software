@@ -19,7 +19,7 @@ Capture metadata must match the helper instance, target/backend, owner, dimensio
 
 Input requires an unlocked interactive desktop and a target at equal or lower integrity. Unknown privilege fails closed. Relay verifies foreground acquisition instead of bypassing foreground restrictions. `SendInput` must acknowledge every event; partial insertion is an error and is never retried as an action. Accepted key/button downs remain owned until their ups are acknowledged. Unicode text uses UTF-16 events, and supported key chords are completely validated before any down event. Cancellation waits for cleanup; a failed cleanup blocks further desktop input.
 
-Passive capability checks describe prerequisites, not verified behavior. Disposing a helper that never attempted input stops capture resources without sending global key/button releases. `releaseCapture` is a protocol-2 operation; emergency input cleanup remains separate. Direct Windows recording and UIA selectors remain N08 and N05 respectively.
+Passive capability checks describe prerequisites, not verified behavior. Disposing a helper that never attempted input stops capture resources without sending global key/button releases. `releaseCapture` is a protocol-2 operation; emergency input cleanup remains separate. Direct Windows recording remains N08. N05 adds [semantic UIA locators and the preview picker](native-locators.md) through a dedicated MTA worker.
 
 ## Qualification commands
 

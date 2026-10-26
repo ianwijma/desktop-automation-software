@@ -128,10 +128,29 @@ fn point(p: &Value, id: &str, xkey: &str, ykey: &str) -> Result<(i64, i64)> {
     ))
 }
 fn mouse_to(x: i64, y: i64) -> Result<String> {
-    run(
+    // Older xdotool --sync waits for movement even when already at the target.
+    // A query in the same X connection acknowledges the warp without that wait.
+    let output = run(
         "xdotool",
-        &["mousemove", "--sync", &x.to_string(), &y.to_string()],
-    )
+        &[
+            "mousemove",
+            "--",
+            &x.to_string(),
+            &y.to_string(),
+            "getmouselocation",
+            "--shell",
+        ],
+    )?;
+    let coordinate = |prefix: &str| {
+        output.lines().find_map(|line| {
+            line.strip_prefix(prefix)
+                .and_then(|v| v.parse::<i64>().ok())
+        })
+    };
+    if coordinate("X=") != Some(x) || coordinate("Y=") != Some(y) {
+        return Err("X11 pointer position was not acknowledged".into());
+    }
+    Ok(output)
 }
 pub fn input(p: &Value) -> Result<Value> {
     if super::wayland::is_wayland() {

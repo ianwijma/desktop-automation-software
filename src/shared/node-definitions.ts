@@ -6,6 +6,7 @@ import type {
   TargetDescriptor,
   ValidationIssue,
 } from "./types";
+import { nativeLocatorSchema } from "./native-locators";
 import { browserLocatorSchema } from "./browser-locators";
 
 /** Shared by the editor, import/preflight validation and runtime; no renderer dependencies. */
@@ -73,7 +74,13 @@ export interface OutputSpec {
   optional?: boolean;
 }
 export type CapabilityRequirement =
-  "input" | "capture" | "browser" | "ai.text" | "ai.vision" | "ai.structured";
+  | "accessibility"
+  | "input"
+  | "capture"
+  | "browser"
+  | "ai.text"
+  | "ai.vision"
+  | "ai.structured";
 export interface NodeRequirements {
   target?: { kinds: TargetDescriptor["kind"][]; required: boolean };
   capabilities: CapabilityRequirement[];
@@ -285,7 +292,7 @@ const definitions: Record<NodeKind, DefinitionMetadata> = {
   },
   select: {
     label: "Select option",
-    description: "Choose a value in a browser select field.",
+    description: "Choose a browser option or a native selection item.",
     group: "Browser",
     defaults: { targetId: "", selector: "", value: "" },
     fields: [
@@ -535,6 +542,11 @@ export function nodeRequirements(
       ],
     };
   }
+  if (config.nativeLocator !== undefined)
+    return {
+      target: { kinds: ["desktop"], required: true },
+      capabilities: ["accessibility"],
+    };
   const detector = kind === "detect" || kind === "wait";
   const browser =
     browserKinds.has(kind) ||
@@ -621,6 +633,45 @@ export function validateNodeConfig(
     if (value !== undefined && !reference(value) && !object(value))
       error(`${key} must be an object`);
   };
+  if (present(config.nativeLocator)) {
+    if (
+      !(
+        typeof config.nativeLocator === "string" &&
+        reference(config.nativeLocator)
+      ) &&
+      !nativeLocatorSchema.safeParse(config.nativeLocator).success
+    )
+      error(
+        "Native locator is invalid; use semantic properties, not object pointers",
+      );
+    if (
+      !["click", "type", "read", "select", "detect", "wait"].includes(kind) ||
+      (["detect", "wait"].includes(kind) && config.detector !== "element")
+    )
+      error("This node has no supported native semantic action");
+    if (
+      config.locator ||
+      config.selector ||
+      config.detection ||
+      config.checked !== undefined ||
+      config.modifiers
+    )
+      error(
+        "Choose one native locator, browser locator or coordinate detection source",
+      );
+    if (
+      kind === "click" &&
+      ((config.button && config.button !== "left") ||
+        Number(config.clickCount ?? 1) !== 1)
+    )
+      error(
+        "Native Invoke does not support pointer buttons or repeated clicks",
+      );
+    if (kind === "select" && config.value !== undefined && config.value !== "")
+      error(
+        "Native Select selects the matched item; remove the browser option value",
+      );
+  }
   numeric("timeoutMs", Number.MIN_VALUE);
   if (config.requiresConfiguration === true)
     error(
@@ -749,7 +800,12 @@ export function validateNodeConfig(
     )
       error("Launch args must be an array of strings");
   }
-  if (kind === "select" && context && !present(config.locator))
+  if (
+    kind === "select" &&
+    context &&
+    !present(config.locator) &&
+    !present(config.nativeLocator)
+  )
     required("selector", "Choose a browser element selector");
   if (kind === "tab") {
     choice("action", ["new", "close", "switch"]);
@@ -857,7 +913,12 @@ export function validateNodeConfig(
         !/^data:image\/(png|jpeg);base64,/.test(config.template))
     )
       error("Template must be a PNG or JPEG data URL");
-    if (context && type === "element" && !present(config.locator))
+    if (
+      context &&
+      type === "element" &&
+      !present(config.locator) &&
+      !present(config.nativeLocator)
+    )
       required("selector", "Element detection requires a browser selector");
     if (context && type === "text" && !present(config.text ?? config.prompt))
       error("Enter the text to detect");
@@ -925,7 +986,7 @@ export function validateNodeConfig(
       else {
         if (!requirements.target.kinds.includes(target.kind))
           error(
-            `${definitions[kind].label} requires a browser target for this configuration`,
+            `${definitions[kind].label} requires a ${config.nativeLocator ? "desktop" : "browser"} target for this configuration`,
           );
         if (target.kind === "desktop" && target.browserMode !== undefined)
           error("A desktop target cannot use a browser connection mode");

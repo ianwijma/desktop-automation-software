@@ -138,7 +138,7 @@ describe.skipIf(!supported)(
         ],
         { env, stdio: "ignore" },
       );
-      native = new NativeAdapter({ binaryPath: binary, env });
+      native = new NativeAdapter({ binaryPath: binary, env, timeoutMs: 5000 });
       for (let attempt = 0; attempt < 30; attempt++) {
         if (
           (await native.listWindows()).some(
@@ -280,9 +280,16 @@ describe.skipIf(!supported)(
       await new Promise((resolve) => setTimeout(resolve, 100));
       expect(current).toHaveLength(count);
     }, 10000);
-    it("waits for cancelled native work to release held keys before allowing new input", async () => {
+    it("waits for cancelled native work to release held keys before allowing new input", async ({
+      onTestFailed,
+    }) => {
+      let phase = "hold key";
+      onTestFailed(() =>
+        console.error(`Isolated native cleanup phase: ${phase}`),
+      );
       await native.execute("key", { key: "a", action: "down" }, target);
       const abort = new AbortController();
+      phase = "cancel drag";
       const drag = native.execute(
         "drag",
         { x: 20, y: 20, toX: 80, toY: 40, durationMs: 2000 },
@@ -291,15 +298,26 @@ describe.skipIf(!supported)(
       );
       setTimeout(() => abort.abort(), 100);
       await expect(drag).rejects.toThrow("Cancelled");
+      phase = "release barrier";
       await native.releaseAll();
+      phase = "query held keys";
       const keyboard = execFileSync(
         "xinput",
         ["query-state", "Virtual core XTEST keyboard"],
         { env, encoding: "utf8" },
       );
       expect(keyboard).not.toMatch(/key\[\d+\]=down/);
+      phase = "resume pointer";
       await expect(
         native.execute("move", { x: 30, y: 30 }, target),
+      ).resolves.toBe(true);
+    });
+    it("acknowledges repeated movement to the same point without waiting for unrelated motion", async () => {
+      await expect(
+        native.execute("move", { x: 40, y: 50 }, target),
+      ).resolves.toBe(true);
+      await expect(
+        native.execute("move", { x: 40, y: 50 }, target),
       ).resolves.toBe(true);
     });
     it("sends a real key event to the selected window without touching the user desktop", async () => {

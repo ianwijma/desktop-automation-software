@@ -321,6 +321,10 @@ export interface RelayAPI {
   browserBridge(): Promise<{ port: number; token: string; connected: boolean }>;
   capture(targetId: string): Promise<CaptureFrame>;
   testDetector(config: Record<string, Json>): Promise<DetectionResult>;
+  inspectNativeLocator(
+    targetId: string,
+    query: import("./native-locators").NativeInspectionQuery,
+  ): Promise<import("./native-locators").NativeLocatorInspection>;
   inspectBrowserLocator(
     targetId: string,
     locator: BrowserLocator | string,

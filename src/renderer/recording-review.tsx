@@ -28,6 +28,10 @@ import {
 import { RecordingWarning } from "./recording-warning";
 import { RecordingPointSelect } from "./recording-point";
 import {
+  NativeLocatorField,
+  supportsNativeLocator,
+} from "./native-locator-field";
+import {
   BrowserLocatorField,
   supportsBrowserLocator,
 } from "./browser-locator-field";
@@ -701,8 +705,28 @@ function StepEditor({
             {fields
               .filter(
                 (field) =>
-                  field.key !== "selector" ||
-                  !supportsBrowserLocator(draft.kind, draft.config, workspace),
+                  !(
+                    supportsNativeLocator(
+                      draft.kind,
+                      draft.config,
+                      workspace,
+                    ) &&
+                    (field.key === "selector" ||
+                      (draft.config.nativeLocator &&
+                        [
+                          "x",
+                          "y",
+                          "button",
+                          "clickCount",
+                          "detection",
+                        ].includes(field.key)))
+                  ) &&
+                  (field.key !== "selector" ||
+                    !supportsBrowserLocator(
+                      draft.kind,
+                      draft.config,
+                      workspace,
+                    )),
               )
               .map((field) => {
                 const value = draft.config[field.key];
@@ -805,6 +829,19 @@ function StepEditor({
                   />
                 );
               })}
+            {supportsNativeLocator(draft.kind, draft.config, workspace) ? (
+              <NativeLocatorField
+                kind={draft.kind}
+                config={draft.config}
+                workspace={workspace}
+                tools={api}
+                onChange={(config) => {
+                  setDraft({ ...draft, config });
+                  setJson(JSON.stringify(config, null, 2));
+                  setError("");
+                }}
+              />
+            ) : null}
             {supportsBrowserLocator(draft.kind, draft.config, workspace) ? (
               <BrowserLocatorField
                 kind={draft.kind}

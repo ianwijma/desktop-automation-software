@@ -35,6 +35,10 @@ import type {
 } from "../shared/types";
 import { nodeOutputPorts } from "../shared/node-definitions";
 import { catalog, uid, type FieldSpec } from "./catalog";
+import {
+  NativeLocatorField,
+  supportsNativeLocator,
+} from "./native-locator-field";
 import { RecordingWarning } from "./recording-warning";
 import { ValueField } from "./value-field";
 import { ChildInputs, isRecord } from "./child-inputs";
@@ -699,6 +703,7 @@ export function Inspector({
   onDuplicate,
   onTest,
   onInspectLocator,
+  nativeTools,
   issues,
 }: {
   flow: FlowDefinition;
@@ -709,6 +714,10 @@ export function Inspector({
   onDuplicate: () => void;
   onTest: (config: Record<string, Json>) => void;
   onInspectLocator?: import("../shared/types").RelayAPI["inspectBrowserLocator"];
+  nativeTools?: Pick<
+    import("../shared/types").RelayAPI,
+    "capture" | "inspectNativeLocator"
+  >;
   issues: ValidationIssue[];
 }) {
   const [advanced, setAdvanced] = useState(false);
@@ -872,6 +881,22 @@ export function Inspector({
               )
               .filter((f) => {
                 if (
+                  supportsNativeLocator(node.kind, node.config, workspace) &&
+                  (f.key === "selector" ||
+                    (node.config.nativeLocator &&
+                      [
+                        "x",
+                        "y",
+                        "detection",
+                        "button",
+                        "clickCount",
+                        "value",
+                        "expectedWidth",
+                        "expectedHeight",
+                      ].includes(f.key)))
+                )
+                  return false;
+                if (
                   f.key === "selector" &&
                   supportsBrowserLocator(node.kind, node.config, workspace)
                 )
@@ -963,6 +988,16 @@ export function Inspector({
               config={node.config}
               onChange={(config) => update({ config })}
             />
+            {supportsNativeLocator(node.kind, node.config, workspace) ? (
+              <NativeLocatorField
+                key={`${node.id}-${node.config.targetId}`}
+                kind={node.kind}
+                config={node.config}
+                workspace={workspace}
+                onChange={(config) => update({ config })}
+                tools={nativeTools}
+              />
+            ) : null}
             {supportsBrowserLocator(node.kind, node.config, workspace) ? (
               <BrowserLocatorField
                 kind={node.kind}

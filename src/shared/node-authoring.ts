@@ -14,6 +14,7 @@ const detectorFields = [
   "watchId",
   "selector",
   "locator",
+  "nativeLocator",
   "connectionId",
   "locate",
 ];
@@ -26,6 +27,7 @@ const detectorOnlyFields: Record<string, readonly string[]> = {
   watchId: ["change"],
   selector: ["element"],
   locator: ["element"],
+  nativeLocator: ["element"],
   connectionId: ["ai"],
   locate: ["ai"],
   threshold: ["image", "color", "change", "ai"],

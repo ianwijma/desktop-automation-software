@@ -144,11 +144,12 @@ async function detect(
 ): Promise<DetectionResult> {
   const target = targetOverride ?? targetFor(config.targetId);
   if (config.detector === "element") {
-    if (target.kind !== "browser")
-      throw new Error(
-        "Element detection requires a browser target; use image or OCR detection for this desktop target.",
-      );
-    const value = await browser.execute("detect", config, target, signal);
+    const value = await (target.kind === "browser" ? browser : native).execute(
+      "detect",
+      config,
+      target,
+      signal,
+    );
     if (
       value &&
       typeof value === "object" &&
@@ -485,6 +486,19 @@ async function handle(method: string, args: unknown[]): Promise<unknown> {
     if (engine.isActive())
       throw new Error("Stop active workflows before testing a detector.");
     return detect(args[0] as Record<string, Json>);
+  }
+  if (method === "inspectNativeLocator") {
+    if (engine.isActive() || recordingLocked())
+      throw new Error(
+        "Stop active workflows and recording before inspecting native controls.",
+      );
+    const target = targetFor(args[0]);
+    if (target.kind !== "desktop")
+      throw new Error("Native inspection requires a desktop target.");
+    return native.inspectLocator(
+      target,
+      args[1] as import("../shared/native-locators").NativeInspectionQuery,
+    );
   }
   if (method === "inspectBrowserLocator") {
     const target = targetFor(args[0]);

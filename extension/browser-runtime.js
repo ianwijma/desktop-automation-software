@@ -1012,42 +1012,49 @@ export function browserRuntime(request) {
   if (request.operation === "frameGeometry") {
     element.scrollIntoView({ block: "center", inline: "center" });
     if (!visible(element)) throw new Error("The frame is not visible");
-    const view = element.ownerDocument.defaultView,
-      transform = view.getComputedStyle(element).transform;
-    if (transform !== "none") {
-      const matrix = new view.DOMMatrixReadOnly(transform);
-      if (
-        matrix.b ||
-        matrix.c ||
-        !matrix.is2D ||
-        matrix.a <= 0 ||
-        matrix.d <= 0
-      )
-        throw new Error(
-          "Rotated or mirrored frame coordinates are unsupported",
-        );
-    }
-    const bounds = element.getBoundingClientRect();
-    const scaleX = bounds.width / element.offsetWidth,
-      scaleY = bounds.height / element.offsetHeight;
-    if (
-      !Number.isFinite(scaleX) ||
-      !Number.isFinite(scaleY) ||
-      scaleX <= 0 ||
-      scaleY <= 0
-    )
-      throw new Error("Frame geometry is unavailable");
-    // The child renderer may receive CDP input before a parent's scroll is composited.
-    return new Promise((resolve) =>
+    const view = element.ownerDocument.defaultView;
+    // A parent scroll and a child renderer's hit-test surface can commit later.
+    // Measure AFTER this wait, so delayed layout cannot return stale offsets.
+    return new Promise((resolve, reject) =>
       view.requestAnimationFrame(() =>
-        view.requestAnimationFrame(() =>
-          resolve({
-            x: bounds.x + element.clientLeft * scaleX,
-            y: bounds.y + element.clientTop * scaleY,
-            scaleX,
-            scaleY,
-          }),
-        ),
+        view.requestAnimationFrame(() => {
+          try {
+            if (!element.isConnected || !visible(element))
+              throw new Error("The frame is not visible");
+            const transform = view.getComputedStyle(element).transform;
+            if (transform !== "none") {
+              const matrix = new view.DOMMatrixReadOnly(transform);
+              if (
+                matrix.b ||
+                matrix.c ||
+                !matrix.is2D ||
+                matrix.a <= 0 ||
+                matrix.d <= 0
+              )
+                throw new Error(
+                  "Rotated or mirrored frame coordinates are unsupported",
+                );
+            }
+            const bounds = element.getBoundingClientRect();
+            const scaleX = bounds.width / element.offsetWidth;
+            const scaleY = bounds.height / element.offsetHeight;
+            if (
+              !Number.isFinite(scaleX) ||
+              !Number.isFinite(scaleY) ||
+              scaleX <= 0 ||
+              scaleY <= 0
+            )
+              throw new Error("Frame geometry is unavailable");
+            resolve({
+              x: bounds.x + element.clientLeft * scaleX,
+              y: bounds.y + element.clientTop * scaleY,
+              scaleX,
+              scaleY,
+            });
+          } catch (error) {
+            reject(error);
+          }
+        }),
       ),
     );
   }

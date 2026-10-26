@@ -1045,6 +1045,7 @@ function App() {
                       onChange={change}
                       onDelete={deleteNode}
                       onDuplicate={duplicateNode}
+                      nativeTools={api}
                       onInspectLocator={(targetId, locator) =>
                         api.inspectBrowserLocator(targetId, locator)
                       }
