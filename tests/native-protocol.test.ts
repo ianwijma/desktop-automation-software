@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -38,13 +38,15 @@ async function mock(mode = "ok") {
     `
 const fs=require('node:fs');const {randomUUID}=require('node:crypto');const instance=randomUUID();
 const control=process.env.RELAY_PROTOCOL_CONTROL,log=process.env.RELAY_PROTOCOL_LOG;
+if(JSON.parse(fs.readFileSync(control,'utf8')).mode==='wayland')process.on('SIGTERM',()=>{const ack=JSON.parse(fs.readFileSync(control,'utf8')).cleanupAck!==false;fs.appendFileSync(log,JSON.stringify({method:'closeOwnedSession'})+'\\n');process.stdout.write(JSON.stringify({protocolVersion:2,event:'nativeCleanup',result:ack})+'\\n',()=>process.exit(ack?0:1));});
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
  const r=JSON.parse(line),s=JSON.parse(fs.readFileSync(control,'utf8'));fs.appendFileSync(log,JSON.stringify({method:r.method,params:r.params})+'\\n');
- const info={protocolVersion:2,helperVersion:'mock',instanceId:instance,platform:process.platform,backend:s.mode==='windows'?'win32-wgc':s.mode==='macos'?'macos-screencapturekit':'fixture',coordinateSpace:s.mode==='windows'?'physical-pixels':'logical-points'};
+ const wayland=s.mode==='wayland';
+ const info={protocolVersion:2,helperVersion:'mock',instanceId:instance,platform:process.platform,backend:wayland?'wayland-portal-gstreamer':s.mode==='windows'?'win32-wgc':s.mode==='macos'?'macos-screencapturekit':'fixture',coordinateSpace:wayland?'portal-source':s.mode==='windows'?'physical-pixels':'logical-points'};
  const window={id:'7',title:'Fixture',application:'test',applicationIdentity:{id:'test',kind:s.mode==='macos'?'bundle-id':'process-name',pid:s.pid},displayScale:s.displayScale??2,bounds:{x:-50,y:10,width:200,height:100},dpi:s.dpi??96};
  let result=true,error;
  if(r.method==='handshake') {if(s.mode==='hang')return;result={...info,...(s.mode==='bad-handshake'?{protocolVersion:3}:{})};}
- if(r.method==='capabilities')result={platform:process.platform,session:'fixture',capture:true,input:true,accessibility:false,directRecording:false,globalShortcuts:false,windows:[],reasons:[]};
+ if(r.method==='capabilities')result={platform:process.platform,session:wayland?'wayland':'fixture',capture:true,input:true,accessibility:false,directRecording:false,globalShortcuts:false,windows:[],reasons:[]};
  if(r.method==='capabilities'&&s.mode==='bad-caps')result.native={helper:info,permissions:{'private-credential-label':123},operations:{}};
  if(r.method==='listWindows')result=[window];
  if(r.method==='capture') {
@@ -52,7 +54,10 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
   result={width:cropped?380:400,height:cropped?360:s.mode==='macos'?200:400,capturedAt:Date.now(),bounds:window.bounds,dataUrl:'data:image/png;base64,synthetic',native:{helperInstanceId:instance,backend,windowId:'7',geometry:{inputSpace:info.coordinateSpace,captureSpace:'pixels',boundsKind:'window',dpi:window.dpi,...(s.mode==='macos'?{displayScale:window.displayScale}:{}),...(cropped?{captureBounds:{x:-45,y:15,width:190,height:90}}:{}),pixelToInput:{scaleX:s.mode==='bad-scale'?2:0.5,scaleY:s.mode==='macos'?0.5:0.25,...(cropped?{offsetX:5,offsetY:5}:{})}}}};
  }
 
- if(r.method==='input')result=r.params;
+ if(wayland&&r.method==='capture'&&s.hangCapture)return;
+ if(wayland&&r.method==='capture')result={width:300,height:150,capturedAt:Date.now(),bounds:{x:0,y:0,width:200,height:100},dataUrl:'data:image/png;base64,synthetic',native:{helperInstanceId:instance,backend:info.backend,windowId:r.params.windowId,...(s.missingSource?{}:{sourceToken:s.sourceToken??'grant-1'}),geometry:{inputSpace:'portal-source',captureSpace:'pixels',boundsKind:'portal-source',pixelToInput:{scaleX:2/3,scaleY:2/3}}}};
+ if(r.method==='input'){if(wayland&&s.hangInput)return;if(wayland&&s.revoked)error={code:'CAPTURE_LOST',message:'Granted source closed',operation:'input',backend:info.backend,permission:'required',retryable:false};else result=r.params;}
+
  if(r.method==='focus')error={code:'PERMISSION_DENIED',message:'Input permission denied',operation:'focus',backend:'fixture',permission:'denied',retryable:false};
  process.stdout.write(s.mode==='malformed'?'null\\n':JSON.stringify({protocolVersion:2,id:r.id,...(error?{error}:{result})})+'\\n');
 });`,
@@ -72,6 +77,181 @@ const target: TargetDescriptor = {
   kind: "desktop",
   windowTitle: "Fixture",
 };
+describe.skipIf(process.platform !== "linux")(
+  "Wayland native adapter boundary",
+  () => {
+    it("requires an explicit grant and retains fractional source mapping and identity", async () => {
+      const { adapter, log } = await mock("wayland");
+      await expect(adapter.execute("attach", {}, target)).rejects.toThrow(
+        /Wayland cannot attach by application or title/,
+      );
+      await expect(
+        adapter.execute("click", { x: 30, y: 15 }, target),
+      ).rejects.toThrow(/Capture this Wayland target/);
+      const frame = await adapter.capture(target);
+      expect(frame.native?.sourceToken).toBe("grant-1");
+      const result = await adapter.execute(
+        "click",
+        { x: 30, y: 15, frameId: frame.id },
+        target,
+      );
+      expect(result).toMatchObject({
+        x: 20,
+        y: 10,
+        sourceToken: "grant-1",
+        windowId: "portal:fixture",
+      });
+      const requests = (await readFile(log, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(requests.filter((r) => r.method === "capture")).toHaveLength(1);
+      expect(requests.filter((r) => r.method === "input")).toHaveLength(1);
+    });
+    it("invalidates a revoked grant without reopening a chooser on input", async () => {
+      const { adapter, control, log } = await mock("wayland");
+      const frame = await adapter.capture(target);
+      await writeFile(
+        control,
+        JSON.stringify({ mode: "wayland", pid: 1, revoked: true }),
+      );
+      await expect(
+        adapter.execute("click", { x: 30, y: 15, frameId: frame.id }, target),
+      ).rejects.toMatchObject({ details: { code: "CAPTURE_LOST" } });
+      await expect(
+        adapter.execute("click", { x: 30, y: 15 }, target),
+      ).rejects.toThrow(/Capture this Wayland target/);
+      await writeFile(
+        control,
+        JSON.stringify({ mode: "wayland", pid: 1, sourceToken: "grant-2" }),
+      );
+      const fresh = await adapter.capture(target);
+      await expect(
+        adapter.execute("click", { x: 30, y: 15, frameId: frame.id }, target),
+      ).rejects.toMatchObject({ details: { code: "STALE_CAPTURE" } });
+      expect(fresh.native?.sourceToken).toBe("grant-2");
+      expect(
+        (await readFile(log, "utf8"))
+          .trim()
+          .split("\n")
+          .map((l) => JSON.parse(l))
+          .filter((r) => r.method === "input"),
+      ).toHaveLength(1);
+    });
+    it("rejects a capture without granted source identity", async () => {
+      const { adapter, control } = await mock("wayland");
+      await writeFile(
+        control,
+        JSON.stringify({ mode: "wayland", pid: 1, missingSource: true }),
+      );
+      await expect(adapter.capture(target)).rejects.toMatchObject({
+        details: { code: "INVALID_REQUEST" },
+      });
+    });
+    it("waits for the original helper's cleanup acknowledgement after cancellation", async () => {
+      const { adapter, control, log } = await mock("wayland");
+      await adapter.capture(target);
+      await writeFile(
+        control,
+        JSON.stringify({ mode: "wayland", pid: 1, hangInput: true }),
+      );
+      const abort = new AbortController();
+      const result = adapter
+        .execute(
+          "drag",
+          { x: 30, y: 15, toX: 90, toY: 30, durationMs: 10000 },
+          target,
+          abort.signal,
+        )
+        .catch((error) => error);
+      await vi.waitFor(async () =>
+        expect(await readFile(log, "utf8")).toContain('"method":"input"'),
+      );
+      abort.abort();
+      expect((await result).message).toMatch(/Cancelled/);
+      await adapter.releaseAll();
+      const requests = (await readFile(log, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(
+        requests.filter((r) => r.method === "closeOwnedSession"),
+      ).toHaveLength(1);
+      expect(requests.filter((r) => r.method === "handshake")).toHaveLength(1);
+      expect(requests.filter((r) => r.method === "releaseKeys")).toHaveLength(
+        0,
+      );
+    });
+    it("Stop cancels a pending chooser without an action AbortSignal", async () => {
+      const { adapter, control, log } = await mock("wayland");
+      await adapter.capabilities();
+      await writeFile(
+        control,
+        JSON.stringify({ mode: "wayland", pid: 1, hangCapture: true }),
+      );
+      const capture = adapter.capture(target).catch((error) => error);
+      await vi.waitFor(async () =>
+        expect(await readFile(log, "utf8")).toContain('"method":"capture"'),
+      );
+      await adapter.releaseAll();
+      expect((await capture).details.code).toBe("CANCELLED");
+      expect(
+        (await readFile(log, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line))
+          .filter((r) => r.method === "closeOwnedSession"),
+      ).toHaveLength(1);
+    });
+    it("keeps failed cleanup blocked instead of spawning a grantless cleanup helper", async () => {
+      const { adapter, control, log } = await mock("wayland");
+      await adapter.capture(target);
+      await writeFile(
+        control,
+        JSON.stringify({
+          mode: "wayland",
+          pid: 1,
+          hangInput: true,
+          cleanupAck: false,
+        }),
+      );
+      const abort = new AbortController();
+      const result = adapter
+        .execute(
+          "drag",
+          { x: 30, y: 15, toX: 90, toY: 30 },
+          target,
+          abort.signal,
+        )
+        .catch((error) => error);
+      await vi.waitFor(async () =>
+        expect(await readFile(log, "utf8")).toContain('"method":"input"'),
+      );
+      abort.abort();
+      await result;
+      await expect(adapter.releaseAll()).rejects.toThrow(
+        /cleanup was not acknowledged/,
+      );
+      await expect(adapter.capture(target)).rejects.toThrow(
+        /cleanup was not acknowledged/,
+      );
+      expect(
+        (await readFile(log, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line))
+          .filter((r) => r.method === "handshake"),
+      ).toHaveLength(1);
+      // This deliberately poisoned adapter cannot acknowledge cleanup on disposal.
+      const index = resources.findIndex((r) => r.adapter === adapter);
+      const [resource] = resources.splice(index, 1);
+      await expect(adapter.dispose()).rejects.toThrow(
+        /cleanup was not acknowledged/,
+      );
+      await rm(resource.directory, { recursive: true, force: true });
+    });
+  },
+);
 describe("native adapter protocol boundary", () => {
   it.each(["bad-handshake", "malformed"])(
     "rejects %s before sending desktop operations",

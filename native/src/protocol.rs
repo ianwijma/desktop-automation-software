@@ -33,6 +33,25 @@ pub fn handshake() -> Value {
         "backend":backend(),"coordinateSpace":space})
 }
 pub fn error(method: &str, message: String) -> Value {
+    if let Some(kind) = message.strip_prefix("wayland:") {
+        let (code, safe, permission) = match kind {
+            "CANCELLED" => ("CANCELLED", "The Wayland chooser or operation was cancelled; no grant was reopened", "required"),
+            "PERMISSION_DENIED" => ("PERMISSION_DENIED", "The portal did not grant keyboard, pointer and capture access", "required"),
+            "SESSION_REQUIRED" => ("PERMISSION_DENIED", "Capture this Wayland target to explicitly select and grant a source before input", "required"),
+            "SESSION_CLOSED" | "EIS_LOST" => ("CAPTURE_LOST", "The Wayland grant, portal owner or EIS device was lost; input stopped. Explicitly recapture to request a new session", "required"),
+            "STALE_CAPTURE" | "GEOMETRY_UNKNOWN" => ("STALE_CAPTURE", "Wayland source geometry changed or could not be mapped exactly; explicitly recapture and detect again", "unknown"),
+            "CAPTURE_LOST" => ("CAPTURE_LOST", "The granted PipeWire stream ended; no other source was selected", "unknown"),
+            "CAPTURE_TIMEOUT" | "PORTAL_TIMEOUT" => ("TIMEOUT", "The Wayland portal or capture stream did not respond in time", "unknown"),
+            "MEDIA_REQUIRED" | "PORTAL_UNAVAILABLE" => ("DEPENDENCY_UNAVAILABLE", "Wayland RemoteDesktop/ScreenCast and GStreamer PipeWire/PNG plugins are required", "unknown"),
+            "CAPABILITY_MISSING" | "EIS_UNAVAILABLE" => ("UNSUPPORTED_OPERATION", "The portal or EIS connection lacks the required capability; no transport fallback was attempted", "unknown"),
+            "UNSUPPORTED_KEY" | "UNSUPPORTED_OPERATION" => ("UNSUPPORTED_OPERATION", "This Wayland operation, key, text character or keyboard layout is unsupported", "not-required"),
+            "INPUT_BUSY" => ("INPUT_REJECTED", "Wayland text input conflicts with held keys, modifiers or a nondefault keyboard layout", "unknown"),
+            "CLEANUP_FAILED" => ("INPUT_REJECTED", "Wayland input release or session closure was not acknowledged; further input remains blocked", "unknown"),
+            "INVALID_REQUEST" | "INVALID_COORDINATES" => ("INVALID_REQUEST", "Invalid Wayland request or coordinates outside the granted source", "unknown"),
+            _ => ("BACKEND_FAILURE", "A Wayland portal operation failed", "unknown"),
+        };
+        return json!({"code":code,"message":safe,"operation":method,"backend":backend(),"permission":permission,"retryable":false});
+    }
     if let Some(kind) = message.strip_prefix("macos:") {
         let (code, safe, permission) = match kind {
             "SCREEN_REQUIRED" => ("PERMISSION_DENIED", "Screen Recording permission is required for Relay and its helper; grant it in System Settings > Privacy & Security, then restart Relay", "required"),
@@ -151,8 +170,18 @@ pub fn capabilities(mut value: Value) -> Value {
         ("attach", !portal, desktop),
         ("focus", !portal, desktop && value["input"] == true),
         ("close", !portal, desktop),
-        ("capture", true, !portal && value["capture"] == true),
-        ("input", true, !portal && value["input"] == true),
+        (
+            "capture",
+            true,
+            value["capture"] == true
+                && (!portal || value["waylandBackend"]["permissionsGranted"] == true),
+        ),
+        (
+            "input",
+            true,
+            value["input"] == true
+                && (!portal || value["waylandBackend"]["permissionsGranted"] == true),
+        ),
         (
             "directRecording",
             cfg!(target_os = "linux") && !portal,
@@ -169,7 +198,11 @@ pub fn capabilities(mut value: Value) -> Value {
             "required"
         }
     } else if portal {
-        "required"
+        if value["waylandBackend"]["permissionsGranted"] == true {
+            "granted"
+        } else {
+            "required"
+        }
     } else if cfg!(target_os = "windows") {
         "unknown"
     } else {
@@ -182,13 +215,20 @@ pub fn capabilities(mut value: Value) -> Value {
             "required"
         }
     } else if portal {
-        "required"
+        if value["waylandBackend"]["permissionsGranted"] == true {
+            "granted"
+        } else {
+            "required"
+        }
     } else {
         "unknown"
     };
     value["native"] = json!({"helper":handshake(),"operations":operations,"permissions":{"capture":capture,"input":input}});
     if value["windowsBackend"].is_object() {
         value["native"]["windows"] = value["windowsBackend"].take();
+    }
+    if value["waylandBackend"].is_object() {
+        value["native"]["wayland"] = value["waylandBackend"].take();
     }
     if value["macosBackend"].is_object() {
         value["native"]["macos"] = value["macosBackend"].take();
@@ -224,6 +264,9 @@ pub fn capture(mut value: Value, p: &Value) -> Result<Value> {
     value["native"] = json!({"helperInstanceId":info["instanceId"],"backend":selected_backend,"windowId":p["windowId"],
         "geometry":{"inputSpace":info["coordinateSpace"],"captureSpace":"pixels","boundsKind":if backend().starts_with("wayland"){"portal-source"}else{"window"},
         "captureBounds":source,"pixelToInput":{"scaleX":num(&source,"width",0.)/width,"scaleY":num(&source,"height",0.)/height,"offsetX":num(&source,"x",0.)-num(&value["bounds"],"x",0.),"offsetY":num(&source,"y",0.)-num(&value["bounds"],"y",0.)}}});
+    if value["sourceToken"].is_string() {
+        value["native"]["sourceToken"] = value["sourceToken"].take();
+    }
     if let Some(dpi) = value["dpi"].as_u64() {
         value["native"]["geometry"]["dpi"] = json!(dpi);
     }
@@ -236,6 +279,24 @@ pub fn capture(mut value: Value, p: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wayland_errors_keep_recovery_boundaries_and_redact_payloads() {
+        for (kind, expected) in [
+            ("CANCELLED", "CANCELLED"),
+            ("SESSION_CLOSED", "CAPTURE_LOST"),
+            ("STALE_CAPTURE", "STALE_CAPTURE"),
+            ("CLEANUP_FAILED", "INPUT_REJECTED"),
+        ] {
+            let value = error("input", format!("wayland:{kind}"));
+            assert_eq!(value["code"], expected);
+            assert_eq!(value["retryable"], false);
+        }
+        let value = error(
+            "input",
+            "wayland:UNSUPPORTED_KEY private-key-or-typed-text".into(),
+        );
+        assert!(!value.to_string().contains("private-key-or-typed-text"));
+    }
     #[test]
     fn geometry_retains_independent_axis_scales_and_negative_origin() {
         let frame = capture(

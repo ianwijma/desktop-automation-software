@@ -382,7 +382,7 @@ pub fn record(p: Value, active: Arc<AtomicBool>) -> Result<thread::JoinHandle<()
 
 pub fn release_keys(p: &Value) -> Result<Value> {
     if super::wayland::is_wayland() {
-        return super::wayland::release_all();
+        return super::wayland::release_keys();
     }
     if x11().is_ok() {
         if let Some(keys) = p["keys"].as_array() {

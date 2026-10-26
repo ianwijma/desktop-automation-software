@@ -1,242 +1,382 @@
-//! Portal-authorized capture and input. Never fall back to privileged uinput or XWayland.
+//! Portal grants own capture and input. Capture explicitly opens/restores grants;
+//! input never prompts, reopens a lost grant, or falls back from established EIS.
 use super::*;
-use ashpd::desktop::{
-    remote_desktop::{
-        DeviceType, KeyState, NotifyPointerAxisOptions, RemoteDesktop, SelectDevicesOptions,
-    },
-    screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType},
-    Session,
+use super::{
+    wayland_capture::CaptureStream,
+    wayland_eis::Eis,
+    wayland_portal::{Grant, Portal},
 };
 use std::{
     collections::{HashMap, HashSet},
-    os::{
-        fd::{AsRawFd, OwnedFd},
-        unix::process::CommandExt,
-    },
-    sync::OnceLock,
+    sync::{atomic::AtomicU64, OnceLock},
 };
-struct PortalSession {
-    remote: RemoteDesktop,
-    session: Session<RemoteDesktop>,
-    fd: OwnedFd,
-    stream: u32,
-    width: i32,
-    height: i32,
-    keys: HashSet<i32>,
-}
+use zbus::zvariant::Value as BusValue;
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+static CANCEL: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 static SESSIONS: OnceLock<Mutex<HashMap<String, PortalSession>>> = OnceLock::new();
-fn runtime() -> &'static tokio::runtime::Runtime {
+static TOKENS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static EPOCH: AtomicU64 = AtomicU64::new(1);
+static CLEANUP_FAILED: AtomicBool = AtomicBool::new(false);
+pub fn runtime() -> &'static tokio::runtime::Runtime {
     RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect("Tokio runtime"))
 }
 fn sessions() -> &'static Mutex<HashMap<String, PortalSession>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
-fn error(e: impl std::fmt::Display) -> String {
-    format!("Wayland portal: {e}")
+fn tokens() -> &'static Mutex<HashMap<String, String>> {
+    TOKENS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+pub fn cancelled() -> bool {
+    CANCEL
+        .get()
+        .map(|v| v.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+pub fn install_shutdown_hook() -> Result<()> {
+    let flag = CANCEL.get_or_init(|| Arc::new(AtomicBool::new(false)));
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, flag.clone())
+        .map_err(|_| "wayland:CLEANUP_FAILED")?;
+    signal_hook::flag::register(signal_hook::consts::SIGINT, flag.clone())
+        .map_err(|_| "wayland:CLEANUP_FAILED")?;
+    Ok(())
+}
+fn detect_wayland(session: Option<&str>, display: Option<&str>) -> bool {
+    session == Some("wayland") || (session != Some("x11") && display.is_some_and(|v| !v.is_empty()))
 }
 pub fn is_wayland() -> bool {
-    std::env::var("WAYLAND_DISPLAY")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-        && std::env::var("XDG_SESSION_TYPE").unwrap_or_default() != "x11"
+    detect_wayland(
+        std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+        std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+    )
 }
-fn media_available() -> bool {
-    run("gst-inspect-1.0", &["pipewiresrc"]).is_ok() && run("gst-inspect-1.0", &["pngenc"]).is_ok()
+
+enum Transport {
+    Legacy,
+    Eis(Eis),
+}
+struct PortalSession {
+    portal: Portal,
+    grant: Grant,
+    capture: CaptureStream,
+    transport: Transport,
+    closed: Arc<AtomicBool>,
+    ended: Arc<AtomicBool>,
+    watcher: tokio::task::JoinHandle<()>,
+    epoch: String,
+    pixels: Option<(u32, u32)>,
+    keys: HashSet<u32>,
+    buttons: HashSet<u32>,
+    used: bool,
+}
+impl PortalSession {
+    fn check(&self) -> Result<()> {
+        if cancelled() {
+            return Err("wayland:CANCELLED".into());
+        }
+        if self.closed.load(Ordering::SeqCst) {
+            return Err("wayland:SESSION_CLOSED".into());
+        }
+        Ok(())
+    }
+    fn frame(&mut self) -> Result<super::wayland_capture::Frame> {
+        self.check()?;
+        let frame = self
+            .capture
+            .frame(|| cancelled() || self.closed.load(Ordering::SeqCst))
+            .map_err(|error| {
+                self.closed.store(true, Ordering::SeqCst);
+                error
+            })?;
+        if let Some(pixels) = self.pixels {
+            if pixels != (frame.width, frame.height) {
+                self.closed.store(true, Ordering::SeqCst);
+                self.capture.stop();
+                return Err("wayland:STALE_CAPTURE".into());
+            }
+        }
+        self.pixels = Some((frame.width, frame.height));
+        self.check()?;
+        Ok(frame)
+    }
+    fn token(&self) -> String {
+        let (w, h) = self.pixels.unwrap_or((0, 0));
+        format!("{}:{w}:{h}", self.epoch)
+    }
+    fn pointer(&self, x: f64, y: f64) -> Result<()> {
+        self.check()?;
+        if !x.is_finite()
+            || !y.is_finite()
+            || x < 0.
+            || y < 0.
+            || x >= self.grant.size.0 as f64
+            || y >= self.grant.size.1 as f64
+        {
+            return Err("wayland:INVALID_COORDINATES".into());
+        }
+        match &self.transport {
+            Transport::Eis(eis) => {
+                eis.pointer(x, y, self.grant.size, self.grant.mapping.as_deref())
+            }
+            Transport::Legacy => runtime().block_on(self.portal.notify(
+                "NotifyPointerMotionAbsolute",
+                &(
+                    &self.grant.path,
+                    HashMap::<&str, BusValue>::new(),
+                    self.grant.node,
+                    x,
+                    y,
+                ),
+            )),
+        }
+    }
+    fn button(&mut self, code: u32, down: bool) -> Result<()> {
+        if down {
+            self.buttons.insert(code);
+        }
+        let result = match &self.transport {
+            Transport::Eis(eis) => eis.button(code, down),
+            Transport::Legacy => runtime().block_on(self.portal.notify(
+                "NotifyPointerButton",
+                &(
+                    &self.grant.path,
+                    HashMap::<&str, BusValue>::new(),
+                    code as i32,
+                    u32::from(down),
+                ),
+            )),
+        };
+        if result.is_ok() && !down {
+            self.buttons.remove(&code);
+        }
+        result
+    }
+    fn lookup(&self, sym: u32) -> Result<u32> {
+        match &self.transport {
+            Transport::Eis(eis) => Ok(eis.lookup(sym)?.0),
+            Transport::Legacy => Ok(sym),
+        }
+    }
+    fn key(&mut self, code: u32, down: bool) -> Result<()> {
+        if down {
+            self.keys.insert(code);
+        }
+        let result = match &self.transport {
+            Transport::Eis(eis) => eis.keycode(code, down),
+            Transport::Legacy => runtime().block_on(self.portal.notify(
+                "NotifyKeyboardKeysym",
+                &(
+                    &self.grant.path,
+                    HashMap::<&str, BusValue>::new(),
+                    code as i32,
+                    u32::from(down),
+                ),
+            )),
+        };
+        if result.is_ok() && !down {
+            self.keys.remove(&code);
+        }
+        result
+    }
+    fn release(&mut self) -> Result<()> {
+        let mut failed = false;
+        let held = !self.keys.is_empty() || !self.buttons.is_empty();
+        for key in self.keys.clone() {
+            failed |= self.key(key, false).is_err();
+        }
+        for button in self.buttons.clone() {
+            failed |= self.button(button, false).is_err();
+        }
+        if held || (self.used && !self.ended.load(Ordering::SeqCst)) {
+            if let Transport::Eis(eis) = &self.transport {
+                failed |= eis.sync().is_err();
+            }
+        }
+        if failed {
+            return Err("wayland:CLEANUP_FAILED".into());
+        }
+        self.used = false;
+        Ok(())
+    }
+    fn close(&mut self) -> Result<()> {
+        let release = self.release();
+        let close = if self.ended.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            runtime().block_on(self.portal.close(&self.grant.path))
+        };
+        self.closed.store(true, Ordering::SeqCst);
+        self.capture.stop();
+        self.watcher.abort();
+        release?;
+        close
+    }
+}
+impl Drop for PortalSession {
+    fn drop(&mut self) {
+        self.watcher.abort();
+    }
+}
+fn target_id(p: &Value) -> Result<&str> {
+    let id = str_field(p, "windowId");
+    if id.starts_with("portal:") && id.len() > 7 && id.len() < 512 {
+        Ok(id)
+    } else {
+        Err("wayland:INVALID_REQUEST".into())
+    }
+}
+fn open(id: &str) -> Result<PortalSession> {
+    if !CaptureStream::available() {
+        return Err("wayland:MEDIA_REQUIRED".into());
+    }
+    // Single-use token is consumed before requesting restoration; never logged,
+    // returned to the renderer, saved in workflows, or reused after cancellation.
+    let restore = tokens()
+        .lock()
+        .map_err(|_| "wayland:BACKEND_FAILURE")?
+        .remove(id);
+    let (portal, grant, fd, eis_fd) = runtime().block_on(async {
+        let portal = Portal::new().await?;
+        let grant = portal.grant(restore.as_deref()).await?;
+        let result: Result<_> = async {
+            Ok((
+                portal.pipewire(&grant.path).await?,
+                portal.eis(&grant.path).await?,
+            ))
+        }
+        .await;
+        match result {
+            Ok((fd, eis)) => Ok((portal, grant, fd, eis)),
+            Err(error) => {
+                let _ = portal.close(&grant.path).await;
+                Err(error)
+            }
+        }
+    })?;
+    let closed = Arc::new(AtomicBool::new(false));
+    let ended = Arc::new(AtomicBool::new(false));
+    let result = (|| {
+        let capture = CaptureStream::start(fd, grant.node, grant.serial, closed.clone())?;
+        let watcher = runtime().block_on(portal.watch(
+            &grant.path,
+            closed.clone(),
+            ended.clone(),
+            capture.killer(),
+        ))?;
+        let transport = match eis_fd {
+            Some(fd) => match Eis::connect(fd, closed.clone()) {
+                Ok(eis) => Transport::Eis(eis),
+                Err(error) => {
+                    watcher.abort();
+                    return Err(error);
+                }
+            },
+            None => Transport::Legacy,
+        };
+        Ok((capture, watcher, transport))
+    })();
+    let (capture, watcher, transport) = match result {
+        Ok(v) => v,
+        Err(error) => {
+            let _ = runtime().block_on(portal.close(&grant.path));
+            return Err(error);
+        }
+    };
+    if let Some(token) = &grant.token {
+        let mut cache = tokens().lock().map_err(|_| "wayland:BACKEND_FAILURE")?;
+        if cache.len() >= 64 {
+            if let Some(old) = cache.keys().next().cloned() {
+                cache.remove(&old);
+            }
+        }
+        cache.insert(id.into(), token.clone());
+    }
+    Ok(PortalSession {
+        portal,
+        grant,
+        capture,
+        transport,
+        closed,
+        ended,
+        watcher,
+        epoch: format!(
+            "{}-{}",
+            std::process::id(),
+            EPOCH.fetch_add(1, Ordering::SeqCst)
+        ),
+        pixels: None,
+        keys: HashSet::new(),
+        buttons: HashSet::new(),
+        used: false,
+    })
 }
 pub fn capabilities() -> Result<Value> {
-    let check = runtime().block_on(async {
-        tokio::time::timeout(Duration::from_secs(3), async {
-            let remote = RemoteDesktop::new().await?;
-            let capture = Screencast::new().await?;
-            let devices = remote.available_device_types().await?;
-            let sources = capture.available_source_types().await?;
-            Ok::<_, ashpd::Error>((
-                devices.contains(DeviceType::Keyboard) && devices.contains(DeviceType::Pointer),
-                !sources.is_empty(),
-            ))
+    let portal = runtime().block_on(Portal::new());
+    let media = CaptureStream::available();
+    let (remote_version, cast_version, input, source) = portal
+        .as_ref()
+        .map(|p| {
+            (
+                p.remote_version,
+                p.cast_version,
+                p.devices & 3 == 3,
+                p.sources & 3 != 0,
+            )
         })
-        .await
-    });
-    let (input, capture, reason) = match check {
-        Ok(Ok((i, c))) => (i, c, String::new()),
-        Ok(Err(e)) => (false, false, error(e)),
-        Err(_) => (false, false, "Wayland portal did not respond".to_string()),
-    };
-    let media = media_available();
-    let mut reasons=vec!["Wayland asks you to grant capture and input for each target. Select a monitor for reliable multi-application automation; window source support depends on the compositor.".to_string(),"Wayland does not provide universal window enumeration, application focus, or passive global recording. Use guided recording; focus the target before typing.".to_string()];
-    if !reason.is_empty() {
-        reasons.push(reason)
-    }
-    if !media {
-        reasons.push(
-            "Install GStreamer with pipewiresrc and pngenc plugins for Wayland capture".into(),
-        )
-    }
+        .unwrap_or((0, 0, false, false));
+    let map = sessions().lock().map_err(|_| "wayland:BACKEND_FAILURE")?;
+    let active = map
+        .values()
+        .filter(|s| !s.closed.load(Ordering::SeqCst))
+        .count();
+    let transport = map
+        .values()
+        .find(|s| !s.closed.load(Ordering::SeqCst))
+        .map(|s| match s.transport {
+            Transport::Legacy => "legacy",
+            Transport::Eis(_) => "eis",
+        })
+        .unwrap_or("none");
     Ok(
-        json!({"platform":"linux","session":"wayland","capture":capture&&media,"input":input,"accessibility":false,"directRecording":false,"globalShortcuts":false,"windows":[],"reasons":reasons}),
+        json!({"platform":"linux","session":"wayland","capture":source&&media,"input":input,"accessibility":false,"directRecording":false,"globalShortcuts":false,"windows":[],
+    "reasons":["Capture a target to explicitly grant a portal source and input. Passive capability probes never open a chooser.","Wayland cannot enumerate/focus arbitrary windows or passively record global input. Focus the intended application before typing.",if media{"PipeWire capture uses one persistent restricted stream per grant."}else{"Install GStreamer pipewiresrc, videorate, videoconvert, pngenc and fdsink plugins."},if portal.is_ok(){"Portal service discovered; this is not consent or qualification."}else{"RemoteDesktop/ScreenCast portal is unavailable; check the desktop portal backend."}],
+    "waylandBackend":{"remoteDesktopVersion":remote_version,"screenCastVersion":cast_version,"mediaAvailable":media,"activeSessions":active,"inputTransport":transport,"restoration":"application-memory","permissionsGranted":active>0,"portalIdentity":portal.as_ref().map(|p|p.identity).unwrap_or("unregistered")}}),
     )
-}
-async fn open_session() -> Result<PortalSession> {
-    let remote = RemoteDesktop::new().await.map_err(error)?;
-    let cast = Screencast::new().await.map_err(error)?;
-    let session = remote
-        .create_session(Default::default())
-        .await
-        .map_err(error)?;
-    remote
-        .select_devices(
-            &session,
-            SelectDevicesOptions::default().set_devices(DeviceType::Keyboard | DeviceType::Pointer),
-        )
-        .await
-        .map_err(error)?
-        .response()
-        .map_err(error)?;
-    let sources = cast.available_source_types().await.map_err(error)?;
-    let requested = if sources.contains(SourceType::Window) {
-        SourceType::Monitor | SourceType::Window
-    } else {
-        SourceType::Monitor.into()
-    };
-    cast.select_sources(
-        &session,
-        SelectSourcesOptions::default()
-            .set_sources(requested)
-            .set_multiple(false)
-            .set_cursor_mode(CursorMode::Hidden),
-    )
-    .await
-    .map_err(error)?
-    .response()
-    .map_err(error)?;
-    let selected = remote
-        .start(&session, None, Default::default())
-        .await
-        .map_err(error)?
-        .response()
-        .map_err(error)?;
-    if !selected.devices().contains(DeviceType::Pointer)
-        || !selected.devices().contains(DeviceType::Keyboard)
-    {
-        let _ = session.close().await;
-        return Err("Keyboard and pointer access were not granted".into());
-    }
-    let stream = selected
-        .streams()
-        .first()
-        .ok_or("No capture source was granted")?;
-    let (width, height) = stream.size().unwrap_or((0, 0));
-    let stream_id = stream.pipe_wire_node_id();
-    let fd = cast
-        .open_pipe_wire_remote(&session, Default::default())
-        .await
-        .map_err(error)?;
-    Ok(PortalSession {
-        remote,
-        session,
-        fd,
-        stream: stream_id,
-        width,
-        height,
-        keys: HashSet::new(),
-    })
-}
-fn with_session<T>(p: &Value, f: impl FnOnce(&mut PortalSession) -> Result<T>) -> Result<T> {
-    let id = str_field(p, "windowId");
-    if !id.starts_with("portal:") {
-        return Err("A Wayland portal target is required".into());
-    }
-    let mut map = sessions().lock().map_err(error)?;
-    if !map.contains_key(id) {
-        let session = runtime().block_on(open_session())?;
-        map.insert(id.into(), session);
-    }
-    f(map.get_mut(id).unwrap())
 }
 pub fn capture(p: &Value) -> Result<Value> {
-    if !media_available() {
-        return Err("GStreamer pipewiresrc and pngenc are required for Wayland capture".into());
+    if CLEANUP_FAILED.load(Ordering::SeqCst) {
+        return Err("wayland:CLEANUP_FAILED".into());
     }
-    with_session(p, |session| {
-        let path = std::env::temp_dir().join(format!(
-            "relay-wayland-{}-{}.png",
-            std::process::id(),
-            now()
-        ));
-        // Pass the portal's restricted PipeWire remote over an inherited fd; do not use the unrestricted default remote.
-        let fd = session.fd.as_raw_fd();
-        let mut command = Command::new("gst-launch-1.0");
-        command.args([
-            "-q",
-            "pipewiresrc",
-            "fd=3",
-            &format!("path={}", session.stream),
-            "num-buffers=1",
-            "!",
-            "videoconvert",
-            "!",
-            "pngenc",
-            "!",
-            "filesink",
-            &format!("location={}", path.display()),
-        ]);
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        unsafe {
-            command.pre_exec(move || {
-                if fd != 3 && libc::dup2(fd, 3) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                if libc::fcntl(3, libc::F_SETFD, 0) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
+    let id = target_id(p)?;
+    let mut map = sessions().lock().map_err(|_| "wayland:BACKEND_FAILURE")?;
+    if map
+        .get(id)
+        .map(|s| s.closed.load(Ordering::SeqCst))
+        .unwrap_or(false)
+    {
+        if let Some(old) = map.get_mut(id) {
+            old.close().map_err(|error| {
+                CLEANUP_FAILED.store(true, Ordering::SeqCst);
+                error
+            })?;
         }
-        let mut child = command.spawn().map_err(error)?;
-        let started = std::time::Instant::now();
-        let status = loop {
-            if let Some(status) = child.try_wait().map_err(error)? {
-                break status;
-            }
-            if started.elapsed() > Duration::from_secs(8) {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = std::fs::remove_file(&path);
-                return Err(
-                    "Wayland capture timed out; the selected source may be closed or unavailable"
-                        .into(),
-                );
-            }
-            thread::sleep(Duration::from_millis(20));
-        };
-        if !status.success() {
-            let output = child.wait_with_output().map_err(error)?;
-            let _ = std::fs::remove_file(&path);
-            return Err(format!(
-                "PipeWire capture failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
+        map.remove(id);
+    }
+    if !map.contains_key(id) {
+        if map.len() >= 4 {
+            return Err("wayland:CAPABILITY_MISSING".into());
         }
-        let mut frame = capture_file(
-            &path,
-            json!({"x":0,"y":0,"width":session.width,"height":session.height}),
-        )?;
-        if session.width <= 0 || session.height <= 0 {
-            session.width = frame["width"].as_i64().unwrap_or(0) as i32;
-            session.height = frame["height"].as_i64().unwrap_or(0) as i32;
-            frame["bounds"] = json!({"x":0,"y":0,"width":session.width,"height":session.height});
-        }
-        Ok(frame)
-    })
+        map.insert(id.into(), open(id)?);
+    }
+    let s = map.get_mut(id).unwrap();
+    let frame = s.frame()?;
+    Ok(
+        json!({"width":frame.width,"height":frame.height,"capturedAt":frame.at,"dataUrl":format!("data:image/png;base64,{}",STANDARD.encode(&frame.png)),"bounds":{"x":0,"y":0,"width":s.grant.size.0,"height":s.grant.size.1},"sourceToken":s.token(),"sequence":frame.sequence}),
+    )
 }
-fn keysym(key: &str) -> Result<i32> {
+fn keysym(key: &str) -> Result<u32> {
     if key.chars().count() == 1 {
         let ch = key.chars().next().unwrap() as u32;
-        return Ok(if ch < 256 { ch } else { 0x01000000 | ch } as i32);
+        return Ok(if ch < 256 { ch } else { 0x01000000 | ch });
     }
     Ok(match key.to_ascii_lowercase().as_str() {
         "enter" | "return" => 0xff0d,
@@ -257,151 +397,338 @@ fn keysym(key: &str) -> Result<i32> {
         "ctrl" | "control" | "control_l" => 0xffe3,
         "alt" | "alt_l" => 0xffe9,
         "meta" | "super" | "super_l" => 0xffeb,
-        _ => return Err(format!("Unsupported Wayland key: {key}")),
+        "plus" => 43,
+        "f1" => 0xffbe,
+        "f2" => 0xffbf,
+        "f3" => 0xffc0,
+        "f4" => 0xffc1,
+        "f5" => 0xffc2,
+        "f6" => 0xffc3,
+        "f7" => 0xffc4,
+        "f8" => 0xffc5,
+        "f9" => 0xffc6,
+        "f10" => 0xffc7,
+        "f11" => 0xffc8,
+        "f12" => 0xffc9,
+        _ => return Err("wayland:UNSUPPORTED_KEY".into()),
     })
 }
-fn pointer(session: &PortalSession, x: f64, y: f64) -> Result<()> {
-    if x < 0. || y < 0. || x >= session.width as f64 || y >= session.height as f64 {
-        return Err("Input point is outside the granted Wayland source".into());
+fn pause(s: &PortalSession, millis: f64) -> Result<()> {
+    let until = std::time::Instant::now() + Duration::from_millis(millis.clamp(0., 120000.) as u64);
+    while std::time::Instant::now() < until {
+        s.check()?;
+        thread::sleep(Duration::from_millis(10));
     }
-    runtime()
-        .block_on(session.remote.notify_pointer_motion_absolute(
-            &session.session,
-            session.stream,
-            x,
-            y,
-            Default::default(),
-        ))
-        .map_err(error)
-}
-fn button(session: &PortalSession, button: i32, state: KeyState) -> Result<()> {
-    runtime()
-        .block_on(session.remote.notify_pointer_button(
-            &session.session,
-            button,
-            state,
-            Default::default(),
-        ))
-        .map_err(error)
-}
-fn key(session: &mut PortalSession, sym: i32, state: KeyState) -> Result<()> {
-    runtime()
-        .block_on(session.remote.notify_keyboard_keysym(
-            &session.session,
-            sym,
-            state,
-            Default::default(),
-        ))
-        .map_err(error)?;
-    if state == KeyState::Pressed {
-        session.keys.insert(sym);
-    } else {
-        session.keys.remove(&sym);
-    }
-    Ok(())
+    s.check()
 }
 pub fn input(p: &Value) -> Result<Value> {
-    with_session(p, |session| {
-        let kind = str_field(p, "kind");
-        let b = match str_field(p, "button") {
+    let id = target_id(p)?;
+    let mut map = sessions().lock().map_err(|_| "wayland:BACKEND_FAILURE")?;
+    let s = map.get_mut(id).ok_or("wayland:SESSION_REQUIRED")?;
+    let kind = str_field(p, "kind");
+    let result = (|| {
+        // Releases never open grants and remain allowed after a cancelled action.
+        if kind == "key" && str_field(p, "action") == "up" {
+            let codes = str_field(p, "key")
+                .split('+')
+                .map(|k| keysym(k).and_then(|sym| s.lookup(sym)))
+                .collect::<Result<Vec<_>>>()?;
+            if codes.is_empty()
+                || codes.len() > 16
+                || codes.iter().collect::<HashSet<_>>().len() != codes.len()
+            {
+                return Err("wayland:UNSUPPORTED_KEY".into());
+            }
+            for code in codes.iter().rev() {
+                s.key(*code, false)?;
+            }
+            return Ok(());
+        }
+        if CLEANUP_FAILED.load(Ordering::SeqCst) {
+            return Err("wayland:CLEANUP_FAILED".into());
+        }
+        s.frame()?;
+        if str_field(p, "sourceToken") != s.token() {
+            return Err("wayland:STALE_CAPTURE".into());
+        }
+        s.used = true;
+        let button = match str_field(p, "button") {
             "right" => 273,
             "middle" => 274,
             _ => 272,
         };
         match kind {
             "click" | "move" | "drag" => {
-                let x = num(p, "x", 0.);
-                let y = num(p, "y", 0.);
-                pointer(session, x, y)?;
+                let (x, y) = (num(p, "x", f64::NAN), num(p, "y", f64::NAN));
+                let (tx, ty) = (num(p, "toX", x), num(p, "toY", y));
+                if kind == "drag"
+                    && (!tx.is_finite()
+                        || !ty.is_finite()
+                        || tx < 0.
+                        || ty < 0.
+                        || tx >= s.grant.size.0 as f64
+                        || ty >= s.grant.size.1 as f64)
+                {
+                    return Err("wayland:INVALID_COORDINATES".into());
+                }
+                s.pointer(x, y)?;
                 if kind == "click" {
                     for _ in 0..num(p, "clickCount", 1.).clamp(1., 3.) as u32 {
-                        button(session, b, KeyState::Pressed)?;
-                        button(session, b, KeyState::Released)?;
+                        s.button(button, true)?;
+                        s.button(button, false)?;
                     }
                 }
                 if kind == "drag" {
-                    let tx = num(p, "toX", 0.);
-                    let ty = num(p, "toY", 0.);
-                    if tx < 0.
-                        || ty < 0.
-                        || tx >= session.width as f64
-                        || ty >= session.height as f64
-                    {
-                        return Err("Drag destination outside granted source".into());
+                    s.button(button, true)?;
+                    for i in 1..=40 {
+                        pause(s, num(p, "durationMs", 300.).clamp(20., 120000.) / 40.)?;
+                        s.frame()?;
+                        s.pointer(x + (tx - x) * i as f64 / 40., y + (ty - y) * i as f64 / 40.)?;
                     }
-                    button(session, b, KeyState::Pressed)?;
-                    let result = (|| {
-                        for i in 1..=20 {
-                            pointer(
-                                session,
-                                x + (tx - x) * i as f64 / 20.,
-                                y + (ty - y) * i as f64 / 20.,
-                            )?;
-                            thread::sleep(Duration::from_millis(15));
-                        }
-                        Ok::<_, String>(())
-                    })();
-                    let released = button(session, b, KeyState::Released);
-                    result?;
-                    released?;
+                    s.button(button, false)?;
                 }
             }
             "scroll" => {
                 if p.get("x").is_some() {
-                    pointer(session, num(p, "x", 0.), num(p, "y", 0.))?;
+                    s.pointer(num(p, "x", f64::NAN), num(p, "y", f64::NAN))?;
                 }
-                runtime()
-                    .block_on(session.remote.notify_pointer_axis(
-                        &session.session,
-                        num(p, "deltaX", 0.),
-                        num(p, "deltaY", 0.),
-                        NotifyPointerAxisOptions::default().set_finish(true),
-                    ))
-                    .map_err(error)?;
-            }
-            "type" => {
-                for ch in str_field(p, "text").chars() {
-                    let sym = keysym(&ch.to_string())?;
-                    key(session, sym, KeyState::Pressed)?;
-                    key(session, sym, KeyState::Released)?;
+                let (x, y) = (num(p, "deltaX", 0.), num(p, "deltaY", 0.));
+                if !x.is_finite() || !y.is_finite() || x.abs() > 1_000_000. || y.abs() > 1_000_000.
+                {
+                    return Err("wayland:INVALID_COORDINATES".into());
+                }
+                match &s.transport {
+                    Transport::Eis(eis) => eis.scroll(x, y)?,
+                    Transport::Legacy => runtime().block_on(s.portal.notify(
+                        "NotifyPointerAxis",
+                        &(
+                            &s.grant.path,
+                            HashMap::from([("finish", BusValue::from(true))]),
+                            x,
+                            y,
+                        ),
+                    ))?,
                 }
             }
             "key" => {
-                let keys: Vec<i32> = str_field(p, "key")
+                let codes = str_field(p, "key")
                     .split('+')
-                    .map(keysym)
-                    .collect::<Result<_>>()?;
-                if str_field(p, "action") != "up" {
-                    for sym in &keys {
-                        key(session, *sym, KeyState::Pressed)?;
-                    }
+                    .map(|k| keysym(k).and_then(|v| s.lookup(v)))
+                    .collect::<Result<Vec<_>>>()?;
+                if codes.is_empty() || codes.iter().collect::<HashSet<_>>().len() != codes.len() {
+                    return Err("wayland:UNSUPPORTED_KEY".into());
+                }
+                for code in &codes {
+                    s.key(*code, true)?;
                 }
                 if str_field(p, "action") != "down" {
-                    if str_field(p, "action") != "up" {
-                        thread::sleep(Duration::from_millis(
-                            num(p, "durationMs", 0.).clamp(0., 120000.) as u64,
-                        ));
-                    }
-                    for sym in keys.iter().rev() {
-                        key(session, *sym, KeyState::Released)?;
+                    pause(s, num(p, "durationMs", 0.))?;
+                    for code in codes.iter().rev() {
+                        s.key(*code, false)?;
                     }
                 }
             }
-            _ => return Err(format!("Unsupported Wayland input: {kind}")),
-        }
-        Ok(json!(true))
-    })
-}
-pub fn release_all() -> Result<Value> {
-    if let Ok(mut map) = sessions().lock() {
-        for session in map.values_mut() {
-            for sym in session.keys.clone() {
-                let _ = key(session, sym, KeyState::Released);
+            "type" => {
+                if !s.keys.is_empty() {
+                    return Err("wayland:INPUT_BUSY".into());
+                }
+                let text = str_field(p, "text");
+                if let Transport::Eis(eis) = &s.transport {
+                    eis.sync()?;
+                    if !eis.text_ready() {
+                        return Err("wayland:INPUT_BUSY".into());
+                    }
+                    if eis.text_supported() {
+                        for ch in text.chars() {
+                            s.check()?;
+                            eis.text(&ch.to_string())?;
+                        }
+                        return Ok(());
+                    }
+                }
+                let codes = text
+                    .chars()
+                    .map(|ch| {
+                        let sym = keysym(&ch.to_string())?;
+                        match &s.transport {
+                            Transport::Legacy => Ok((sym, None)),
+                            Transport::Eis(eis) => {
+                                let (code, shift) = eis.lookup(sym)?;
+                                Ok((
+                                    code,
+                                    if shift {
+                                        Some(eis.lookup(0xffe1)?.0)
+                                    } else {
+                                        None
+                                    },
+                                ))
+                            }
+                        }
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                for (code, shift) in codes {
+                    s.check()?;
+                    if let Some(shift) = shift {
+                        s.key(shift, true)?;
+                    }
+                    s.key(code, true)?;
+                    s.key(code, false)?;
+                    if let Some(shift) = shift {
+                        s.key(shift, false)?;
+                    }
+                }
             }
-            for b in [272, 273, 274] {
-                let _ = button(session, b, KeyState::Released);
-            }
+            _ => return Err("wayland:UNSUPPORTED_OPERATION".into()),
         }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if s.release().is_err() {
+            CLEANUP_FAILED.store(true, Ordering::SeqCst);
+            return Err("wayland:CLEANUP_FAILED".into());
+        }
+        return Err(error);
     }
     Ok(json!(true))
+}
+pub fn release_keys() -> Result<Value> {
+    let mut map = sessions().lock().map_err(|_| "wayland:CLEANUP_FAILED")?;
+    for s in map.values_mut() {
+        s.release().map_err(|error| {
+            CLEANUP_FAILED.store(true, Ordering::SeqCst);
+            error
+        })?;
+    }
+    Ok(json!(true))
+}
+pub fn release_all() -> Result<Value> {
+    let mut map = sessions().lock().map_err(|_| "wayland:CLEANUP_FAILED")?;
+    let mut failed = false;
+    let mut complete = Vec::new();
+    for (id, s) in map.iter_mut() {
+        if s.close().is_err() {
+            failed = true;
+        } else {
+            complete.push(id.clone());
+        }
+    }
+    for id in complete {
+        map.remove(&id);
+    }
+    CLEANUP_FAILED.store(failed, Ordering::SeqCst);
+    if failed {
+        return Err("wayland:CLEANUP_FAILED".into());
+    }
+    Ok(json!(true))
+}
+pub fn shutdown() -> Result<Value> {
+    release_all()
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    static MANAGER_TEST: Mutex<()> = Mutex::new(());
+    fn test_session() -> (
+        super::super::wayland_portal::tests::Bus,
+        zbus::Connection,
+        Arc<super::super::wayland_portal::tests::Mock>,
+        PortalSession,
+    ) {
+        let (bus, address) = super::super::wayland_portal::tests::bus();
+        let mut state = super::super::wayland_portal::tests::Mock::default();
+        state.version = 5;
+        let state = Arc::new(state);
+        let (server, portal) = runtime().block_on(super::super::wayland_portal::tests::setup(
+            &address,
+            state.clone(),
+        ));
+        let grant = runtime().block_on(portal.grant(None)).unwrap();
+        let capture = CaptureStream::test_source().unwrap();
+        let closed = Arc::new(AtomicBool::new(false));
+        let ended = Arc::new(AtomicBool::new(false));
+        let watcher = runtime()
+            .block_on(portal.watch(&grant.path, closed.clone(), ended.clone(), capture.killer()))
+            .unwrap();
+        (
+            bus,
+            server,
+            state,
+            PortalSession {
+                portal,
+                grant,
+                capture,
+                transport: Transport::Legacy,
+                closed,
+                ended,
+                watcher,
+                epoch: "test-grant".into(),
+                pixels: None,
+                keys: HashSet::new(),
+                buttons: HashSet::new(),
+                used: false,
+            },
+        )
+    }
+    #[test]
+    fn named_key_up_preserves_other_owned_modifiers() {
+        let _guard = MANAGER_TEST.lock().unwrap();
+        let (_bus, _server, state, session) = test_session();
+        let id = "portal:held-modifiers";
+        sessions().lock().unwrap().insert(id.into(), session);
+        let frame = capture(&json!({"windowId":id})).unwrap();
+        for key in ["Shift", "Control"] {
+            input(&json!({"windowId":id,"sourceToken":frame["sourceToken"],"kind":"key","key":key,"action":"down"})).unwrap();
+        }
+        input(&json!({"windowId":id,"kind":"key","key":"Shift","action":"up"})).unwrap();
+        assert_eq!(
+            sessions().lock().unwrap().get(id).unwrap().keys,
+            HashSet::from([0xffe3])
+        );
+        assert_eq!(state.keys.lock().unwrap().last(), Some(&(0xffe1, 0)));
+        release_all().unwrap();
+        assert_eq!(state.keys.lock().unwrap().last(), Some(&(0xffe3, 0)));
+    }
+    #[test]
+    fn failed_close_blocks_all_targets_until_cleanup_is_acknowledged() {
+        let _guard = MANAGER_TEST.lock().unwrap();
+        let (_bus, _server, state, session) = test_session();
+        let id = "portal:failed-close";
+        sessions().lock().unwrap().insert(id.into(), session);
+        state.fail_close.store(true, Ordering::SeqCst);
+        assert!(release_all().is_err());
+        assert_eq!(
+            capture(&json!({"windowId":"portal:another-target"})).unwrap_err(),
+            "wayland:CLEANUP_FAILED"
+        );
+        state.fail_close.store(false, Ordering::SeqCst);
+        release_all().unwrap();
+        assert_eq!(
+            input(&json!({"windowId":id,"kind":"click"})).unwrap_err(),
+            "wayland:SESSION_REQUIRED"
+        );
+    }
+    #[test]
+    fn wayland_session_never_falls_through_to_xwayland() {
+        assert!(detect_wayland(Some("wayland"), None));
+        assert!(detect_wayland(Some("wayland"), Some("")));
+        assert!(detect_wayland(None, Some("wayland-0")));
+        assert!(!detect_wayland(Some("x11"), Some("wayland-0")));
+        assert!(!detect_wayland(None, None));
+    }
+    #[test]
+    fn input_never_opens_a_chooser_or_grant() {
+        assert_eq!(
+            input(&json!({"windowId":"portal:not-granted","kind":"click","x":1,"y":1}))
+                .unwrap_err(),
+            "wayland:SESSION_REQUIRED"
+        );
+    }
+    #[test]
+    fn key_errors_do_not_echo_values() {
+        assert_eq!(
+            keysym("sensitive-value").unwrap_err(),
+            "wayland:UNSUPPORTED_KEY"
+        );
+        assert_eq!(keysym("😀").unwrap(), 0x0101f600);
+    }
 }

@@ -114,6 +114,18 @@ export const nativeCapabilitiesSchema = z.object({
           focusIdentification: z.literal("public-ax-owner-geometry"),
         })
         .optional(),
+      wayland: z
+        .object({
+          remoteDesktopVersion: z.number().int().nonnegative(),
+          screenCastVersion: z.number().int().nonnegative(),
+          mediaAvailable: z.boolean(),
+          activeSessions: z.number().int().nonnegative(),
+          inputTransport: z.enum(["none", "legacy", "eis"]),
+          restoration: z.literal("application-memory"),
+          portalIdentity: z.enum(["unregistered", "dev.relay.desktop"]),
+          permissionsGranted: z.boolean(),
+        })
+        .optional(),
       permissions: z.record(z.string(), nativeErrorSchema.shape.permission),
       operations: z.record(
         z.string(),
@@ -134,6 +146,7 @@ export const nativeCaptureSchema = z.object({
   bounds: boundsSchema,
   native: z.object({
     helperInstanceId: z.string(),
+    sourceToken: z.string().min(1).optional(),
     backend: z.string(),
     windowId: z.string(),
     geometry: z.object({
@@ -175,6 +188,16 @@ export interface NativeDiagnostics {
     bundleId: string;
     focusIdentification: "public-ax-owner-geometry";
   };
+  wayland?: {
+    remoteDesktopVersion: number;
+    screenCastVersion: number;
+    mediaAvailable: boolean;
+    activeSessions: number;
+    inputTransport: "none" | "legacy" | "eis";
+    restoration: "application-memory";
+    portalIdentity: "unregistered" | "dev.relay.desktop";
+    permissionsGranted: boolean;
+  };
   permissions?: Record<string, NativeErrorDetails["permission"]>;
   operations?: Record<
     string,
@@ -188,6 +211,7 @@ export interface NativeDiagnostics {
 }
 export interface NativeCaptureMetadata {
   helperInstanceId: string;
+  sourceToken?: string;
   backend: string;
   windowId: string;
   application?: NativeApplicationIdentity;

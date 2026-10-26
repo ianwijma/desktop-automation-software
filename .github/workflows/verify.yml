@@ -24,7 +24,12 @@ jobs:
           workspaces: native
       - name: Linux native dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y xvfb xdotool x11-utils xinput imagemagick tesseract-ocr
+        run: |
+          # The runner's Azure HTTP mirror can stall small package downloads for minutes.
+          # Playwright's later apt invocation shares this mirror selection.
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt
+          sudo apt-get update
+          sudo apt-get install -y xvfb xdotool x11-utils xinput imagemagick tesseract-ocr dbus-daemon gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-pipewire
       - run: npm ci
       - run: node node_modules/electron/install.js
       - run: cargo build --manifest-path native/Cargo.toml

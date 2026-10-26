@@ -17,6 +17,12 @@ mod macos;
 mod protocol;
 #[cfg(target_os = "linux")]
 mod wayland;
+#[cfg(target_os = "linux")]
+mod wayland_capture;
+#[cfg(target_os = "linux")]
+mod wayland_eis;
+#[cfg(target_os = "linux")]
+mod wayland_portal;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(any(target_os = "windows", test))]
@@ -34,6 +40,14 @@ fn held_keys() -> &'static Mutex<std::collections::HashSet<String>> {
     HELD_KEYS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 fn release_owned() -> Result<Value> {
+    #[cfg(target_os = "linux")]
+    if wayland::is_wayland() {
+        held_keys()
+            .lock()
+            .map_err(|_| "wayland:CLEANUP_FAILED")?
+            .clear();
+        return wayland::release_all();
+    }
     let keys: Vec<String> = held_keys()
         .lock()
         .map_err(|e| e.to_string())?
@@ -147,9 +161,13 @@ fn dispatch(method: &str, p: &Value, recording: &mut Recording) -> Result<Value>
             {
                 return platform::release_capture();
             }
-            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            #[cfg(target_os = "linux")]
             {
-                Ok(json!(true))
+                if wayland::is_wayland() {
+                    wayland::release_all()
+                } else {
+                    Ok(json!(true))
+                }
             }
         }
         "releaseKeys" => platform::release_keys(p),
@@ -207,13 +225,34 @@ fn dispatch(method: &str, p: &Value, recording: &mut Recording) -> Result<Value>
     }
 }
 fn main() {
+    #[cfg(target_os = "linux")]
+    if wayland::is_wayland() && wayland::install_shutdown_hook().is_err() {
+        std::process::exit(1);
+    }
     let mut recording = Recording {
         active: Arc::new(AtomicBool::new(false)),
         worker: None,
     };
     let mut negotiated = false;
     // Commands are processed serially: desktop input is a single shared resource.
-    for line in io::stdin().lock().lines() {
+    let (sender, requests) = std::sync::mpsc::sync_channel(16);
+    thread::spawn(move || {
+        for line in io::stdin().lock().lines() {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    loop {
+        #[cfg(target_os = "linux")]
+        if wayland::cancelled() {
+            break;
+        }
+        let line = match requests.recv_timeout(Duration::from_millis(25)) {
+            Ok(line) => line,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(_) => break,
+        };
         let line = match line {
             Ok(s) => s,
             Err(_) => break,
@@ -249,6 +288,12 @@ fn main() {
         });
     }
     let _ = recording.stop();
+    #[cfg(target_os = "linux")]
+    if wayland::is_wayland() {
+        let result = wayland::shutdown();
+        emit(json!({"event":"nativeCleanup","result":result.is_ok()}));
+        std::process::exit(if result.is_ok() { 0 } else { 1 });
+    }
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     platform::shutdown();
     if INPUT_USED.load(Ordering::SeqCst) {

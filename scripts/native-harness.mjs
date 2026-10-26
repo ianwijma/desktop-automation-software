@@ -258,7 +258,7 @@ if (!args.has("--run")) {
         name: "desktop-capture-and-input",
         status: "not-run",
         reason:
-          "Portal chooser/source ownership requires N04 qualification; no automatic chooser or input is attempted.",
+          "Use test:native:wayland for explicit portal source selection and input checks; this X11 harness does not open a chooser.",
       });
     } else {
       const title = `RelayNativeFixture-${randomUUID()}`;
