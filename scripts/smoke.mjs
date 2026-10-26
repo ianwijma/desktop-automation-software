@@ -62,6 +62,26 @@ try {
     ),
     "Passive capability lookup cannot qualify desktop capture/input",
   );
+  await assert.rejects(
+    page.evaluate(() =>
+      window.relay.inspectNativeLocator("missing-native-target", {
+        locator: {
+          version: 1,
+          backend: "uia",
+          selector: { automationId: "fixture" },
+        },
+      }),
+    ),
+    /Choose an application or browser target/,
+  );
+  await assert.rejects(
+    page.evaluate(() =>
+      window.relay.inspectNativeLocator("missing-native-target", {
+        locator: { version: 1, backend: "uia", selector: { pointer: 42 } },
+      }),
+    ),
+    /Unrecognized key|semantic property/,
+  );
   assert.equal(initial.flows.length, 3);
   assert.equal(initial.connections.length, 0);
   assert.equal(initial.keys, undefined);
@@ -875,6 +895,7 @@ try {
           "12-child fixed batch",
           "theme switching",
           "read-only browser locator inspection IPC",
+          "native locator IPC validation and target boundary",
           "structured frame locators validate, persist and run through the engine",
           "direct browser pending text flushes on Pause and Stop through IPC/SQLite",
           "recording branch insertion preserves successor and other branch",

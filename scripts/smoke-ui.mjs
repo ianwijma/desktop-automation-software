@@ -13,6 +13,7 @@ import { createServer } from "vite";
 import { runReferencePickerSmoke } from "./reference-picker-smoke.mjs";
 import { runStructuredInspectorSmoke } from "./structured-inspector-smoke.mjs";
 import { runRecordingReviewSmoke } from "./recording-review-smoke.mjs";
+import { runNativeLocatorSmoke } from "./native-locator-smoke.mjs";
 import { runBrowserLocatorSmoke } from "./browser-locator-smoke.mjs";
 import { runWindowsSettingsSmoke } from "./windows-settings-smoke.mjs";
 
@@ -428,6 +429,7 @@ try {
   await runStructuredInspectorSmoke({ browser, url });
   await runRecordingReviewSmoke({ browser, url });
   await runBrowserLocatorSmoke({ browser, url });
+  await runNativeLocatorSmoke({ browser, url });
   await runWindowsSettingsSmoke({ browser, url });
   console.log(
     "PASS: editor and references; undo/redo across revisions; child groups; theme/OpenRouter persistence; schedules; preview rejection; cross-tab conflicts; future-schema preservation; committed-save warning recovery with no automatic run; no page errors.",

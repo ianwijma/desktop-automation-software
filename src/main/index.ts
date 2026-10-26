@@ -50,6 +50,7 @@ import {
   resolveRecordingAnchor,
 } from "../shared/recording";
 import { defaultCapabilities } from "../shared/seed";
+import { nativeInspectionQuerySchema } from "../shared/native-locators";
 import { browserLocatorSchema } from "../shared/browser-locators";
 import type {
   AIConnection,
@@ -573,6 +574,8 @@ async function request(
         "testDetector",
         z.record(z.string(), jsonSchema).parse(args[0]),
       );
+    case "inspectNativeLocator":
+      return rpc(method, id(), nativeInspectionQuerySchema.parse(args[1]));
     case "inspectBrowserLocator":
       return rpc(
         method,

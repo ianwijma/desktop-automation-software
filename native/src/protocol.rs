@@ -33,6 +33,46 @@ pub fn handshake() -> Value {
         "backend":backend(),"coordinateSpace":space})
 }
 pub fn error(method: &str, message: String) -> Value {
+    if let Some(code) = message.strip_prefix("uia:") {
+        let safe = match code {
+            "INVALID_REQUEST" => "Invalid semantic locator or UIA request",
+            "ELEMENT_NOT_FOUND" => "No realized control matches; reveal virtualized items or update the locator",
+            "AMBIGUOUS_ELEMENT" => "Multiple controls match; refine the locator or ancestor scope",
+            "ELEMENT_DISABLED" => "The matched control is disabled",
+            "ELEMENT_OFFSCREEN" => "The matched control is not visible; reveal it before acting",
+            "SECURE_ELEMENT" => "Secure controls cannot be read or changed through semantic actions",
+            "VIRTUALIZED_ELEMENT" => "Virtualized controls must be realized by the application before use",
+            "STALE_ELEMENT" => "The control disappeared or changed during UIA access; inspect it again",
+            "UNSUPPORTED_PATTERN" => "The control does not support this semantic action; coordinate mode must be selected explicitly",
+            "MODAL_BLOCKED" => "A modal window blocks this target; select the modal as a separate target",
+            "SEARCH_LIMIT" => "The control tree exceeded the bounded search; choose a narrower target",
+            "TIMEOUT" => "The UIA worker timed out; restart the helper before further semantic actions",
+            "UNSUPPORTED_OPERATION" => "Native semantic targeting is currently available only through Windows UIA",
+            _ => "UIA provider failed; no coordinate fallback or action replay was attempted",
+        };
+        let code = if [
+            "INVALID_REQUEST",
+            "ELEMENT_NOT_FOUND",
+            "AMBIGUOUS_ELEMENT",
+            "ELEMENT_DISABLED",
+            "ELEMENT_OFFSCREEN",
+            "SECURE_ELEMENT",
+            "VIRTUALIZED_ELEMENT",
+            "STALE_ELEMENT",
+            "UNSUPPORTED_PATTERN",
+            "MODAL_BLOCKED",
+            "SEARCH_LIMIT",
+            "TIMEOUT",
+            "UNSUPPORTED_OPERATION",
+        ]
+        .contains(&code)
+        {
+            code
+        } else {
+            "BACKEND_FAILURE"
+        };
+        return json!({"code":code,"message":safe,"operation":method,"backend":"windows-uia","permission":"unknown","retryable":false});
+    }
     if let Some(kind) = message.strip_prefix("wayland:") {
         let (code, safe, permission) = match kind {
             "CANCELLED" => ("CANCELLED", "The Wayland chooser or operation was cancelled; no grant was reopened", "required"),
@@ -187,7 +227,11 @@ pub fn capabilities(mut value: Value) -> Value {
             cfg!(target_os = "linux") && !portal,
             value["directRecording"] == true,
         ),
-        ("accessibility", false, false),
+        (
+            "accessibility",
+            cfg!(target_os = "windows"),
+            value["accessibility"] == true,
+        ),
     ] {
         operations.insert(name.to_string(),json!({"availability":if !supported{"unsupported"}else if available{"available"}else{"unavailable"},"verification":"untested","backend":backend()}));
     }

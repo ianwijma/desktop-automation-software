@@ -272,6 +272,31 @@ mod fixture {
                 SetForegroundWindow(window);
                 0
             }
+            x if x == WM_APP + 6 => {
+                let action = model().lock().unwrap().controls["action"] as HWND;
+                SetWindowPos(
+                    action,
+                    null_mut(),
+                    px(32),
+                    px(410),
+                    px(110),
+                    px(38),
+                    SWP_NOZORDER,
+                );
+                0
+            }
+            x if x == WM_APP + 7 => {
+                duplicate();
+                EnableWindow(window, 0);
+                0
+            }
+            x if x == WM_APP + 8 => {
+                let action = model().lock().unwrap().controls.remove("action");
+                if let Some(action) = action {
+                    DestroyWindow(action as HWND);
+                }
+                0
+            }
             x if x == WM_APP + 3 => {
                 let duplicate = {
                     let mut s = model().lock().unwrap();
@@ -282,6 +307,7 @@ mod fixture {
                 if duplicate != 0 {
                     DestroyWindow(duplicate as HWND);
                 }
+                EnableWindow(window, 1);
                 SetForegroundWindow(window);
                 0
             }
@@ -408,6 +434,63 @@ mod fixture {
             38,
             BS_PUSHBUTTON as u32,
         );
+        let disabled = control(
+            window,
+            "BUTTON",
+            "Disabled action",
+            8,
+            440,
+            70,
+            130,
+            38,
+            BS_PUSHBUTTON as u32,
+        );
+        EnableWindow(disabled, 0);
+        let readonly = control(
+            window,
+            "EDIT",
+            "Read-only fixture",
+            9,
+            400,
+            117,
+            160,
+            38,
+            WS_BORDER | ES_READONLY as u32,
+        );
+        let list = control(
+            window,
+            "LISTBOX",
+            "",
+            10,
+            400,
+            163,
+            170,
+            64,
+            WS_BORDER | LBS_NOTIFY as u32,
+        );
+        SendMessageW(
+            list,
+            LB_ADDSTRING,
+            0,
+            wide("First choice").as_ptr() as LPARAM,
+        );
+        SendMessageW(
+            list,
+            LB_ADDSTRING,
+            0,
+            wide("Second choice").as_ptr() as LPARAM,
+        );
+        for (name, handle) in [
+            ("disabled", disabled),
+            ("readonly", readonly),
+            ("list", list),
+        ] {
+            model()
+                .lock()
+                .unwrap()
+                .controls
+                .insert(name, handle as usize);
+        }
         for (name, handle) in items {
             if !handle.is_null() {
                 model()
@@ -449,7 +532,8 @@ mod fixture {
         } else {
             vec![]
         };
-        json!({"coordinateSpace":"window-input","resizeExpectedWidth":n(640.),"clicks":s.clicks,"text":s.text,"secureHasValue":s.secure,"scrollTop":s.scroll,"drags":s.drags,"buttons":s.buttons,"held":held,"animationFrames":s.frames,"gpu":false,"renderSurface":"native-gdi","nativeControls":true,"contentScale":scale,"devicePixelRatio":f64::from(GetDpiForWindow(window))/96.,"targets":targets,"minimized":IsIconic(window)!=0,"focused":focused,"duplicate":s.duplicate!=0,"bounds":{"x":outer.left,"y":outer.top,"width":outer.right-outer.left,"height":outer.bottom-outer.top},"displays":[{"scaleFactor":f64::from(GetDpiForWindow(window))/96.}],"versions":{"fixture":"Win32 controls","version":env!("CARGO_PKG_VERSION")}})
+        let selected = SendMessageW(s.controls["list"] as HWND, LB_GETCURSEL, 0, 0);
+        json!({"selectedIndex":selected,"modalBlocked":IsWindowEnabled(window)==0,"coordinateSpace":"window-input","resizeExpectedWidth":n(640.),"clicks":s.clicks,"text":s.text,"secureHasValue":s.secure,"scrollTop":s.scroll,"drags":s.drags,"buttons":s.buttons,"held":held,"animationFrames":s.frames,"gpu":false,"renderSurface":"native-gdi","nativeControls":true,"contentScale":scale,"devicePixelRatio":f64::from(GetDpiForWindow(window))/96.,"targets":targets,"minimized":IsIconic(window)!=0,"focused":focused,"duplicate":s.duplicate!=0,"bounds":{"x":outer.left,"y":outer.top,"width":outer.right-outer.left,"height":outer.bottom-outer.top},"displays":[{"scaleFactor":f64::from(GetDpiForWindow(window))/96.}],"versions":{"fixture":"Win32 controls","version":env!("CARGO_PKG_VERSION")}})
     }
     fn connection(mut socket: TcpStream, token: &str) {
         // Windows accept inherits the listener's nonblocking mode. Each accepted
@@ -495,6 +579,15 @@ mod fixture {
                     }
                     ("POST", "/restore") => {
                         PostMessageW(window, WM_APP + 5, 0, 0);
+                    }
+                    ("POST", "/uia-move") => {
+                        PostMessageW(window, WM_APP + 6, 0, 0);
+                    }
+                    ("POST", "/uia-modal") => {
+                        PostMessageW(window, WM_APP + 7, 0, 0);
+                    }
+                    ("POST", "/uia-destroy") => {
+                        PostMessageW(window, WM_APP + 8, 0, 0);
                     }
                     ("POST", "/resize") => {
                         PostMessageW(window, WM_APP + 2, 0, 0);

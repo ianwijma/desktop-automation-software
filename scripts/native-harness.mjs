@@ -641,6 +641,185 @@ if (!args.has("--run")) {
             reason:
               "Capture/transform prerequisite failed; no coordinate input attempted.",
           });
+        if (
+          process.platform === "win32" &&
+          fixtureKind === "win32" &&
+          captured
+        ) {
+          let actionLocator;
+          const pick = async (id) => {
+            frame = await adapter.capture(target);
+            return adapter.inspectLocator(target, {
+              point: { ...(await point(id)), frameId: frame.id },
+            });
+          };
+          await check("uia-preview-pick-and-moving-control", async () => {
+            const before = await control();
+            const inspected = await pick("action");
+            assert.equal(inspected.status, "unique");
+            assert.ok(inspected.element.actions.includes("invoke"));
+            actionLocator = inspected.element.locator;
+            assert.equal(
+              (await control()).clicks,
+              before.clicks,
+              "Picking cannot invoke the control",
+            );
+            await control("/uia-move", "POST");
+            await poll(
+              control,
+              (s) => s.targets.action.y !== before.targets.action.y,
+            );
+            assert.equal(
+              (await adapter.inspectLocator(target, { locator: actionLocator }))
+                .status,
+              "unique",
+            );
+            await adapter.execute(
+              "click",
+              { nativeLocator: actionLocator },
+              target,
+            );
+            await poll(control, (s) => s.clicks === before.clicks + 1);
+            return {
+              pickedWithoutInput: true,
+              movementPreservesLocator: true,
+              invokeObserved: true,
+            };
+          });
+          await check("uia-value-read-and-selection", async () => {
+            const edit = await pick("text");
+            assert.equal(edit.status, "unique");
+            const text = "Semantic fixture 日本語 😀";
+            await adapter.execute(
+              "type",
+              { nativeLocator: edit.element.locator, text },
+              target,
+            );
+            await poll(control, (s) => s.text === text);
+            assert.equal(
+              await adapter.execute(
+                "read",
+                { nativeLocator: edit.element.locator },
+                target,
+              ),
+              text,
+            );
+            const item = {
+              version: 1,
+              backend: "uia",
+              selector: { controlType: "listitem", name: "Second choice" },
+            };
+            assert.equal(
+              (await adapter.inspectLocator(target, { locator: item })).status,
+              "unique",
+            );
+            await adapter.execute("select", { nativeLocator: item }, target);
+            await poll(control, (s) => s.selectedIndex === 1);
+            return {
+              valueObserved: true,
+              readMatched: true,
+              selectionObserved: true,
+            };
+          });
+          await check(
+            "uia-duplicate-disabled-secure-readonly-policy",
+            async () => {
+              const duplicate = {
+                version: 1,
+                backend: "uia",
+                selector: { controlType: "button", name: "Duplicate label" },
+              };
+              assert.equal(
+                (await adapter.inspectLocator(target, { locator: duplicate }))
+                  .status,
+                "ambiguous",
+              );
+              await assert.rejects(
+                adapter.execute("click", { nativeLocator: duplicate }, target),
+                (e) => e.details?.code === "AMBIGUOUS_ELEMENT",
+              );
+              const disabled = await pick("disabled");
+              assert.equal(disabled.element.enabled, false);
+              await assert.rejects(
+                adapter.execute(
+                  "click",
+                  { nativeLocator: disabled.element.locator },
+                  target,
+                ),
+                (e) => e.details?.code === "ELEMENT_DISABLED",
+              );
+              const secure = await pick("secure");
+              assert.equal(secure.element.secure, true);
+              assert.equal(secure.element.name, "");
+              assert.deepEqual(secure.element.actions, []);
+              for (const kind of ["read", "type"])
+                await assert.rejects(
+                  adapter.execute(
+                    kind,
+                    {
+                      nativeLocator: secure.element.locator,
+                      text: "never-send-this",
+                    },
+                    target,
+                  ),
+                  (e) => e.details?.code === "SECURE_ELEMENT",
+                );
+              const readonly = await pick("readonly");
+              assert.ok(!readonly.element.actions.includes("setValue"));
+              await assert.rejects(
+                adapter.execute(
+                  "type",
+                  {
+                    nativeLocator: readonly.element.locator,
+                    text: "unchanged",
+                  },
+                  target,
+                ),
+                (e) => e.details?.code === "UNSUPPORTED_PATTERN",
+              );
+              return {
+                duplicatesRejected: true,
+                disabledRejected: true,
+                secureValueOmitted: true,
+                readonlyRejected: true,
+              };
+            },
+          );
+          await check("uia-modal-and-removed-control", async () => {
+            await control("/uia-modal", "POST");
+            await poll(control, (s) => s.modalBlocked);
+            await assert.rejects(
+              adapter.execute(
+                "click",
+                { nativeLocator: actionLocator },
+                target,
+              ),
+              (e) => e.details?.code === "MODAL_BLOCKED",
+            );
+            await control("/close-duplicate", "POST");
+            await poll(control, (s) => !s.modalBlocked && !s.duplicate);
+            await control("/uia-destroy", "POST");
+            await poll(control, (s) => !s.targets.action);
+            assert.equal(
+              (await adapter.inspectLocator(target, { locator: actionLocator }))
+                .status,
+              "missing",
+            );
+            await assert.rejects(
+              adapter.execute(
+                "click",
+                { nativeLocator: actionLocator },
+                target,
+              ),
+              (e) => e.details?.code === "ELEMENT_NOT_FOUND",
+            );
+            return {
+              modalBlocked: true,
+              removedControlRejected: true,
+              noCoordinateFallback: true,
+            };
+          });
+        }
         await check("duplicate-window-targeting", async () => {
           await control("/duplicate", "POST");
           await poll(

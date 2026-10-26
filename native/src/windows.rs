@@ -14,6 +14,7 @@ use windows_sys::Win32::{
 };
 mod capture;
 mod input;
+pub mod uia;
 const WGC: &str = "win32-wgc";
 const PRINT: &str = "win32-printwindow";
 pub fn initialize() -> Result<()> {
@@ -250,7 +251,7 @@ pub fn capabilities() -> Result<Value> {
             .unwrap_or(false)
         && windows_capture::d3d11::create_d3d_device().is_ok();
     Ok(
-        json!({"platform":"win32","session":"desktop","capture":desktop&&graphics,"input":desktop,"accessibility":false,"directRecording":false,"globalShortcuts":true,"windows":if initialized{windows().unwrap_or(json!([]))}else{json!([])},"reasons":["Choose a Windows capture method for each target. Failed Windows Graphics Capture never falls back to PrintWindow automatically.","Input requires an unlocked interactive desktop and equal or lower target integrity. Partial/rejected SendInput is an error; its return value cannot identify UIPI blocking.","Native controls, GPU applications and display scales need qualification. Direct recording remains unavailable (N08)."],"windowsBackend":{"graphicsCaptureSupported":graphics,"interactiveDesktop":desktop,"perMonitorV2":initialized,"captureLibraryVersion":"windows-capture 2.0.1"}}),
+        json!({"platform":"win32","session":"desktop","capture":desktop&&graphics,"input":desktop,"accessibility":desktop,"directRecording":false,"globalShortcuts":true,"windows":if initialized{windows().unwrap_or(json!([]))}else{json!([])},"reasons":["Choose a Windows capture method for each target. Failed Windows Graphics Capture never falls back to PrintWindow automatically.","Input requires an unlocked interactive desktop and equal or lower target integrity. Partial/rejected SendInput is an error; its return value cannot identify UIPI blocking.","Native controls, GPU applications and display scales need qualification. Direct recording remains unavailable (N08)."],"windowsBackend":{"graphicsCaptureSupported":graphics,"interactiveDesktop":desktop,"perMonitorV2":initialized,"captureLibraryVersion":"windows-capture 2.0.1"}}),
     )
 }
 pub fn focus(p: &Value) -> Result<Value> {

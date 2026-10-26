@@ -15,6 +15,8 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 mod protocol;
+#[cfg(any(target_os = "windows", test))]
+mod uia_contract;
 #[cfg(target_os = "linux")]
 mod wayland;
 #[cfg(target_os = "linux")]
@@ -136,6 +138,16 @@ fn dispatch(method: &str, p: &Value, recording: &mut Recording) -> Result<Value>
         "capabilities" => platform::capabilities().map(protocol::capabilities),
         "listWindows" => platform::windows().map(protocol::windows),
         "capture" => protocol::capture(platform::capture(p)?, p),
+        "inspectNativeLocator" | "nativeElement" => {
+            #[cfg(target_os = "windows")]
+            {
+                return windows::uia::call(method, p);
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                return Err("uia:UNSUPPORTED_OPERATION".into());
+            }
+        }
         "focus" => platform::focus(p),
         "input" => {
             INPUT_USED.store(true, Ordering::SeqCst);

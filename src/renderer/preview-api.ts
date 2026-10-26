@@ -231,6 +231,9 @@ export const previewAPI: RelayAPI = {
   async testDetector() {
     return unavailable("Testing detectors");
   },
+  async inspectNativeLocator() {
+    return unavailable("Native locator inspection");
+  },
   async inspectBrowserLocator() {
     return unavailable("Browser locator inspection");
   },

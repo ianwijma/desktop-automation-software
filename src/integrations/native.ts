@@ -28,6 +28,14 @@ import type {
   TargetDescriptor,
 } from "../shared/types";
 
+import {
+  nativeInspectionQuerySchema,
+  nativeInspectionSchema,
+  nativeLocatorSchema,
+  type NativeInspectionQuery,
+  type NativeLocatorInspection,
+} from "../shared/native-locators";
+
 export interface NativeAdapterOptions {
   binaryPath?: string;
   binaryArgs?: string[];
@@ -687,6 +695,61 @@ export class NativeAdapter {
     this.bindingDescriptors.set(target.id, descriptor);
     return matches[0]!;
   }
+  async inspectLocator(
+    target: TargetDescriptor,
+    query: NativeInspectionQuery,
+    signal?: AbortSignal,
+  ): Promise<NativeLocatorInspection> {
+    if (target.kind !== "desktop")
+      throw new Error("Native inspection requires a desktop target");
+    const parsed = nativeInspectionQuerySchema.parse(query);
+    const window = await this.resolve(target, signal);
+    if (this.helper?.backend !== "win32-wgc")
+      throw this.serviceError(
+        "UNSUPPORTED_OPERATION",
+        "inspectNativeLocator",
+        "Native semantic targeting currently requires Windows UIA",
+      );
+    let params: Record<string, unknown> = parsed;
+    if ("point" in parsed) {
+      const { x, y, frameId } = parsed.point;
+      const frame = this.frames.get(target.id);
+      if (
+        !frame ||
+        frame.id !== frameId ||
+        frame.native?.helperInstanceId !== this.helper.instanceId ||
+        frame.native.windowId !== window.id ||
+        JSON.stringify(frame.bounds) !== JSON.stringify(window.bounds) ||
+        frame.native.geometry.dpi !== window.dpi ||
+        x >= frame.width ||
+        y >= frame.height
+      )
+        throw this.serviceError(
+          "STALE_CAPTURE",
+          "inspectNativeLocator",
+          "Capture changed; refresh the picker preview",
+        );
+      const transform = frame.native.geometry.pixelToInput;
+      params = {
+        point: {
+          x: window.bounds.x + x * transform.scaleX + (transform.offsetX ?? 0),
+          y: window.bounds.y + y * transform.scaleY + (transform.offsetY ?? 0),
+        },
+        expectedBounds: window.bounds,
+      };
+    }
+    return nativeInspectionSchema.parse(
+      await this.rpc(
+        "inspectNativeLocator",
+        {
+          ...params,
+          windowId: window.id,
+          applicationIdentity: window.applicationIdentity,
+        },
+        signal,
+      ),
+    );
+  }
   async capture(
     target: TargetDescriptor,
     signal?: AbortSignal,
@@ -825,6 +888,75 @@ export class NativeAdapter {
       );
       if (kind === "close") this.bindings.delete(target.id);
       return result;
+    }
+    if (config.nativeLocator !== undefined) {
+      if (this.helper?.backend !== "win32-wgc")
+        throw this.serviceError(
+          "UNSUPPORTED_OPERATION",
+          "nativeElement",
+          "Native semantic targeting currently requires Windows UIA",
+        );
+      const locator = nativeLocatorSchema.parse(config.nativeLocator);
+      if (
+        config.locator ||
+        config.selector ||
+        config.detection ||
+        config.checked !== undefined ||
+        config.modifiers ||
+        (kind === "click" &&
+          ((config.button && config.button !== "left") ||
+            Number(config.clickCount ?? 1) !== 1))
+      )
+        throw new Error(
+          "Choose one semantic action; pointer buttons, repeated clicks and browser options require explicit coordinate/browser mode",
+        );
+      if (kind === "detect") {
+        const result = await this.inspectLocator(target, { locator }, signal);
+        if (result.status === "ambiguous")
+          throw this.serviceError(
+            "AMBIGUOUS_ELEMENT",
+            "nativeElement",
+            "Multiple controls match; refine the semantic locator",
+          );
+        return {
+          outcome: result.status === "unique" ? "match" : "no-match",
+          value: result as unknown as Json,
+        };
+      }
+      const action = {
+        click: "invoke",
+        type: "setValue",
+        read: "read",
+        select: "select",
+      }[kind as "click" | "type" | "read" | "select"];
+      if (!action)
+        throw this.serviceError(
+          "UNSUPPORTED_OPERATION",
+          "nativeElement",
+          "This node has no supported semantic action",
+        );
+      if (
+        kind === "select" &&
+        config.value !== undefined &&
+        config.value !== ""
+      )
+        throw new Error(
+          "Native Select selects the matched item; choose that item's locator instead of a browser option value",
+        );
+      if (config.requiresConfiguration)
+        throw new Error("Configure this recorded interaction before running");
+      if (action !== "read") this.inputAttempted = true;
+      return this.rpc<Json>(
+        "nativeElement",
+        {
+          windowId: window.id,
+          applicationIdentity: window.applicationIdentity,
+          locator,
+          action,
+          ...(action === "setValue" ? { text: String(config.text ?? "") } : {}),
+        },
+        signal,
+      );
     }
     if (config.requiresConfiguration)
       throw new Error(

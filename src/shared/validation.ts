@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Json } from "./types";
-import { nodeKinds } from "./node-definitions";
+import { nativeLocatorSchema } from "./native-locators";
+import { nodeKinds, hasReference } from "./node-definitions";
 import { recordableKinds } from "./recording";
 
 export const jsonSchema: z.ZodType<Json> = z.lazy(() =>
@@ -22,6 +23,22 @@ export const jsonSchema: z.ZodType<Json> = z.lazy(() =>
   ]),
 );
 const configSchema = z.record(z.string(), jsonSchema);
+const nodeConfigSchema = configSchema.superRefine((config, ctx) => {
+  if (
+    config.nativeLocator !== undefined &&
+    !(
+      typeof config.nativeLocator === "string" &&
+      hasReference(config.nativeLocator)
+    ) &&
+    !nativeLocatorSchema.safeParse(config.nativeLocator).success
+  )
+    ctx.addIssue({
+      code: "custom",
+      path: ["nativeLocator"],
+      message:
+        "Native locators must contain valid semantic properties, never object pointers or runtime identities",
+    });
+});
 const id = z.string().min(1).max(200);
 const nodeKind = z.enum(nodeKinds);
 export const flowSchema = z.object({
@@ -38,7 +55,7 @@ export const flowSchema = z.object({
         kind: nodeKind,
         label: z.string().max(200),
         position: z.object({ x: z.number().finite(), y: z.number().finite() }),
-        config: configSchema,
+        config: nodeConfigSchema,
         breakpoint: z.boolean().optional(),
       }),
     )
@@ -158,7 +175,7 @@ export const scheduleSchema = z.object({
 export const actionSchema = z.object({
   kind: z.enum(recordableKinds),
   label: z.string().max(200),
-  config: configSchema,
+  config: nodeConfigSchema,
 });
 export const recordedActionSchema = actionSchema.extend({
   id,
