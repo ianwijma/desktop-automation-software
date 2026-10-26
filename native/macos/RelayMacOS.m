@@ -460,6 +460,16 @@ static NSDictionary *CaptureWindow(NSDictionary *p) {
 }
 
 static NSMutableSet<NSNumber *> *Keys, *Buttons;
+static CGEventSourceRef EventSource;
+static CGEventSourceRef Source(void) {
+    if (!EventSource) {
+        EventSource = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
+        if (!EventSource)
+            Fail(@"INPUT_REJECTED");
+        CGEventSourceSetLocalEventsSuppressionInterval(EventSource, 0);
+    }
+    return EventSource;
+}
 static CGEventFlags Modifier(CGKeyCode code) {
     switch (code) {
     case 54:
@@ -610,7 +620,7 @@ static void Key(CGKeyCode code, BOOL down) {
     for (NSNumber *owned in Keys)
         if (down || owned.unsignedShortValue != code)
             flags |= Modifier(owned.unsignedShortValue);
-    CGEventRef event = CGEventCreateKeyboardEvent(NULL, code, down);
+    CGEventRef event = CGEventCreateKeyboardEvent(Source(), code, down);
     PostFlags(event, flags);
     if (!down)
         [Keys removeObject:@(code)];
@@ -619,7 +629,7 @@ static void Mouse(CGEventType type, CGPoint point, CGMouseButton button, BOOL do
                   int count) {
     if (down)
         [Buttons addObject:@(button)];
-    CGEventRef e = CGEventCreateMouseEvent(NULL, type, point, button);
+    CGEventRef e = CGEventCreateMouseEvent(Source(), type, point, button);
     if (!e)
         Fail(@"INPUT_REJECTED");
     CGEventSetIntegerValueField(e, kCGMouseEventClickState, count);
@@ -694,17 +704,31 @@ static void ReleaseAll(void) {
     [keys addObjectsFromArray:@[ @0, @54, @55, @56, @58, @59, @60, @61, @62 ]];
     for (NSNumber *key in keys)
         Key(key.unsignedShortValue, NO);
-    CGEventRef event = CGEventCreate(NULL);
+    CGEventRef event = CGEventCreate(Source());
     if (!event)
         Fail(@"INPUT_REJECTED");
     CGPoint location = CGEventGetLocation(event);
     CFRelease(event);
-    for (NSNumber *button in @[ @0, @1, @2 ]) {
+    NSMutableSet *buttons = [Buttons mutableCopy];
+    for (NSNumber *button in @[ @0, @1, @2 ])
+        if (CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, button.intValue))
+            [buttons addObject:button];
+    for (NSNumber *button in buttons) {
         int b = button.intValue;
         Mouse(b == 0   ? kCGEventLeftMouseUp
               : b == 1 ? kCGEventRightMouseUp
                        : kCGEventOtherMouseUp,
               location, b, NO, YES, 1);
+        // The next event must not be constructed from an earlier held-button
+        // snapshot. A replacement helper shares the session source state.
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:0.5];
+        while (CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, b) &&
+               [deadline timeIntervalSinceNow] > 0)
+            Pump();
+        if (CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, b)) {
+            [Buttons addObject:button];
+            Fail(@"INPUT_REJECTED");
+        }
     }
 }
 static void Input(NSDictionary *p) {
@@ -780,7 +804,7 @@ static void Input(NSDictionary *p) {
                     chars[count++] = [text characterAtIndex:i++];
                 [Keys addObject:@0];
                 for (NSNumber *isDown in @[ @YES, @NO ]) {
-                    CGEventRef e = CGEventCreateKeyboardEvent(NULL, 0, isDown.boolValue);
+                    CGEventRef e = CGEventCreateKeyboardEvent(Source(), 0, isDown.boolValue);
                     if (!e)
                         Fail(@"INPUT_REJECTED");
                     CGEventKeyboardSetUnicodeString(e, count, chars);
@@ -808,7 +832,7 @@ static void Input(NSDictionary *p) {
             if (!isfinite(x) || !isfinite(y) || fabs(x) > 1000000 || fabs(y) > 1000000)
                 Fail(@"INVALID_COORDINATES");
             Verify(w, YES);
-            Post(CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitPixel, 2, (int32_t)-y,
+            Post(CGEventCreateScrollWheelEvent(Source(), kCGScrollEventUnitPixel, 2, (int32_t)-y,
                                                (int32_t)-x));
         } else
             Fail(@"UNSUPPORTED_OPERATION");
@@ -816,8 +840,8 @@ static void Input(NSDictionary *p) {
         @try {
             ReleaseAll();
         } @catch (NSException *ignored) {
-        }
-        @throw e;
+        } @
+        throw e;
     }
 }
 static NSDictionary *Capabilities(void) {
