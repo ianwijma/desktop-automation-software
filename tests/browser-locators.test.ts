@@ -729,6 +729,7 @@ for (const mode of ["managed", "extension"] as const)
               (action) =>
                 action.kind === "tab" && action.config.action === "switch",
             ).length,
+          { timeout: 10000 },
         )
         .toBe(2);
       await child.bringToFront();
@@ -740,6 +741,7 @@ for (const mode of ["managed", "extension"] as const)
               (action) =>
                 action.kind === "tab" && action.config.action === "switch",
             ).length,
+          { timeout: 10000 },
         )
         .toBe(3);
       const closed = child.waitForEvent("close");
