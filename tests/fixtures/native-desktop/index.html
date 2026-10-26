@@ -154,9 +154,20 @@
       report();
     });
     document.addEventListener("pointermove", (event) => {
-      // Observe modifier effects on actual application pointer events as well as keys.
-      if (event.shiftKey) held.set("pointer-shift", "Shift");
-      else held.delete("pointer-shift");
+      // Pointer flags describe the application's current modifier state. Cleanup
+      // from a replacement helper may not deliver a matching DOM keyup.
+      for (const [key, active] of [
+        ["Shift", event.shiftKey],
+        ["Control", event.ctrlKey],
+        ["Alt", event.altKey],
+        ["Meta", event.metaKey],
+      ]) {
+        for (const [code, value] of held)
+          if (value === key && !active) held.delete(code);
+        if (active) held.set(`pointer-${key}`, key);
+        else held.delete(`pointer-${key}`);
+      }
+      state.buttons = event.buttons;
       report();
     });
     window.onresize = report;

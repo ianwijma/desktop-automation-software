@@ -69,7 +69,7 @@ const report = {
   artifact: {},
   checks: [],
   limitations: [
-    "Electron fixture; native toolkit and hardware GPU qualification remain separate.",
+    "Fixture toolkit and render surface are recorded per case; hardware GPU qualification remains separate.",
     "Only the selected session, display scale and backend are tested. Missing permissions or unsupported operations are not passing results.",
   ],
 };
@@ -473,7 +473,7 @@ if (!args.has("--run")) {
             );
             return {
               surface: initial.renderSurface ?? "webgl",
-              webgl: Boolean(initial.gpu),
+              webgl: initial.gpu && (initial.renderSurface ?? "webgl") === "webgl",
               capturedPixelsChanged: true,
               hardwareGpuQualified: false,
             };
@@ -596,12 +596,19 @@ if (!args.has("--run")) {
               await adapter.releaseAll();
             }
             await adapter.execute("move", await point("drag"), target);
-            await poll(
-              control,
-              (s) => s.buttons === 0 && s.held.length === 0,
-              5000,
-              "Application did not observe input release",
-            );
+            let observed;
+            try {
+              await poll(
+                async () => (observed = await control()),
+                (s) => s.buttons === 0 && s.held.length === 0,
+                5000,
+                "Application did not observe input release",
+              );
+            } catch (error) {
+              // Only button/modifier diagnostics; never report field contents.
+              throw new Error(`${error.message}; buttons=${observed?.buttons}; modifiers=${JSON.stringify(observed?.held?.filter((key) => ["Shift", "Control", "Alt", "Meta"].includes(key)))}`);
+            }
+            return { buttonsReleased: true, modifiersReleased: true };
           });
           await check("helper-restart-invalidates-capture", async () => {
             const old = await adapter.capture(target),

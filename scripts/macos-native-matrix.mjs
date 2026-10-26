@@ -70,7 +70,7 @@ const summary = {
   results,
   limits: [
     "Renderer/content scaling is synthetic and does not qualify mixed OS DPI or secondary displays.",
-    "Software WebGL and an available Metal surface are separate observations; missing Metal is not hardware GPU qualification.",
+    "WebGL and an available Metal surface are separate observations; missing Metal is not hardware GPU qualification.",
     "Missing Screen Recording/Accessibility or an inactive user session is incomplete, never passing native evidence. No permission prompt is opened.",
   ],
 };
