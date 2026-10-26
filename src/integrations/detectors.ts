@@ -96,6 +96,34 @@ export async function cropFrame(
     },
   };
 }
+/** Restore crop coordinates once without mutating the adapter result. */
+export function restoreDetectionRegion(
+  result: DetectionResult,
+  frame: CaptureFrame,
+  region: Region,
+): DetectionResult {
+  if (!result.box) return { ...result, frameId: frame.id };
+  const b = result.box;
+  if (
+    result.outcome !== "match" ||
+    result.frameId !== frame.id ||
+    ![b.x, b.y, b.width, b.height].every(Number.isFinite) ||
+    b.x < 0 ||
+    b.y < 0 ||
+    b.width <= 0 ||
+    b.height <= 0 ||
+    b.x + b.width > region.width + 1e-6 ||
+    b.y + b.height > region.height + 1e-6
+  )
+    throw new Error(
+      "AI localization is not a valid match within the captured region.",
+    );
+  return {
+    ...result,
+    frameId: frame.id,
+    box: { ...b, x: b.x + region.x, y: b.y + region.y },
+  };
+}
 export class DetectorService {
   private previous = new Map<string, Buffer>();
   async detect(

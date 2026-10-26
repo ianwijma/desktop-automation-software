@@ -12,7 +12,11 @@ import { aiCheckOperationSchema } from "../shared/ai-connections";
 import { AIService, safeAIError } from "../integrations/ai";
 import { NativeServiceError } from "../shared/native-protocol";
 import { detectionCoordinates } from "../integrations/locations";
-import { DetectorService, cropFrame } from "../integrations/detectors";
+import {
+  DetectorService,
+  cropFrame,
+  restoreDetectionRegion,
+} from "../integrations/detectors";
 import {
   RecordingController,
   RecordingStorageTimeoutError,
@@ -170,14 +174,11 @@ async function detect(
       prompt: String(config.prompt ?? ""),
       frame: region,
       threshold: Number(config.threshold ?? 0.85),
+      locationThreshold: Number(config.locationThreshold ?? 0.85),
       locate: Boolean(config.locate),
       signal,
     });
-    if (result.box) {
-      result.box.x += offset.x;
-      result.box.y += offset.y;
-    }
-    return result;
+    return restoreDetectionRegion(result, frame, offset);
   }
   return detectors.detect(frame, config, signal);
 }

@@ -6,6 +6,7 @@ const detectorFields = [
   "targetId",
   "region",
   "threshold",
+  "locationThreshold",
   "template",
   "text",
   "prompt",
@@ -31,6 +32,7 @@ const detectorOnlyFields: Record<string, readonly string[]> = {
   connectionId: ["ai"],
   locate: ["ai"],
   threshold: ["image", "color", "change", "ai"],
+  locationThreshold: ["ai"],
   region: ["image", "text", "color", "change", "ai"],
 };
 const detectorKinds = ["image", "text", "color", "change", "element", "ai"];

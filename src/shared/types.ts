@@ -120,6 +120,8 @@ export interface DetectionResult {
   outcome: "match" | "no-match" | "uncertain";
   value?: Json;
   confidence?: number;
+  presenceConfidence?: number;
+  locationConfidence?: number;
   box?: { x: number; y: number; width: number; height: number };
   frameId?: string;
   evidence?: string;

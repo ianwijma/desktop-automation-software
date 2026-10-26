@@ -1,3 +1,4 @@
+import sharp from "sharp";
 import { describe, expect, it, vi } from "vitest";
 import { AIService, safeAIError } from "../src/integrations/ai";
 import type { AIConnection, CaptureFrame } from "../src/shared/types";
@@ -25,7 +26,13 @@ const frame: CaptureFrame = {
   capturedAt: 1,
   width: 200,
   height: 100,
-  dataUrl: "data:image/png;base64,iVBORw0KGgo=",
+  dataUrl: `data:image/png;base64,${(
+    await sharp({
+      create: { width: 200, height: 100, channels: 3, background: "red" },
+    })
+      .png()
+      .toBuffer()
+  ).toString("base64")}`,
 };
 const json = (value: unknown, status = 200) =>
   new Response(JSON.stringify(value), {
@@ -95,7 +102,15 @@ describe("bring-your-own AI adapters", () => {
     const fetcher = mockFetch({
       answers: {
         present: { noul: 0.98 },
-        location: { box: { left: 0.1, right: 0.4, top: 0.2, bottom: 0.5 } },
+        location: {
+          confidence: 0.97,
+          box: {
+            left: 60 / 280,
+            right: 120 / 280,
+            top: 110 / 280,
+            bottom: 140 / 280,
+          },
+        },
       },
     });
     const service = new AIService(() => "test-key", fetcher);
@@ -111,7 +126,10 @@ describe("bring-your-own AI adapters", () => {
       json({
         answers: {
           present: { noul: 0.98 },
-          location: { box: { left: 0.9, right: 0.1, top: 0, bottom: 1 } },
+          location: {
+            confidence: 0.97,
+            box: { left: 0.9, right: 0.1, top: 0, bottom: 1 },
+          },
         },
       }),
     );

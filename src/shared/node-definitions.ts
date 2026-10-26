@@ -340,6 +340,12 @@ const definitions: Record<NodeKind, DefinitionMetadata> = {
       },
       { key: "selector", label: "Browser selector" },
       { key: "threshold", label: "Confidence threshold", type: "number" },
+      {
+        key: "locationThreshold",
+        label: "Jev location confidence",
+        type: "number",
+        help: "Independent Box confidence threshold (default 0.85). Both presence and location must pass before coordinates are available.",
+      },
       { key: "connectionId", label: "Vision connection", type: "connection" },
       {
         key: "locate",
@@ -902,6 +908,9 @@ export function validateNodeConfig(
   if (detector) {
     choice("detector", ["image", "text", "color", "change", "element", "ai"]);
     numeric("threshold", 0, 1);
+    numeric("locationThreshold", 0, 1);
+    if (config.locationThreshold === 0)
+      error("Location confidence threshold must be greater than 0");
     const type = config.detector ?? "text";
     if (context && type === "image")
       required("template", "Choose a template image");
@@ -1059,6 +1068,15 @@ const detectorOutputs: OutputSpec[] = [
     description: "Confidence between 0 and 1",
     optional: true,
   },
+  ...["presenceConfidence", "locationConfidence"].map((path) => ({
+    path,
+    type: "number" as const,
+    description:
+      path === "presenceConfidence"
+        ? "Jev presence probability"
+        : "Jev Box confidence, independent of presence",
+    optional: true,
+  })),
   {
     path: "value",
     type: "json",
