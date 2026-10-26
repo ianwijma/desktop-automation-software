@@ -394,6 +394,7 @@ pub fn error_for(method: &str, message: String, p: &Value) -> Value {
     let mut value = error(method, message);
     if cfg!(target_os = "windows") {
         value["backend"] = json!(match method {
+            "nativeElement" | "inspectNativeLocator" => "windows-uia",
             "input" | "releaseKeys" | "releaseAll" => "win32-sendinput",
             "capture" if str_field(p, "captureBackend") == "printwindow" => "win32-printwindow",
             _ => backend(),

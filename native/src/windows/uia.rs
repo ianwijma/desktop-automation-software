@@ -32,10 +32,25 @@ static WORKER: OnceLock<Worker> = OnceLock::new();
 fn error(_: ::windows::core::Error) -> String {
     "uia:STALE_ELEMENT".into()
 }
+unsafe fn element_error(element: &IUIAutomationElement, err: ::windows::core::Error) -> String {
+    if err.code().0 as u32 == UIA_E_ELEMENTNOTAVAILABLE
+        && element
+            .GetCurrentPatternAs::<IUIAutomationVirtualizedItemPattern>(
+                UIA_VirtualizedItemPatternId,
+            )
+            .is_ok()
+    {
+        "uia:VIRTUALIZED_ELEMENT".into()
+    } else {
+        error(err)
+    }
+}
 fn optional<T>(value: ::windows::core::Result<T>) -> Result<Option<T>> {
     match value {
         Ok(v) => Ok(Some(v)),
-        Err(e) if e.code().0 == 0x80004003u32 as i32 => Ok(None),
+        // The generated COM binding maps S_OK + null to Error::empty (HRESULT 0).
+        // An actual E_POINTER failure is not an absent child and must fail closed.
+        Err(e) if e.code().0 == 0 => Ok(None),
         Err(e) => Err(error(e)),
     }
 }
@@ -145,7 +160,10 @@ impl Context<'_> {
     }
     unsafe fn properties(&self, e: &IUIAutomationElement) -> Result<Value> {
         self.check()?;
-        let secure = e.CurrentIsPassword().map_err(error)?.as_bool();
+        let secure = e
+            .CurrentIsPassword()
+            .map_err(|err| element_error(e, err))?
+            .as_bool();
         let name = if secure {
             String::new()
         } else {
@@ -250,7 +268,11 @@ impl Context<'_> {
             if let Some(sibling) = optional(walker.GetNextSiblingElement(&element))? {
                 queue.push_back((sibling, depth));
             }
-            if element.CurrentProcessId().map_err(error)? != owner as i32 {
+            if element
+                .CurrentProcessId()
+                .map_err(|err| element_error(&element, err))?
+                != owner as i32
+            {
                 continue;
             }
             let properties = self.properties(&element)?;
@@ -435,5 +457,30 @@ impl Context<'_> {
             _ => return Err("uia:INVALID_REQUEST".into()),
         };
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn null_success_ends_tree_but_provider_failures_do_not() {
+        assert!(
+            optional::<IUIAutomationElement>(Err(::windows::core::Error::empty()))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            optional::<IUIAutomationElement>(Err(::windows::core::Error::from_hresult(
+                ::windows::core::HRESULT(0x80004003u32 as i32)
+            )))
+            .is_err()
+        );
+        assert!(
+            optional::<IUIAutomationElement>(Err(::windows::core::Error::from_hresult(
+                ::windows::core::HRESULT(UIA_E_ELEMENTNOTAVAILABLE as i32)
+            )))
+            .is_err()
+        );
     }
 }

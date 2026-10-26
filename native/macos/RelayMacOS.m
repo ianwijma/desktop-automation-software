@@ -140,20 +140,32 @@ static id UniqueGeometry(NSArray *candidates, CGRect bounds) {
     return matches.firstObject;
 }
 static id AXWindow(NSDictionary *window) {
-    InputGuard();
-    AXUIElementRef application = AXUIElementCreateApplication([window[@"pid"] intValue]);
-    AXUIElementSetMessagingTimeout(application, 0.5);
-    NSArray *items = Attribute(application, kAXWindowsAttribute);
-    CFRelease(application);
-    NSMutableArray *candidates = [NSMutableArray array];
-    for (id candidate in items) {
-        AXUIElementRef ax = (__bridge AXUIElementRef)candidate;
-        AXUIElementSetMessagingTimeout(ax, 0.5);
-        CGRect r = CGRectZero;
-        if (AXBounds(ax, &r))
-            [candidates addObject:@{@"element" : candidate, @"bounds" : Bounds(r)}];
+    for (int attempt = 0; attempt < 3; attempt++) {
+        InputGuard();
+        AXUIElementRef application = AXUIElementCreateApplication([window[@"pid"] intValue]);
+        AXUIElementSetMessagingTimeout(application, 0.5);
+        NSArray *items = Attribute(application, kAXWindowsAttribute);
+        CFRelease(application);
+        NSMutableArray *candidates = [NSMutableArray array];
+        for (id candidate in items) {
+            AXUIElementRef ax = (__bridge AXUIElementRef)candidate;
+            AXUIElementSetMessagingTimeout(ax, 0.5);
+            CGRect r = CGRectZero;
+            if (AXBounds(ax, &r))
+                [candidates addObject:@{@"element" : candidate, @"bounds" : Bounds(r)}];
+        }
+        @try {
+            return UniqueGeometry(candidates, RelayRect(window[@"bounds"]));
+        } @catch (NSException *e) {
+            // AX can temporarily omit a window while its provider handles input.
+            // Retry only read-only identification; ambiguity and actions never retry.
+            if (![e.reason isEqual:@"AX_WINDOW_UNAVAILABLE"] || attempt == 2)
+                @throw;
+            usleep(20000);
+        }
     }
-    return UniqueGeometry(candidates, RelayRect(window[@"bounds"]));
+    Fail(@"AX_WINDOW_UNAVAILABLE");
+    return nil;
 }
 
 static void Verify(NSDictionary *original, BOOL foreground) {

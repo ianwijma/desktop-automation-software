@@ -234,11 +234,9 @@ export async function runNativeLocatorSmoke({
     await page.getByRole("dialog").waitFor();
     await page.keyboard.press("Escape");
     await page.getByRole("dialog").waitFor({ state: "hidden" });
-    assert.equal(
-      await page
-        .getByRole("button", { name: "Pick native control", exact: true })
-        .evaluate((el) => el === document.activeElement),
-      true,
+    await page.waitForFunction(
+      () =>
+        document.activeElement?.textContent?.trim() === "Pick native control",
     );
     await page
       .getByLabel("Desktop targeting", { exact: true })
