@@ -237,11 +237,12 @@ export class NativeAdapter {
   private terminate(child: ChildProcess): Promise<void> {
     if (process.platform === "win32" && child.pid && child.exitCode === null) {
       return new Promise((resolve) => {
-        const killer = spawn(
-          "taskkill",
-          ["/PID", String(child.pid), "/T", "/F"],
-          { stdio: "ignore", windowsHide: true },
-        );
+        // The persistent Windows helper has no per-request subprocesses.
+        // Its launched applications must survive cancellation/restart.
+        const killer = spawn("taskkill", ["/PID", String(child.pid), "/F"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
         const done = () => {
           child.kill();
           void this.waitForExit(child).then(resolve);

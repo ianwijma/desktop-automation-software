@@ -29,7 +29,7 @@ Native input uses the real foreground application, pointer and keyboard. The des
 
 macOS requires Screen Recording, Accessibility, and permission for System Events automation. Window titles must be available and uniquely identify the window within its application. Windows cannot inject into higher-integrity applications without matching privileges. PrintWindow can return blank content for some GPU, protected, minimized, or game windows even when the API succeeds; those applications need another capture backend before they can be claimed as supported. Exclusive fullscreen games, anti-cheat-protected software and protected media are not guaranteed on any platform.
 
-The runner cancels native work by terminating the helper process group on Unix and waiting for a separate key/button release pass before reusing desktop input. Explicit held keys are tracked in both layers. Launched applications have independent process groups and remain open when a flow stops. Windows helper subprocess termination and stuck-key recovery still require real-platform validation.
+The runner cancels native work by terminating the helper process group on Unix or the persistent helper alone on Windows, then waits for a separate key/button release pass before reusing desktop input. Explicit held keys are tracked in both layers. Launched applications remain open when a flow stops. Windows cancellation/recovery is exercised by the opt-in matrix and still needs real Windows 11 qualification.
 
 ## Protocol
 

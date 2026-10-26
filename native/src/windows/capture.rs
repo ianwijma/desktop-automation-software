@@ -249,6 +249,7 @@ impl Drop for Dc {
 }
 pub fn print_window(window: HWND) -> Result<Value> {
     unsafe {
+        let owner = pid(window)?;
         let original = rect(window)?;
         let width = (original.right - original.left) as u32;
         let height = (original.bottom - original.top) as u32;
@@ -301,7 +302,7 @@ pub fn print_window(window: HWND) -> Result<Value> {
             pixel[3] = 255;
         }
         available_window(window)?;
-        if !same_rect(original, rect(window)?) {
+        if owner != pid(window)? || !same_rect(original, rect(window)?) {
             return Err(fail("CAPTURE_GEOMETRY"));
         }
         Ok(response(
