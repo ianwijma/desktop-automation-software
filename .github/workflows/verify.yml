@@ -27,7 +27,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y xvfb xdotool x11-utils xinput imagemagick tesseract-ocr
       - run: npm ci
       - run: node node_modules/electron/install.js
-      - run: npx playwright install --with-deps chromium
       - run: cargo build --manifest-path native/Cargo.toml
       - run: cargo test --manifest-path native/Cargo.toml
       - run: npm run build:native
@@ -38,6 +37,7 @@ jobs:
         if: runner.os == 'Windows'
         run: npm run test:native:windows -- --run --allow-unavailable
       - run: npm run check
+      - run: npx playwright install --with-deps chromium
       - run: npm run test:ui
       - run: npm run build
       - name: Linux isolated desktop smoke test
