@@ -849,6 +849,14 @@ export function browserRuntime(request) {
       };
       if (!documents.has(doc)) {
         documents.add(doc);
+        // A resumed session can begin with a populated field still focused.
+        // Its later change event must not record an edit from the prior session.
+        for (const element of rootElements(doc))
+          if (editable(element))
+            lastText.set(
+              element,
+              element.isContentEditable ? element.textContent : element.value,
+            );
         attach(doc);
       }
       for (const element of rootElements(doc)) {

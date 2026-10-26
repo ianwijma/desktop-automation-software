@@ -104,7 +104,7 @@
     if (event.button === 1) state.middle++;
   });
   document.querySelector("#modified").addEventListener("click", (event) => {
-    if (event.ctrlKey) state.modified++;
+    if (event.shiftKey) state.modified++;
   });
   document.addEventListener("keydown", (event) => {
     if (event.key.toLowerCase() === "k" && event.ctrlKey && event.shiftKey) {

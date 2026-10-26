@@ -830,11 +830,22 @@ export class BrowserAdapter {
               });
               await selector.setChecked(config.checked, { timeout });
             } else if (selector)
-              await selector.click({
-                button,
-                clickCount: Number(config.clickCount ?? 1),
-                timeout,
-              });
+              await selector
+                .click({
+                  button,
+                  clickCount: Number(config.clickCount ?? 1),
+                  timeout,
+                })
+                .catch((error: Error) => {
+                  // A dispatched click may close its own popup before the
+                  // browser acknowledges it. Never retry that input.
+                  if (
+                    !page.isClosed() ||
+                    !error.message.includes("has been closed") ||
+                    !error.message.includes("performing click action")
+                  )
+                    throw error;
+                });
             else
               await page.mouse.click(x, y, {
                 button,

@@ -502,7 +502,7 @@ for (const mode of ["managed", "extension"] as const)
       await page.locator("#double").dblclick();
       await page.locator("#right").click({ button: "right" });
       await page.locator("#middle").click({ button: "middle" });
-      await page.locator("#modified").click({ modifiers: ["Control"] });
+      await page.locator("#modified").click({ modifiers: ["Shift"] });
       await page.locator("#modified").focus();
       await page.keyboard.down("Control");
       await page.keyboard.down("Shift");
@@ -742,7 +742,19 @@ for (const mode of ["managed", "extension"] as const)
             ).length,
         )
         .toBe(3);
-      await child.locator("#close").click();
+      const closed = child.waitForEvent("close");
+      await child
+        .locator("#close")
+        .click()
+        .catch((error: Error) => {
+          if (
+            !child.isClosed() ||
+            !error.message.includes("has been closed") ||
+            !error.message.includes("performing click action")
+          )
+            throw error;
+        });
+      await closed;
       await expect.poll(() => child.isClosed()).toBe(true);
       await ready(page);
       await page.locator("#text").fill("after popup");
@@ -865,7 +877,7 @@ for (const mode of ["managed", "extension"] as const)
         selectionEnd: 3,
       });
       const interrupted = await adapter.stopRecording();
-      expect(interrupted).toHaveLength(1);
+      expect(interrupted, JSON.stringify(interrupted)).toHaveLength(1);
       expect(interrupted[0]).toMatchObject({
         kind: "type",
         config: { requiresConfiguration: true, text: "編集中" },
