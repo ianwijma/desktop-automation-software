@@ -101,6 +101,8 @@
         ),
       );
       window.fixture.report({
+        coordinateSpace: "content",
+        viewport: { width: window.innerWidth, height: window.innerHeight },
         ...state,
         held: [...held.values()],
         devicePixelRatio: devicePixelRatio,

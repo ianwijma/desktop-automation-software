@@ -36,11 +36,11 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
   fs.appendFileSync(path.join(root, 'requests'), line + '\\n');
   if(request.method === 'input' && request.params.kind === 'drag') return;
   let result = true;
-  if(request.method === 'handshake') result = {protocolVersion:1,helperVersion:'test',instanceId:'mock',platform:'linux',backend:'mock',coordinateSpace:'physical-pixels'};
+  if(request.method === 'handshake') result = {protocolVersion:2,helperVersion:'test',instanceId:'mock',platform:'linux',backend:'mock',coordinateSpace:'physical-pixels'};
   if(request.method === 'capabilities') result = {platform:'linux',session:'x11',capture:true,input:true,accessibility:false,directRecording:false,globalShortcuts:false,windows:[],reasons:[]};
   if(request.method === 'listWindows') result = [{id:'1',title:'Fixture',bounds:{x:0,y:0,width:100,height:100}}];
   const error = request.id === 'cleanup-keys' && fs.readFileSync(path.join(root,'mode'),'utf8') === 'fail' ? {code:'BACKEND_FAILURE',message:'Mock key release failed',operation:'releaseKeys',backend:'mock',permission:'unknown',retryable:false} : undefined;
-  process.stdout.write(JSON.stringify({protocolVersion:1,id:request.id,...(error?{error}:{result})}) + '\\n');
+  process.stdout.write(JSON.stringify({protocolVersion:2,id:request.id,...(error?{error}:{result})}) + '\\n');
 });
 `,
       { mode: 0o700 },
@@ -233,12 +233,11 @@ describe.skipIf(!supported)(
       await native.execute("focus", {}, target);
       await new Promise((resolve) => setTimeout(resolve, 200));
       execFileSync("xdotool", ["mousemove", "80", "90", "click", "1"], { env });
-      for (
-        let i = 0;
-        i < 40 && !actions.some((action) => action.kind === "click");
-        i++
-      )
-        await new Promise((resolve) => setTimeout(resolve, 25));
+      await expect
+        .poll(() => actions.some((action) => action.kind === "click"), {
+          timeout: 5000,
+        })
+        .toBe(true);
       await native.stopRecording();
       const pid = (native as unknown as { child: ChildProcess }).child.pid!;
       expect(
@@ -253,7 +252,7 @@ describe.skipIf(!supported)(
         expectedWidth: 300,
         expectedHeight: 180,
       });
-    });
+    }, 10000);
     it("joins each recorder before restarting and never appends stopped-session actions", async () => {
       const prior: RecordedAction[] = [],
         current: RecordedAction[] = [];
@@ -266,12 +265,11 @@ describe.skipIf(!supported)(
       await native.startRecording(target, (action) => current.push(action));
       await new Promise((resolve) => setTimeout(resolve, 100));
       execFileSync("xdotool", ["mousemove", "80", "90", "click", "1"], { env });
-      for (
-        let i = 0;
-        i < 40 && !current.some((action) => action.kind === "click");
-        i++
-      )
-        await new Promise((resolve) => setTimeout(resolve, 25));
+      await expect
+        .poll(() => current.some((action) => action.kind === "click"), {
+          timeout: 5000,
+        })
+        .toBe(true);
       await native.stopRecording();
       expect(current.filter((action) => action.kind === "click")).toHaveLength(
         1,
@@ -281,7 +279,7 @@ describe.skipIf(!supported)(
       execFileSync("xdotool", ["mousemove", "80", "90", "click", "1"], { env });
       await new Promise((resolve) => setTimeout(resolve, 100));
       expect(current).toHaveLength(count);
-    });
+    }, 10000);
     it("waits for cancelled native work to release held keys before allowing new input", async () => {
       await native.execute("key", { key: "a", action: "down" }, target);
       const abort = new AbortController();

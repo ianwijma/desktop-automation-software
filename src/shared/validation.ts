@@ -90,29 +90,39 @@ export const connectionSchema = z.object({
     .object({ ok: z.boolean(), message: z.string(), at: z.string() })
     .optional(),
 });
-export const targetSchema = z.object({
-  id,
-  name: z.string().min(1).max(160),
-  kind: z.enum(["desktop", "browser"]),
-  browserMode: z.enum(["managed", "extension"]).optional(),
-  profile: z.string().max(120).optional(),
-  url: z.string().optional(),
-  application: z.string().optional(),
-  windowTitle: z.string().optional(),
-  launch: z
-    .object({
-      linux: z
-        .object({ command: z.string(), args: z.array(z.string()) })
-        .optional(),
-      win32: z
-        .object({ command: z.string(), args: z.array(z.string()) })
-        .optional(),
-      darwin: z
-        .object({ command: z.string(), args: z.array(z.string()) })
-        .optional(),
-    })
-    .optional(),
-});
+export const targetSchema = z
+  .object({
+    id,
+    name: z.string().min(1).max(160),
+    kind: z.enum(["desktop", "browser"]),
+    browserMode: z.enum(["managed", "extension"]).optional(),
+    profile: z.string().max(120).optional(),
+    url: z.string().optional(),
+    application: z.string().optional(),
+    windowTitle: z.string().optional(),
+    windowsCaptureBackend: z.enum(["wgc", "printwindow"]).optional(),
+    launch: z
+      .object({
+        linux: z
+          .object({ command: z.string(), args: z.array(z.string()) })
+          .optional(),
+        win32: z
+          .object({ command: z.string(), args: z.array(z.string()) })
+          .optional(),
+        darwin: z
+          .object({ command: z.string(), args: z.array(z.string()) })
+          .optional(),
+      })
+      .optional(),
+  })
+  .superRefine((target, context) => {
+    if (target.kind !== "desktop" && target.windowsCaptureBackend)
+      context.addIssue({
+        code: "custom",
+        path: ["windowsCaptureBackend"],
+        message: "Windows capture methods require a desktop target",
+      });
+  });
 export const settingsSchema = z.object({
   theme: z.enum(["dark", "light", "system"]),
   accent: z.string().max(40),

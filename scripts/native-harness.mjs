@@ -10,6 +10,35 @@ import { build } from "esbuild";
 import sharp from "sharp";
 
 const args = new Set(process.argv.slice(2));
+const option = (name, fallback) =>
+  process.argv
+    .find((arg) => arg.startsWith(`--${name}=`))
+    ?.slice(name.length + 3) ?? fallback;
+const fixtureKind = option("fixture", "electron");
+const captureBackend = option("capture-backend", "wgc");
+const contentScale = Number(option("content-scale", "1"));
+const rendererScale = Number(option("renderer-scale", "1"));
+const position = {
+  x: Number(option("window-x", "80")),
+  y: Number(option("window-y", "80")),
+};
+assert.ok(
+  Object.values(position).every(
+    (value) => Number.isSafeInteger(value) && Math.abs(value) < 100000,
+  ),
+  "Invalid fixture position",
+);
+assert.ok(["electron", "win32"].includes(fixtureKind), "Unknown fixture");
+assert.ok(
+  ["wgc", "printwindow"].includes(captureBackend),
+  "Unknown capture backend",
+);
+assert.ok(
+  [contentScale, rendererScale].every(
+    (value) => Number.isFinite(value) && value >= 0.5 && value <= 3,
+  ),
+  "Fixture scales must be between 0.5 and 3",
+);
 const output = path.resolve(
   process.env.RELAY_NATIVE_REPORT_DIR ?? "test-results/native-harness",
 );
@@ -29,6 +58,10 @@ const report = {
         ?.split("=")[1] ?? "unspecified",
     node: process.versions.node,
     softwareGpuRequested: args.has("--software-gpu"),
+    fixture: fixtureKind,
+    contentScale,
+    rendererScale,
+    captureBackend: process.platform === "win32" ? captureBackend : undefined,
   },
   artifact: {},
   checks: [],
@@ -133,13 +166,26 @@ if (!args.has("--run")) {
       env: { ELECTRON_RUN_AS_NODE: undefined },
     });
     const binary = await readFile(adapter.binaryPath);
-    const fixture = path.resolve("tests/fixtures/native-desktop/main.cjs");
-    const files = ["main.cjs", "preload.cjs", "index.html"];
-    const fixtureHash = createHash("sha256");
-    for (const name of files)
-      fixtureHash.update(
-        await readFile(path.join(path.dirname(fixture), name)),
+    if (fixtureKind === "win32")
+      assert.equal(
+        process.platform,
+        "win32",
+        "The native control fixture requires Windows",
       );
+    const fixture =
+      fixtureKind === "win32"
+        ? path.resolve(
+            path.dirname(adapter.binaryPath),
+            "relay-native-fixture.exe",
+          )
+        : path.resolve("tests/fixtures/native-desktop/main.cjs");
+    const fixtureHash = createHash("sha256");
+    if (fixtureKind === "win32") fixtureHash.update(await readFile(fixture));
+    else
+      for (const name of ["main.cjs", "preload.cjs", "index.html"])
+        fixtureHash.update(
+          await readFile(path.join(path.dirname(fixture), name)),
+        );
     let commit = "unknown",
       sourceDirty = true;
     try {
@@ -173,7 +219,19 @@ if (!args.has("--run")) {
       capabilities.native?.helper,
       "Native handshake must succeed independently of desktop readiness",
     );
-    if (capabilities.session === "wayland") {
+    const unavailableWindows =
+      capabilities.native?.helper?.backend === "win32-wgc" &&
+      (!capabilities.native.windows?.interactiveDesktop ||
+        !capabilities.native.windows?.perMonitorV2 ||
+        (captureBackend === "wgc" && !capabilities.capture));
+    if (unavailableWindows && args.has("--allow-unavailable")) {
+      report.checks.push({
+        name: "desktop-capture-and-input",
+        status: "not-run",
+        reason:
+          "The host does not expose the required interactive desktop/graphics device. No fixture input was attempted.",
+      });
+    } else if (capabilities.session === "wayland") {
       report.checks.push({
         name: "desktop-capture-and-input",
         status: "not-run",
@@ -188,6 +246,8 @@ if (!args.has("--run")) {
         configFile,
         JSON.stringify({
           title,
+          contentScale,
+          position,
           token,
           controlFile,
           profile: path.join(temporary, "profile"),
@@ -198,21 +258,34 @@ if (!args.has("--run")) {
         name: "Native harness fixture",
         kind: "desktop",
         windowTitle: title,
+        ...(process.platform === "win32"
+          ? { windowsCaptureBackend: captureBackend }
+          : {}),
         launch: {
           [process.platform]: {
-            command: createRequire(import.meta.url)("electron"),
-            args: [
-              "--no-sandbox",
-              ...(args.has("--software-gpu")
-                ? [
-                    "--use-gl=angle",
-                    "--use-angle=swiftshader",
-                    "--enable-unsafe-swiftshader",
-                  ]
-                : []),
-              fixture,
-              configFile,
-            ],
+            command:
+              fixtureKind === "win32"
+                ? fixture
+                : createRequire(import.meta.url)("electron"),
+            args:
+              fixtureKind === "win32"
+                ? [configFile]
+                : [
+                    "--no-sandbox",
+                    `--force-device-scale-factor=${rendererScale}`,
+                    ...(args.has("--software-gpu")
+                      ? [
+                          "--use-gl=angle",
+                          "--use-angle=swiftshader",
+                          "--enable-unsafe-swiftshader",
+                          ...(process.platform === "win32"
+                            ? ["--disable-gpu-compositing"]
+                            : []),
+                        ]
+                      : []),
+                    fixture,
+                    configFile,
+                  ],
           },
         },
       };
@@ -231,43 +304,76 @@ if (!args.has("--run")) {
         const state = await poll(control, (s) => s.focused && s.targets);
         report.environment.displays = state.displays;
         report.environment.fixtureVersions = state.versions;
+        report.environment.observedDevicePixelRatio = state.devicePixelRatio;
         return { startup: true, focused: true };
       });
       if (launched) {
         let frame;
+        const point = async (id, dx = 0, dy = 0) => {
+          const state = await control(),
+            r = state.targets[id];
+          let x = r.x + r.width / 2 + dx,
+            y = r.y + r.height / 2 + dy;
+          if (state.coordinateSpace !== "window-input") {
+            const content = state.contentBounds ?? state.bounds;
+            const viewport = state.viewport ?? state.bounds;
+            x =
+              content.x - frame.bounds.x + (x * content.width) / viewport.width;
+            y =
+              content.y -
+              frame.bounds.y +
+              (y * content.height) / viewport.height;
+          }
+          const transform = frame.native.geometry.pixelToInput;
+          return {
+            x: (x - (transform.offsetX ?? 0)) / transform.scaleX,
+            y: (y - (transform.offsetY ?? 0)) / transform.scaleY,
+          };
+        };
         const captured = await check(
           "capture-content-and-transform",
           async () => {
-            frame = await adapter.capture(target);
-            const state = await control();
-            assert.equal(
-              frame.native.helperInstanceId,
-              capabilities.native.helper.instanceId,
-            );
-            const marker = state.targets.marker;
-            const sx = frame.width / state.bounds.width,
-              sy = frame.height / state.bounds.height;
-            const { data } = await sharp(
-              Buffer.from(frame.dataUrl.split(",")[1], "base64"),
-            )
-              .extract({
-                left: Math.round((marker.x + 10) * sx),
-                top: Math.round((marker.y + 10) * sy),
-                width: 1,
-                height: 1,
-              })
-              .removeAlpha()
-              .raw()
-              .toBuffer({ resolveWithObject: true });
-            assert.ok(
-              Math.abs(data[0] - 232) < 12 &&
+            let matched = false;
+            const deadline = Date.now() + 5000;
+            // App load/DOM readiness can precede its first compositor paint.
+            // Read-only captures may wait for known fixture pixels; input never retries.
+            do {
+              frame = await adapter.capture(target);
+              assert.equal(
+                frame.native.helperInstanceId,
+                capabilities.native.helper.instanceId,
+              );
+              const marker = await point("marker");
+              const png = Buffer.from(frame.dataUrl.split(",")[1], "base64");
+              const { data } = await sharp(png)
+                .extract({
+                  left: Math.round(marker.x),
+                  top: Math.round(marker.y),
+                  width: 1,
+                  height: 1,
+                })
+                .removeAlpha()
+                .raw()
+                .toBuffer({ resolveWithObject: true });
+              report.startupCapture = {
+                width: frame.width,
+                height: frame.height,
+                bounds: frame.bounds,
+                native: frame.native,
+                marker: { point: marker, rgb: [...data] },
+              };
+              // Keep failed pre-input captures too: only this synthetic fixture is captured.
+              await writeFile(path.join(output, "fixture.png"), png);
+              matched =
+                Math.abs(data[0] - 232) < 12 &&
                 Math.abs(data[1] - 56) < 12 &&
-                Math.abs(data[2] - 100) < 12,
-              "Capture must contain the fixture marker, not a blank/incorrect window",
-            );
-            await writeFile(
-              path.join(output, "fixture.png"),
-              Buffer.from(frame.dataUrl.split(",")[1], "base64"),
+                Math.abs(data[2] - 100) < 12;
+              if (!matched)
+                await new Promise((resolve) => setTimeout(resolve, 100));
+            } while (!matched && Date.now() < deadline);
+            assert.ok(
+              matched,
+              `Capture must contain the fixture marker, not a blank/incorrect window (sample ${report.startupCapture.marker.rgb})`,
             );
             return {
               width: frame.width,
@@ -277,14 +383,10 @@ if (!args.has("--run")) {
             };
           },
         );
-        const point = async (id, dx = 0, dy = 0) => {
-          const s = await control(),
-            r = s.targets[id];
-          return {
-            x: ((r.x + r.width / 2 + dx) * frame.width) / s.bounds.width,
-            y: ((r.y + r.height / 2 + dy) * frame.height) / s.bounds.height,
-          };
-        };
+        const sampleText =
+          process.platform === "win32"
+            ? "Relay fixture 日本語 😀42"
+            : "Relay fixture text 42";
         if (captured) {
           await check("click-type-secure-field-scroll-drag", async () => {
             await adapter.execute(
@@ -294,12 +396,8 @@ if (!args.has("--run")) {
             );
             await poll(control, (s) => s.clicks === 1);
             await adapter.execute("click", await point("text"), target);
-            await adapter.execute(
-              "type",
-              { text: "Relay fixture text 42" },
-              target,
-            );
-            await poll(control, (s) => s.text === "Relay fixture text 42");
+            await adapter.execute("type", { text: sampleText }, target);
+            await poll(control, (s) => s.text === sampleText);
             await adapter.execute("click", await point("secure"), target);
             await adapter.execute("type", { text: "synthetic-only" }, target);
             await poll(control, (s) => s.secureHasValue);
@@ -327,13 +425,14 @@ if (!args.has("--run")) {
           });
           await check("animated-graphics-capture", async () => {
             const initial = await control();
-            assert.ok(initial.gpu, "WebGL context unavailable");
-            const gpu = initial.targets.gpu,
-              sx = frame.width / initial.bounds.width,
-              sy = frame.height / initial.bounds.height;
+            assert.ok(
+              initial.gpu || initial.renderSurface === "native-gdi",
+              "Graphics surface unavailable",
+            );
+            const gpu = await point("gpu");
             const region = {
-              left: Math.round((gpu.x + 20) * sx),
-              top: Math.round((gpu.y + 20) * sy),
+              left: Math.round(gpu.x),
+              top: Math.round(gpu.y),
               width: 8,
               height: 8,
             };
@@ -346,11 +445,13 @@ if (!args.has("--run")) {
             };
             const first = await pixels();
             await poll(pixels, (p) => !p.equals(first));
-            assert.ok(
-              (await control()).animationFrames > initial.animationFrames,
+            await poll(
+              control,
+              (s) => s.animationFrames > initial.animationFrames,
             );
             return {
-              webgl: true,
+              surface: initial.renderSurface ?? "webgl",
+              webgl: Boolean(initial.gpu),
               capturedPixelsChanged: true,
               hardwareGpuQualified: false,
             };
@@ -358,7 +459,16 @@ if (!args.has("--run")) {
           await check("resize-rejects-stale-capture", async () => {
             const old = await adapter.capture(target);
             await control("/resize", "POST");
-            await poll(control, (s) => s.bounds.width === 740);
+            await poll(
+              () => adapter.listWindows(),
+              (windows) =>
+                windows.some(
+                  (window) =>
+                    window.id === old.native.windowId &&
+                    (window.bounds.width !== old.bounds.width ||
+                      window.bounds.height !== old.bounds.height),
+                ),
+            );
             await assert.rejects(
               adapter.execute(
                 "click",
@@ -368,8 +478,29 @@ if (!args.has("--run")) {
               /geometry changed/i,
             );
             frame = await adapter.capture(target);
-            assert.equal(frame.bounds.width, 740);
+            assert.notDeepEqual(
+              [frame.bounds.width, frame.bounds.height],
+              [old.bounds.width, old.bounds.height],
+            );
+            return { before: old.bounds, after: frame.bounds };
           });
+          if (process.platform === "win32")
+            await check("capture-loss-and-explicit-recovery", async () => {
+              await control("/minimize", "POST");
+              await poll(control, (s) => s.minimized);
+              await assert.rejects(adapter.capture(target), (error) =>
+                ["CAPTURE_LOST", "CAPTURE_UNAVAILABLE"].includes(
+                  error.details?.code,
+                ),
+              );
+              await control("/restore", "POST");
+              await poll(control, (s) => !s.minimized && s.focused);
+              frame = await adapter.capture(target);
+              assert.equal(
+                frame.native.backend,
+                captureBackend === "wgc" ? "win32-wgc" : "win32-printwindow",
+              );
+            });
           await check("held-input-cancellation-and-release", async () => {
             await adapter.execute(
               "key",

@@ -1,5 +1,5 @@
 use super::*;
-pub const VERSION: u64 = 1;
+pub const VERSION: u64 = 2;
 static INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 pub fn backend() -> &'static str {
     #[cfg(target_os = "linux")]
@@ -12,7 +12,7 @@ pub fn backend() -> &'static str {
     }
     #[cfg(target_os = "windows")]
     {
-        "win32-powershell-printwindow"
+        "win32-wgc"
     }
     #[cfg(target_os = "macos")]
     {
@@ -33,6 +33,28 @@ pub fn handshake() -> Value {
         "backend":backend(),"coordinateSpace":space})
 }
 pub fn error(method: &str, message: String) -> Value {
+    if let Some(kind) = message.strip_prefix("win32:") {
+        let (code, safe, permission) = match kind {
+            "ELEVATED_TARGET" => ("PERMISSION_DENIED", "The target runs at a higher integrity level; use an unelevated target or matching privileges", "denied"),
+            "PRIVILEGE_UNKNOWN" => ("PERMISSION_DENIED", "Target integrity could not be checked; no input was sent", "unknown"),
+            "DESKTOP_UNAVAILABLE" => ("PERMISSION_DENIED", "The interactive desktop is locked, secure, or unavailable", "required"),
+            "DPI_UNAVAILABLE" => ("CAPTURE_UNAVAILABLE", "Per-monitor DPI awareness could not be established; native coordinates are unavailable", "unknown"),
+            "CAPTURE_UNAVAILABLE" => ("CAPTURE_UNAVAILABLE", "Windows capture is unavailable or the source refused capture; no compatibility fallback was attempted", "unknown"),
+            "CAPTURE_LOST" | "CAPTURE_STOP_FAILED" => ("CAPTURE_LOST", "The capture source or graphics session was lost or could not be closed", "unknown"),
+            "CAPTURE_TIMEOUT" => ("TIMEOUT", "Windows Graphics Capture did not return a frame matching the current window geometry", "unknown"),
+            "CAPTURE_GEOMETRY" => ("STALE_CAPTURE", "Target geometry changed or cannot be mapped exactly; capture and detect again", "unknown"),
+            "TARGET_UNAVAILABLE" => ("TARGET_UNAVAILABLE", "Target window is no longer available", "unknown"),
+            "TARGET_OBSCURED" => ("TARGET_UNAVAILABLE", "Another window obscures the input point; no pointer action was sent", "unknown"),
+            "FOCUS_FAILED" => ("FOCUS_FAILED", "Windows did not grant foreground focus to the selected target", "unknown"),
+            "INPUT_REJECTED" => ("INPUT_REJECTED", "SendInput rejected all or part of the input; check desktop access and target privileges. Input was not repeated", "unknown"),
+            "INPUT_BUSY" => ("INPUT_REJECTED", "A modifier or requested key is already held outside this action; release it before retrying", "unknown"),
+            "INVALID_COORDINATES" => ("INVALID_REQUEST", "Input coordinates are outside the target or virtual desktop", "unknown"),
+            "UNSUPPORTED_KEY" => ("UNSUPPORTED_OPERATION", "Unsupported Windows key; use a named key or Unicode Type action", "not-required"),
+            "BACKEND_REQUIRED" => ("CAPTURE_UNAVAILABLE", "Choose a Windows capture method for this application in Settings before capturing", "unknown"),
+            _ => ("BACKEND_FAILURE", "A Windows backend operation failed", "unknown"),
+        };
+        return json!({"code":code,"message":safe,"operation":method,"backend":backend(),"permission":permission,"retryable":false});
+    }
     let lower = message.to_lowercase();
     let code = if lower.contains("protocol") {
         "PROTOCOL_MISMATCH"
@@ -124,6 +146,8 @@ pub fn capabilities(mut value: Value) -> Value {
         }
     } else if portal {
         "required"
+    } else if cfg!(target_os = "windows") {
+        "unknown"
     } else {
         "not-required"
     };
@@ -139,6 +163,9 @@ pub fn capabilities(mut value: Value) -> Value {
         "unknown"
     };
     value["native"] = json!({"helper":handshake(),"operations":operations,"permissions":{"capture":capture,"input":input}});
+    if value["windowsBackend"].is_object() {
+        value["native"]["windows"] = value["windowsBackend"].take();
+    }
     value
 }
 pub fn capture(mut value: Value, p: &Value) -> Result<Value> {
@@ -153,9 +180,26 @@ pub fn capture(mut value: Value, p: &Value) -> Result<Value> {
         return Err("Invalid capture geometry".into());
     }
     let info = handshake();
-    value["native"] = json!({"helperInstanceId":info["instanceId"],"backend":backend(),"windowId":p["windowId"],
+    let source = if value["captureBounds"].is_object() {
+        value["captureBounds"].clone()
+    } else {
+        bounds.clone()
+    };
+    let selected_backend =
+        if cfg!(target_os = "windows") && str_field(p, "captureBackend") == "printwindow" {
+            "win32-printwindow"
+        } else {
+            backend()
+        };
+    if value["backend"].is_string() && value["backend"] != selected_backend {
+        return Err("win32:CAPTURE_UNAVAILABLE".into());
+    }
+    value["native"] = json!({"helperInstanceId":info["instanceId"],"backend":selected_backend,"windowId":p["windowId"],
         "geometry":{"inputSpace":info["coordinateSpace"],"captureSpace":"pixels","boundsKind":if backend().starts_with("wayland"){"portal-source"}else{"window"},
-        "pixelToInput":{"scaleX":num(bounds,"width",0.)/width,"scaleY":num(bounds,"height",0.)/height}}});
+        "captureBounds":source,"pixelToInput":{"scaleX":num(&source,"width",0.)/width,"scaleY":num(&source,"height",0.)/height,"offsetX":num(&source,"x",0.)-num(&value["bounds"],"x",0.),"offsetY":num(&source,"y",0.)-num(&value["bounds"],"y",0.)}}});
+    if let Some(dpi) = value["dpi"].as_u64() {
+        value["native"]["geometry"]["dpi"] = json!(dpi);
+    }
     Ok(value)
 }
 
@@ -184,4 +228,16 @@ mod tests {
         assert_eq!(e["operation"], "input");
         assert_eq!(e["retryable"], false);
     }
+}
+
+pub fn error_for(method: &str, message: String, p: &Value) -> Value {
+    let mut value = error(method, message);
+    if cfg!(target_os = "windows") {
+        value["backend"] = json!(match method {
+            "input" | "releaseKeys" | "releaseAll" => "win32-sendinput",
+            "capture" if str_field(p, "captureBackend") == "printwindow" => "win32-printwindow",
+            _ => backend(),
+        });
+    }
+    value
 }

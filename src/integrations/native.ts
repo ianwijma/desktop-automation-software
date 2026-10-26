@@ -57,6 +57,7 @@ export class NativeAdapter {
   private bindingIdentities = new Map<string, string>();
   private cleanupTask: Promise<void> = Promise.resolve();
   private heldKeys = new Set<string>();
+  private inputAttempted = false;
   readonly binaryPath: string;
   constructor(private options: NativeAdapterOptions = {}) {
     const resources = (process as NodeJS.Process & { resourcesPath?: string })
@@ -193,7 +194,7 @@ export class NativeAdapter {
   }
   private fail(error: Error, release = true) {
     const child = this.child;
-    const mayHoldInput = Boolean(this.helper) || this.heldKeys.size > 0;
+    const mayHoldInput = this.inputAttempted || this.heldKeys.size > 0;
     this.child = undefined;
     this.handshake = undefined;
     this.helper = undefined;
@@ -236,11 +237,12 @@ export class NativeAdapter {
   private terminate(child: ChildProcess): Promise<void> {
     if (process.platform === "win32" && child.pid && child.exitCode === null) {
       return new Promise((resolve) => {
-        const killer = spawn(
-          "taskkill",
-          ["/PID", String(child.pid), "/T", "/F"],
-          { stdio: "ignore", windowsHide: true },
-        );
+        // The persistent Windows helper has no per-request subprocesses.
+        // Its launched applications must survive cancellation/restart.
+        const killer = spawn("taskkill", ["/PID", String(child.pid), "/F"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
         const done = () => {
           child.kill();
           void this.waitForExit(child).then(resolve);
@@ -352,6 +354,7 @@ export class NativeAdapter {
           return;
         }
         this.heldKeys.clear();
+        this.inputAttempted = false;
         resolve();
       };
       const timer = setTimeout(
@@ -562,9 +565,15 @@ export class NativeAdapter {
       };
     }
     const windows = await this.listWindows(signal);
-    const descriptor = JSON.stringify([target.application, target.windowTitle]);
-    if (this.bindingDescriptors.get(target.id) !== descriptor)
+    const descriptor = JSON.stringify([
+      target.application,
+      target.windowTitle,
+      target.windowsCaptureBackend,
+    ]);
+    if (this.bindingDescriptors.get(target.id) !== descriptor) {
       this.bindings.delete(target.id);
+      this.frames.delete(target.id);
+    }
     const binding = this.bindings.get(target.id);
     const identity = (window: NativeWindow) =>
       JSON.stringify(window.applicationIdentity ?? null);
@@ -619,9 +628,20 @@ export class NativeAdapter {
     signal?: AbortSignal,
   ): Promise<CaptureFrame> {
     const window = await this.resolve(target, signal);
+    this.frames.delete(target.id);
+    if (this.helper?.backend === "win32-wgc" && !target.windowsCaptureBackend)
+      throw this.serviceError(
+        "CAPTURE_UNAVAILABLE",
+        "capture",
+        "Choose a Windows capture method for this application in Settings before capturing",
+      );
     const raw = await this.rpc<unknown>(
       "capture",
-      { windowId: window.id, applicationIdentity: window.applicationIdentity },
+      {
+        windowId: window.id,
+        applicationIdentity: window.applicationIdentity,
+        captureBackend: target.windowsCaptureBackend,
+      },
       signal,
     );
     const parsed = nativeCaptureSchema.safeParse(raw);
@@ -633,18 +653,34 @@ export class NativeAdapter {
       );
     const result = parsed.data;
     const metadata: CaptureFrame["native"] = result.native;
+    const source = metadata.geometry.captureBounds ?? result.bounds;
+    const expectedBackend =
+      this.helper?.backend === "win32-wgc" &&
+      target.windowsCaptureBackend === "printwindow"
+        ? "win32-printwindow"
+        : this.helper?.backend;
     if (
       metadata.helperInstanceId !== this.helper?.instanceId ||
-      metadata.backend !== this.helper?.backend ||
+      metadata.backend !== expectedBackend ||
       metadata.windowId !== window.id ||
       metadata.geometry.inputSpace !== this.helper?.coordinateSpace ||
       Math.abs(
-        metadata.geometry.pixelToInput.scaleX -
-          result.bounds.width / result.width,
+        (metadata.geometry.pixelToInput.offsetX ?? 0) -
+          (source.x - result.bounds.x),
       ) > 1e-9 ||
       Math.abs(
-        metadata.geometry.pixelToInput.scaleY -
-          result.bounds.height / result.height,
+        (metadata.geometry.pixelToInput.offsetY ?? 0) -
+          (source.y - result.bounds.y),
+      ) > 1e-9 ||
+      source.x < result.bounds.x ||
+      source.y < result.bounds.y ||
+      source.x + source.width > result.bounds.x + result.bounds.width ||
+      source.y + source.height > result.bounds.y + result.bounds.height ||
+      Math.abs(
+        metadata.geometry.pixelToInput.scaleX - source.width / result.width,
+      ) > 1e-9 ||
+      Math.abs(
+        metadata.geometry.pixelToInput.scaleY - source.height / result.height,
       ) > 1e-9
     )
       throw this.serviceError(
@@ -657,7 +693,7 @@ export class NativeAdapter {
       ...result,
       id: randomUUID(),
       targetId: target.id,
-      scale: result.bounds?.width ? result.width / result.bounds.width : 1,
+      scale: 1 / metadata.geometry.pixelToInput.scaleX,
     };
     this.frames.set(target.id, frame);
     return frame;
@@ -738,6 +774,13 @@ export class NativeAdapter {
         config.frameId !== sourceFrame.id ||
         sourceFrame.native?.helperInstanceId !== this.helper?.instanceId ||
         sourceFrame.native?.windowId !== window.id ||
+        sourceFrame.native?.backend !==
+          (this.helper?.backend === "win32-wgc" &&
+          target.windowsCaptureBackend === "printwindow"
+            ? "win32-printwindow"
+            : this.helper?.backend) ||
+        (sourceFrame.native?.geometry.dpi !== undefined &&
+          sourceFrame.native.geometry.dpi !== window.dpi) ||
         JSON.stringify(sourceFrame.native?.application ?? null) !==
           JSON.stringify(window.applicationIdentity ?? null) ||
         (sourceFrame.bounds &&
@@ -768,9 +811,15 @@ export class NativeAdapter {
       const sx = frame.native!.geometry.pixelToInput.scaleX,
         sy = frame.native!.geometry.pixelToInput.scaleY;
       for (const key of ["x", "toX"])
-        if (typeof input[key] === "number") input[key] = input[key] * sx;
+        if (typeof input[key] === "number")
+          input[key] =
+            input[key] * sx +
+            (frame.native!.geometry.pixelToInput.offsetX ?? 0);
       for (const key of ["y", "toY"])
-        if (typeof input[key] === "number") input[key] = input[key] * sy;
+        if (typeof input[key] === "number")
+          input[key] =
+            input[key] * sy +
+            (frame.native!.geometry.pixelToInput.offsetY ?? 0);
     }
     if (
       kind === "key" &&
@@ -778,6 +827,7 @@ export class NativeAdapter {
       typeof config.key === "string"
     )
       this.heldKeys.add(config.key);
+    this.inputAttempted = true;
     const result = await this.rpc<Json>(
       "input",
       {
@@ -848,9 +898,12 @@ export class NativeAdapter {
   async releaseAll(): Promise<void> {
     await this.finishCleanup(true);
     if (this.child) {
-      await this.rpc("releaseKeys", { keys: [...this.heldKeys] });
-      await this.rpc("releaseAll");
-      this.heldKeys.clear();
+      if (this.inputAttempted || this.heldKeys.size) {
+        await this.rpc("releaseKeys", { keys: [...this.heldKeys] });
+        await this.rpc("releaseAll");
+        this.heldKeys.clear();
+        this.inputAttempted = false;
+      } else await this.rpc("releaseCapture");
     }
   }
   /** Releases owned input before replacing the helper; never replays a request. */

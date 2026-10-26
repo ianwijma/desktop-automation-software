@@ -19,6 +19,8 @@ mod protocol;
 mod wayland;
 #[cfg(target_os = "windows")]
 mod windows;
+#[cfg(any(target_os = "windows", test))]
+mod windows_contract;
 #[cfg(target_os = "linux")]
 use linux as platform;
 #[cfg(target_os = "macos")]
@@ -140,6 +142,16 @@ fn dispatch(method: &str, p: &Value, recording: &mut Recording) -> Result<Value>
         }
         "close" => platform::close(p),
         "releaseAll" => release_owned(),
+        "releaseCapture" => {
+            #[cfg(target_os = "windows")]
+            {
+                return platform::release_capture();
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                Ok(json!(true))
+            }
+        }
         "releaseKeys" => platform::release_keys(p),
         "launch" => {
             let command = str_field(p, "command");
@@ -232,11 +244,13 @@ fn main() {
         emit(match result {
             Ok(value) => json!({"id":id,"protocolVersion":protocol::VERSION,"result":value}),
             Err(message) => {
-                json!({"id":id,"protocolVersion":protocol::VERSION,"error":protocol::error(method,message)})
+                json!({"id":id,"protocolVersion":protocol::VERSION,"error":protocol::error_for(method,message,&req["params"])})
             }
         });
     }
     let _ = recording.stop();
+    #[cfg(target_os = "windows")]
+    platform::shutdown();
     if INPUT_USED.load(Ordering::SeqCst) {
         let _ = release_owned();
     }

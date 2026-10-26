@@ -30,7 +30,7 @@ try {
   assert.equal(initial.desktop, true);
   assert.equal(
     initial.capabilities.native?.helper?.protocolVersion,
-    1,
+    2,
     "The production preload/main/utility boundary must expose the matching native handshake",
   );
   assert.ok(initial.capabilities.native.helper.instanceId);

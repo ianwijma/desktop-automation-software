@@ -61,7 +61,7 @@ Locator inspection is an explicit validated preload/main/utility request. It rep
 
 ## Native protocol and qualification
 
-Native protocol 1 negotiates a helper instance/backend/coordinate-space handshake before desktop operations. Versioned structured errors and capability/permission metadata cross the utility/main boundary; passive availability stays separate from observed capture/input. Window handles remain transient, with separately reported application identity and owner checks. Native frames carry helper/window identity and validated independent pixel-to-input axis transforms; helper replacement clears bindings/frames. Cancellation still waits for acknowledged key/button cleanup and never replays the interrupted action. The [native harness](native-contracts.md) records real fixture effects and artifact/session identity; Xvfb software rendering is separate from native toolkit, hardware GPU, Windows/macOS and Wayland qualification.
+Native protocol 2 negotiates a helper instance/backend/coordinate-space handshake before desktop operations. Versioned structured errors and capability/permission metadata cross the utility/main boundary; passive availability stays separate from observed capture/input. Window handles remain transient, with separately reported application identity and owner checks. Native frames carry helper/window identity and validated independent pixel-to-input axis transforms and capture-source offsets/DPI; helper replacement clears bindings/frames. Cancellation still waits for acknowledged key/button cleanup and never replays the interrupted action. The [native harness](native-contracts.md) records real fixture effects and artifact/session identity; Xvfb software rendering is separate from native toolkit, hardware GPU, Windows/macOS and Wayland qualification.
 
 ## Detection
 
@@ -71,7 +71,7 @@ Local detection uses OpenCV template matching, Tesseract OCR, region colors, and
 
 ## Current release boundaries
 
-- The Linux X11 implementation is exercised on an isolated X server. Windows/macOS source is present but requires OS-specific runtime validation.
+- The Linux X11 implementation is exercised on an isolated X server. Windows uses a persistent Rust WGC/SendInput backend with an opt-in native-control/Electron matrix; mixed OS DPI, real GPU and installer qualification remain pending. macOS still requires OS-specific native runtime validation.
 - Native semantic accessibility targeting is not implemented uniformly. Browser DOM targeting is available; native applications use supported pixel/input methods.
 - Direct-use desktop recording is capability-gated. Wayland portal support and compositor restrictions differ from X11.
 - The companion extension is loaded unpacked during development; store publication is separate.

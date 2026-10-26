@@ -739,7 +739,15 @@ function Targets({ workspace, api, refresh, onError, onSuccess }: Props) {
         <Button
           variant="primary"
           onClick={() =>
-            setEditing({ id: uid(), name: "", kind: "desktop", launch: {} })
+            setEditing({
+              id: uid(),
+              name: "",
+              kind: "desktop",
+              launch: {},
+              ...(workspace.capabilities.platform === "win32"
+                ? { windowsCaptureBackend: "wgc" }
+                : {}),
+            })
           }
         >
           <Plus size={14} /> Add application
@@ -831,8 +839,11 @@ function Targets({ workspace, api, refresh, onError, onSuccess }: Props) {
                     ...editing,
                     kind: e.target.value as "desktop" | "browser",
                     ...(e.target.value === "browser"
-                      ? { browserMode: "managed" }
-                      : {}),
+                      ? {
+                          browserMode: "managed",
+                          windowsCaptureBackend: undefined,
+                        }
+                      : { browserMode: undefined }),
                   })
                 }
               >
@@ -933,6 +944,33 @@ function Targets({ workspace, api, refresh, onError, onSuccess }: Props) {
                     placeholder="e.g. Text Editor"
                   />
                 </Field>
+                {workspace.capabilities.platform === "win32" ||
+                editing.windowsCaptureBackend ? (
+                  <Field
+                    label="Windows capture method"
+                    help="Choose explicitly for existing workflows. PrintWindow can return blank frames for GPU-rendered or protected content; Relay never switches methods after a failure."
+                  >
+                    <Select
+                      aria-label="Windows capture method"
+                      value={editing.windowsCaptureBackend ?? ""}
+                      onChange={(event) =>
+                        setEditing({
+                          ...editing,
+                          windowsCaptureBackend: (event.target.value ||
+                            undefined) as TargetDescriptor["windowsCaptureBackend"],
+                        })
+                      }
+                    >
+                      <option value="">Choose a capture method…</option>
+                      <option value="wgc">
+                        Windows Graphics Capture (recommended)
+                      </option>
+                      <option value="printwindow">
+                        PrintWindow compatibility
+                      </option>
+                    </Select>
+                  </Field>
+                ) : null}
                 <JsonField
                   label="Launch commands by platform"
                   value={(editing.launch ?? {}) as Json}
