@@ -8,9 +8,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Storage } from "../src/main/storage";
 import { createSeedFlows, defaultSettings } from "../src/shared/seed";
+
+// Hosted Windows durability checks have completed in 18–22s; keep their assertions
+// and a finite file-local budget for filesystem flushes. Production timing is unchanged.
+if (process.platform === "win32") vi.setConfig({ testTimeout: 45000 });
 
 const directories: string[] = [];
 const handles: { close(): void }[] = [];

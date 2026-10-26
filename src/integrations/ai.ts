@@ -4,6 +4,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogle } from "@ai-sdk/google";
 import Ajv from "ajv";
 import sharp from "sharp";
+import { prepareJevImage, restoreJevBox } from "./jev-images";
 import {
   aiCheckLabels,
   unsupportedCheck,
@@ -24,6 +25,7 @@ export interface AIRequest {
   schema?: Record<string, unknown>;
   frame?: CaptureFrame;
   threshold?: number;
+  locationThreshold?: number;
   locate?: boolean;
   state?: Json;
   signal?: AbortSignal;
@@ -259,6 +261,16 @@ export class AIService {
       throw new Error(
         "Enable experimental vision for this Jev connection first.",
       );
+    const threshold = request.threshold ?? 0.85;
+    if (!(threshold > 0.5 && threshold <= 1))
+      throw new Error(
+        "Jev confidence threshold must be greater than 0.5 and at most 1.",
+      );
+    const locationThreshold = request.locationThreshold ?? 0.85;
+    if (!(locationThreshold > 0 && locationThreshold <= 1))
+      throw new Error(
+        "Jev location confidence threshold must be greater than 0 and at most 1.",
+      );
     const questions: Record<string, unknown> = {
       present: { type: "noul", instructions: request.prompt },
     };
@@ -267,29 +279,21 @@ export class AIService {
         type: "box",
         instructions: `Locate the target described here in screenshot: ${request.prompt}`,
       };
-    const raw = request.frame?.dataUrl.match(
-      /^data:image\/(png|jpeg);base64,(.+)$/s,
-    );
-    if (request.frame && !raw)
-      throw new Error("Jev requires a PNG or JPEG capture.");
+    const prepared = request.frame
+      ? await prepareJevImage(request.frame)
+      : undefined;
+    request.signal?.throwIfAborted();
     const body = {
       model: connection.model,
       state: request.frame
-        ? { screenshot: "relay-capture", context: request.state ?? null }
+        ? { screenshot: prepared!.reference, context: request.state ?? null }
         : (request.state ?? request.prompt),
       questions,
-      ...(raw
-        ? {
-            assets: {
-              "relay-capture": {
-                type: "image",
-                format: raw[1] === "jpeg" ? "jpg" : "png",
-                data_base64: raw[2],
-              },
-            },
-          }
-        : {}),
+      ...(prepared ? { assets: { [prepared.reference]: prepared.asset } } : {}),
     };
+    const encodedBody = JSON.stringify(body);
+    if (Buffer.byteLength(encodedBody) > 32 * 1024 * 1024)
+      throw new Error("Jev request exceeds 32 MiB after image preparation.");
     const url =
       connection.baseUrl.replace(/\/$/, "").replace(/\/systemone$/, "") +
       "/systemone";
@@ -301,7 +305,7 @@ export class AIService {
         "Content-Type": "application/json",
         ...(request.frame ? { "TypeSafe-Danger-Zone-Images": "true" } : {}),
       },
-      body: JSON.stringify(body),
+      body: encodedBody,
     });
     if (!response.ok)
       throw new Error(
@@ -312,6 +316,7 @@ export class AIService {
         present?: { noul?: number };
         location?: {
           box?: { left: number; right: number; top: number; bottom: number };
+          confidence?: number;
         };
       };
     };
@@ -323,42 +328,33 @@ export class AIService {
       probability > 1
     )
       throw new Error("Jev returned an invalid presence probability.");
-    const threshold = request.threshold ?? 0.85;
-    if (!(threshold > 0.5 && threshold <= 1))
-      throw new Error(
-        "Jev confidence threshold must be greater than 0.5 and at most 1.",
-      );
-    const outcome =
+    let outcome: DetectionResult["outcome"] =
       probability >= threshold
         ? "match"
         : probability <= 1 - threshold
           ? "no-match"
           : "uncertain";
-    const b = result.answers?.location?.box;
+    const locationConfidence = result.answers?.location?.confidence;
+    const validLocationConfidence =
+      typeof locationConfidence === "number" &&
+      Number.isFinite(locationConfidence) &&
+      locationConfidence >= 0 &&
+      locationConfidence <= 1;
     let box: DetectionResult["box"];
-    if (outcome === "match" && request.locate && request.frame) {
-      if (
-        !b ||
-        ![b.left, b.right, b.top, b.bottom].every(
-          (v) => Number.isFinite(v) && v >= 0 && v <= 1,
-        ) ||
-        b.left >= b.right ||
-        b.top >= b.bottom
-      )
-        throw new Error("Jev returned an invalid target box.");
-      box = {
-        x: b.left * request.frame.width,
-        y: b.top * request.frame.height,
-        width: (b.right - b.left) * request.frame.width,
-        height: (b.bottom - b.top) * request.frame.height,
-      };
+    if (outcome === "match" && request.locate && prepared) {
+      if (!validLocationConfidence)
+        throw new Error("Jev returned an invalid localization confidence.");
+      if (locationConfidence < locationThreshold) outcome = "uncertain";
+      else box = restoreJevBox(prepared, result.answers?.location?.box);
     }
     return {
       outcome,
       confidence: probability,
+      presenceConfidence: probability,
+      ...(validLocationConfidence ? { locationConfidence } : {}),
       frameId: request.frame?.id,
       box,
-      evidence: `Presence probability ${Math.round(probability * 100)}%`,
+      evidence: `Presence probability ${Math.round(probability * 100)}%${validLocationConfidence ? `; location confidence ${Math.round(locationConfidence * 100)}%` : ""}`,
     };
   }
   async test(
