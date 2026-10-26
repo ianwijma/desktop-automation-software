@@ -82,6 +82,9 @@ describe.skipIf(process.platform !== "linux")(
   () => {
     it("requires an explicit grant and retains fractional source mapping and identity", async () => {
       const { adapter, log } = await mock("wayland");
+      await expect(adapter.execute("attach", {}, target)).rejects.toThrow(
+        /Wayland cannot attach by application or title/,
+      );
       await expect(
         adapter.execute("click", { x: 30, y: 15 }, target),
       ).rejects.toThrow(/Capture this Wayland target/);

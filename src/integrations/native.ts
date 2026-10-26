@@ -803,7 +803,15 @@ export class NativeAdapter {
       );
     }
     const window = await this.resolve(target, signal);
-    if (kind === "attach") return { windowId: window.id };
+    if (kind === "attach") {
+      if (this.platformSession === "wayland")
+        throw this.serviceError(
+          "UNSUPPORTED_OPERATION",
+          "attach",
+          "Wayland cannot attach by application or title; capture this target to select a source in the portal chooser",
+        );
+      return { windowId: window.id };
+    }
     if (kind === "screenshot")
       return (await this.capture(target, signal)) as unknown as Json;
     if (kind === "focus" || kind === "close") {
