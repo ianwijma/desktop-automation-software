@@ -312,6 +312,14 @@ describe.skipIf(!supported)(
         native.execute("move", { x: 30, y: 30 }, target),
       ).resolves.toBe(true);
     });
+    it("acknowledges repeated movement to the same point without waiting for unrelated motion", async () => {
+      await expect(
+        native.execute("move", { x: 40, y: 50 }, target),
+      ).resolves.toBe(true);
+      await expect(
+        native.execute("move", { x: 40, y: 50 }, target),
+      ).resolves.toBe(true);
+    });
     it("sends a real key event to the selected window without touching the user desktop", async () => {
       const exit = once(fixture, "exit");
       await native.execute("key", { key: "Return" }, target);

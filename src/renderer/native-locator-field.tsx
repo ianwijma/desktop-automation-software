@@ -348,7 +348,9 @@ export function NativeLocatorField({
               aria-label="Inspect control in preview"
               disabled={busy}
               onClick={(e) => {
-                const r = e.currentTarget.getBoundingClientRect();
+                const r = e.currentTarget
+                  .querySelector("img")!
+                  .getBoundingClientRect();
                 const x = Math.min(
                   frame.width - 1,
                   Math.max(0, ((e.clientX - r.left) * frame.width) / r.width),
