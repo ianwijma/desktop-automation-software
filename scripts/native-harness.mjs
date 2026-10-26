@@ -957,24 +957,56 @@ if (!args.has("--run")) {
             },
           );
           await check("ax-modal-and-removed-control", async () => {
+            const observeAX = async () => {
+              try {
+                return (
+                  await adapter.inspectLocator(target, {
+                    locator: actionLocator,
+                  })
+                ).status;
+              } catch (error) {
+                if (error.details?.code === "MODAL_BLOCKED") return "modal";
+                if (error.details?.code === "TARGET_UNAVAILABLE")
+                  return "settling";
+                throw error;
+              }
+            };
             await control("/ax-modal", "POST");
-            await poll(control, (s) => s.modalBlocked);
-            await assert.rejects(
-              adapter.execute(
-                "click",
-                { nativeLocator: actionLocator },
-                target,
-              ),
-              (e) => e.details?.code === "MODAL_BLOCKED",
-            );
-            await control("/close-duplicate", "POST");
-            await poll(control, (s) => !s.modalBlocked);
+            try {
+              await poll(control, (s) => s.modalBlocked);
+              // AppKit publishes the sheet through AX asynchronously after beginSheet.
+              // Wait only through read-only inspection, then assert a single action.
+              await poll(
+                observeAX,
+                (state) => state === "modal",
+                5000,
+                "AX sheet did not become observable",
+              );
+              await assert.rejects(
+                adapter.execute(
+                  "click",
+                  { nativeLocator: actionLocator },
+                  target,
+                ),
+                (e) => e.details?.code === "MODAL_BLOCKED",
+              );
+            } finally {
+              await control("/close-duplicate", "POST");
+              await poll(control, (s) => !s.modalBlocked);
+              await poll(
+                observeAX,
+                (state) => state === "unique",
+                5000,
+                "AX parent did not return after sheet dismissal",
+              );
+            }
             await control("/ax-destroy", "POST");
             await poll(control, (s) => !s.targets.action);
-            assert.equal(
-              (await adapter.inspectLocator(target, { locator: actionLocator }))
-                .status,
-              "missing",
+            await poll(
+              observeAX,
+              (state) => state === "missing",
+              5000,
+              "AX removal did not become observable",
             );
             await assert.rejects(
               adapter.execute(
