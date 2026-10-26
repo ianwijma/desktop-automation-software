@@ -506,6 +506,9 @@ mod fixture {
         SetTimer(window, 2, 600000, None);
     }
     unsafe fn snapshot() -> Value {
+        // SendMessage may wait on the UI thread; never hold its model mutex.
+        let list = model().lock().unwrap().controls["list"] as HWND;
+        let selected = SendMessageW(list, LB_GETCURSEL, 0, 0);
         let s = model().lock().unwrap();
         let window = s.window as HWND;
         let mut outer = RECT::default();
@@ -532,7 +535,6 @@ mod fixture {
         } else {
             vec![]
         };
-        let selected = SendMessageW(s.controls["list"] as HWND, LB_GETCURSEL, 0, 0);
         json!({"selectedIndex":selected,"modalBlocked":IsWindowEnabled(window)==0,"coordinateSpace":"window-input","resizeExpectedWidth":n(640.),"clicks":s.clicks,"text":s.text,"secureHasValue":s.secure,"scrollTop":s.scroll,"drags":s.drags,"buttons":s.buttons,"held":held,"animationFrames":s.frames,"gpu":false,"renderSurface":"native-gdi","nativeControls":true,"contentScale":scale,"devicePixelRatio":f64::from(GetDpiForWindow(window))/96.,"targets":targets,"minimized":IsIconic(window)!=0,"focused":focused,"duplicate":s.duplicate!=0,"bounds":{"x":outer.left,"y":outer.top,"width":outer.right-outer.left,"height":outer.bottom-outer.top},"displays":[{"scaleFactor":f64::from(GetDpiForWindow(window))/96.}],"versions":{"fixture":"Win32 controls","version":env!("CARGO_PKG_VERSION")}})
     }
     fn connection(mut socket: TcpStream, token: &str) {
