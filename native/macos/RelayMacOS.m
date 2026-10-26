@@ -816,8 +816,8 @@ static void Input(NSDictionary *p) {
         @try {
             ReleaseAll();
         } @catch (NSException *ignored) {
-        } @
-        throw e;
+        }
+        @throw e;
     }
 }
 static NSDictionary *Capabilities(void) {

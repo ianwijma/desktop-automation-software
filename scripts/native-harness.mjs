@@ -473,7 +473,8 @@ if (!args.has("--run")) {
             );
             return {
               surface: initial.renderSurface ?? "webgl",
-              webgl: initial.gpu && (initial.renderSurface ?? "webgl") === "webgl",
+              webgl:
+                initial.gpu && (initial.renderSurface ?? "webgl") === "webgl",
               capturedPixelsChanged: true,
               hardwareGpuQualified: false,
             };
@@ -606,7 +607,9 @@ if (!args.has("--run")) {
               );
             } catch (error) {
               // Only button/modifier diagnostics; never report field contents.
-              throw new Error(`${error.message}; buttons=${observed?.buttons}; modifiers=${JSON.stringify(observed?.held?.filter((key) => ["Shift", "Control", "Alt", "Meta"].includes(key)))}`);
+              throw new Error(
+                `${error.message}; buttons=${observed?.buttons}; systemButtons=${observed?.systemButtons}; observedButtonUps=${observed?.observedButtonUps}; modifiers=${JSON.stringify(observed?.held?.filter((key) => ["Shift", "Control", "Alt", "Meta"].includes(key)))}`,
+              );
             }
             return { buttonsReleased: true, modifiersReleased: true };
           });

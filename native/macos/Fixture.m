@@ -13,6 +13,7 @@ static NSTextField *Text;
 static NSSecureTextField *Secure;
 static NSUInteger Clicks, Drags, Frames;
 static BOOL Pressed, ShiftObserved;
+static NSUInteger ObservedButtonUps;
 static atomic_bool Active = true;
 static double ContentScale = 1;
 static CGRect CGWindowBounds(void) {
@@ -180,6 +181,8 @@ static NSDictionary *Snapshot(void) {
         @"scrollTop" : @(scroll.contentView.bounds.origin.y),
         @"drags" : @(Drags),
         @"buttons" : @(Pressed ? 1 : 0),
+        @"systemButtons" : @(NSEvent.pressedMouseButtons & 7),
+        @"observedButtonUps" : @(ObservedButtonUps),
         @"held" : held,
         @"animationFrames" : @(Frames),
         @"gpu" : gpu.metal != nil ? @YES : @NO,
@@ -335,13 +338,19 @@ static void Serve(int listener) {
     Animated *gpu = [[Animated alloc] initWithFrame:R(450, 240, 200, 160)];
     [root addSubview:gpu];
     Controls[@"gpu"] = gpu;
-    [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskFlagsChanged | NSEventMaskMouseMoved |
-                                                  NSEventMaskLeftMouseDragged
-                                          handler:^NSEvent *(NSEvent *event) {
-                                            ShiftObserved = (event.modifierFlags &
-                                                             NSEventModifierFlagShift) != 0;
-                                            return event;
-                                          }];
+    [NSEvent
+        addLocalMonitorForEventsMatchingMask:NSEventMaskFlagsChanged | NSEventMaskMouseMoved |
+                                             NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp
+                                     handler:^NSEvent *(NSEvent *event) {
+                                       if (event.type == NSEventTypeLeftMouseUp) {
+                                           ObservedButtonUps++;
+                                           // Cleanup can reach a different view than mouseDown.
+                                           Pressed = NO;
+                                       }
+                                       ShiftObserved =
+                                           (event.modifierFlags & NSEventModifierFlagShift) != 0;
+                                       return event;
+                                     }];
     Window.acceptsMouseMovedEvents = YES;
     [Window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
