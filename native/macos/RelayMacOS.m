@@ -182,7 +182,14 @@ static void Focus(NSDictionary *window) {
     id selected = AXWindow(window);
     NSRunningApplication *app =
         [NSRunningApplication runningApplicationWithProcessIdentifier:[window[@"pid"] intValue]];
-    if (!app || ![app activateWithOptions:0])
+    if (!app)
+        Fail(@"FOCUS_FAILED");
+    AXUIElementRef owner = AXUIElementCreateApplication([window[@"pid"] intValue]);
+    AXUIElementSetMessagingTimeout(owner, 0.5);
+    AXError front = AXUIElementSetAttributeValue(owner, kAXFrontmostAttribute, kCFBooleanTrue);
+    CFRelease(owner);
+    BOOL activated = [app activateWithOptions:0];
+    if (!activated && front != kAXErrorSuccess)
         Fail(@"FOCUS_FAILED");
     AXUIElementRef ax = (__bridge AXUIElementRef)selected;
     if (AXUIElementPerformAction(ax, kAXRaiseAction) != kAXErrorSuccess)
@@ -222,6 +229,10 @@ static NSError *Await(void (^start)(void (^)(NSError *))) {
     }
     Fail(@"CAPTURE_TIMEOUT");
     return nil;
+}
+static BOOL FrameLost(SCFrameStatus status) {
+    return status != SCFrameStatusComplete && status != SCFrameStatusIdle &&
+           status != SCFrameStatusStarted;
 }
 @interface RelayCapture : NSObject <SCStreamOutput, SCStreamDelegate> {
     CVPixelBufferRef latest;
@@ -263,15 +274,23 @@ static NSError *Await(void (^start)(void (^)(NSError *))) {
         return;
     NSArray *attachments =
         (__bridge NSArray *)CMSampleBufferGetSampleAttachmentsArray(sample, false);
-    if (![attachments.firstObject[SCStreamFrameInfoStatus] isKindOfClass:NSNumber.class] ||
-        [attachments.firstObject[SCStreamFrameInfoStatus] integerValue] != SCFrameStatusComplete)
+    NSNumber *status = attachments.firstObject[SCStreamFrameInfoStatus];
+    if (![status isKindOfClass:NSNumber.class] || FrameLost(status.integerValue)) {
+        [self stream:stream didStopWithError:nil];
+        return;
+    }
+    if (status.integerValue != SCFrameStatusComplete)
         return;
     CVPixelBufferRef buffer = CMSampleBufferGetImageBuffer(sample);
-    if (!buffer)
+    if (!buffer) {
+        [self stream:stream didStopWithError:nil];
         return;
+    }
     size_t width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer);
-    if (width == 0 || height == 0 || width * height > 40000000)
+    if (width == 0 || height == 0 || width * height > 40000000) {
+        [self stream:stream didStopWithError:nil];
         return;
+    }
     [_lock lock];
     if (!_failed) {
         if (latest)
@@ -854,6 +873,10 @@ static id Selftest(void) {
         rejected = [e.reason isEqual:@"AX_WINDOW_UNAVAILABLE"];
     }
     if (!rejected)
+        Fail(@"BACKEND_FAILURE");
+    if (FrameLost(SCFrameStatusComplete) || FrameLost(SCFrameStatusIdle) ||
+        !FrameLost(SCFrameStatusBlank) || !FrameLost(SCFrameStatusSuspended) ||
+        !FrameLost(SCFrameStatusStopped))
         Fail(@"BACKEND_FAILURE");
     return @YES;
 }

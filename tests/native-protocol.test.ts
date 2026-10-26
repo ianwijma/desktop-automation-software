@@ -45,6 +45,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
  let result=true,error;
  if(r.method==='handshake') {if(s.mode==='hang')return;result={...info,...(s.mode==='bad-handshake'?{protocolVersion:3}:{})};}
  if(r.method==='capabilities')result={platform:process.platform,session:'fixture',capture:true,input:true,accessibility:false,directRecording:false,globalShortcuts:false,windows:[],reasons:[]};
+ if(r.method==='capabilities'&&s.mode==='bad-caps')result.native={helper:info,permissions:{'private-credential-label':123},operations:{}};
  if(r.method==='listWindows')result=[window];
  if(r.method==='capture') {
   const cropped=s.mode==='crop';const backend=s.forceFallback?'win32-printwindow':r.params.captureBackend==='printwindow'?'win32-printwindow':info.backend;
@@ -203,6 +204,15 @@ describe("native adapter protocol boundary", () => {
         windowsCaptureBackend: "wgc",
       }),
     ).toThrow();
+  });
+  it("reports invalid capability paths without exposing arbitrary permission keys", async () => {
+    const { adapter } = await mock("bad-caps");
+    const caps = await adapter.capabilities();
+    expect(caps.capture).toBe(false);
+    expect(caps.native?.lastError?.message).toContain("native.permissions");
+    expect(caps.native?.lastError?.message).not.toContain(
+      "private-credential-label",
+    );
   });
   it("maps Retina pixels to logical points and rejects a frame after a display-scale change", async () => {
     const { adapter, control } = await mock("macos");
