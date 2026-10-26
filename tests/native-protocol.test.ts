@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { targetSchema } from "../src/shared/validation";
 import { NativeAdapter } from "../src/integrations/native";
 import {
   nativeErrorSchema,
@@ -38,16 +39,20 @@ const fs=require('node:fs');const {randomUUID}=require('node:crypto');const inst
 const control=process.env.RELAY_PROTOCOL_CONTROL,log=process.env.RELAY_PROTOCOL_LOG;
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
  const r=JSON.parse(line),s=JSON.parse(fs.readFileSync(control,'utf8'));fs.appendFileSync(log,JSON.stringify({method:r.method,params:r.params})+'\\n');
- const info={protocolVersion:1,helperVersion:'mock',instanceId:instance,platform:process.platform,backend:'fixture',coordinateSpace:'logical-points'};
- const window={id:'7',title:'Fixture',application:'test',applicationIdentity:{id:'test',kind:'process-name',pid:s.pid},bounds:{x:-50,y:10,width:200,height:100}};
+ const info={protocolVersion:2,helperVersion:'mock',instanceId:instance,platform:process.platform,backend:s.mode==='windows'?'win32-wgc':'fixture',coordinateSpace:s.mode==='windows'?'physical-pixels':'logical-points'};
+ const window={id:'7',title:'Fixture',application:'test',applicationIdentity:{id:'test',kind:'process-name',pid:s.pid},bounds:{x:-50,y:10,width:200,height:100},dpi:s.dpi??96};
  let result=true,error;
- if(r.method==='handshake') {if(s.mode==='hang')return;result={...info,...(s.mode==='bad-handshake'?{protocolVersion:2}:{})};}
+ if(r.method==='handshake') {if(s.mode==='hang')return;result={...info,...(s.mode==='bad-handshake'?{protocolVersion:3}:{})};}
  if(r.method==='capabilities')result={platform:process.platform,session:'fixture',capture:true,input:true,accessibility:false,directRecording:false,globalShortcuts:false,windows:[],reasons:[]};
  if(r.method==='listWindows')result=[window];
- if(r.method==='capture')result={width:400,height:400,capturedAt:Date.now(),bounds:window.bounds,dataUrl:'data:image/png;base64,synthetic',native:{helperInstanceId:instance,backend:'fixture',windowId:'7',geometry:{inputSpace:'logical-points',captureSpace:'pixels',boundsKind:'window',pixelToInput:{scaleX:s.mode==='bad-scale'?2:0.5,scaleY:0.25}}}};
+ if(r.method==='capture') {
+  const cropped=s.mode==='crop';const backend=s.forceFallback?'win32-printwindow':r.params.captureBackend==='printwindow'?'win32-printwindow':info.backend;
+  result={width:cropped?380:400,height:cropped?360:400,capturedAt:Date.now(),bounds:window.bounds,dataUrl:'data:image/png;base64,synthetic',native:{helperInstanceId:instance,backend,windowId:'7',geometry:{inputSpace:info.coordinateSpace,captureSpace:'pixels',boundsKind:'window',dpi:window.dpi,...(cropped?{captureBounds:{x:-45,y:15,width:190,height:90}}:{}),pixelToInput:{scaleX:s.mode==='bad-scale'?2:0.5,scaleY:0.25,...(cropped?{offsetX:5,offsetY:5}:{})}}}};
+ }
+
  if(r.method==='input')result=r.params;
  if(r.method==='focus')error={code:'PERMISSION_DENIED',message:'Input permission denied',operation:'focus',backend:'fixture',permission:'denied',retryable:false};
- process.stdout.write(s.mode==='malformed'?'null\\n':JSON.stringify({protocolVersion:1,id:r.id,...(error?{error}:{result})})+'\\n');
+ process.stdout.write(s.mode==='malformed'?'null\\n':JSON.stringify({protocolVersion:2,id:r.id,...(error?{error}:{result})})+'\\n');
 });`,
   );
   const adapter = new NativeAdapter({
@@ -93,7 +98,7 @@ describe("native adapter protocol boundary", () => {
       },
     });
     const caps = await adapter.capabilities();
-    expect(caps.native?.helper?.protocolVersion).toBe(1);
+    expect(caps.native?.helper?.protocolVersion).toBe(2);
     expect(caps.native?.lastError?.code).toBe("PERMISSION_DENIED");
   });
   it("uses independent pixel-to-input scales and rejects a recycled handle's stale frame", async () => {
@@ -117,6 +122,86 @@ describe("native adapter protocol boundary", () => {
     await expect(adapter.capture(target)).rejects.toMatchObject({
       details: { code: "INVALID_REQUEST", operation: "capture" },
     });
+  });
+  it("applies visible-frame offsets once and preserves independent scales", async () => {
+    const { adapter } = await mock("crop");
+    const frame = await adapter.capture(target);
+    await expect(
+      adapter.execute(
+        "move",
+        { x: 100, y: 100, toX: 200, toY: 200, frameId: frame.id },
+        target,
+      ),
+    ).resolves.toMatchObject({ x: 55, y: 30, toX: 105, toY: 55 });
+  });
+  it("requires an explicit Windows capture choice and rejects backend substitution", async () => {
+    const { adapter, control, log } = await mock("windows");
+    await expect(adapter.capture(target)).rejects.toThrow(
+      "Choose a Windows capture method",
+    );
+    expect(await readFile(log, "utf8")).not.toContain('"method":"capture"');
+    const configured = { ...target, windowsCaptureBackend: "wgc" as const };
+    await adapter.capture(configured);
+    await writeFile(
+      control,
+      JSON.stringify({ mode: "windows", pid: 1, forceFallback: true }),
+    );
+    await expect(adapter.capture(configured)).rejects.toMatchObject({
+      details: { code: "INVALID_REQUEST" },
+    });
+    await expect(
+      adapter.capture({ ...configured, windowsCaptureBackend: "printwindow" }),
+    ).resolves.toMatchObject({ native: { backend: "win32-printwindow" } });
+  });
+  it("invalidates a frame when DPI or the selected capture method changes", async () => {
+    const { adapter, control } = await mock("windows");
+    const configured = { ...target, windowsCaptureBackend: "wgc" as const };
+    const frame = await adapter.capture(configured);
+    await writeFile(
+      control,
+      JSON.stringify({ mode: "windows", pid: 1, dpi: 144 }),
+    );
+    await expect(
+      adapter.execute("click", { x: 20, y: 20, frameId: frame.id }, configured),
+    ).rejects.toMatchObject({ details: { code: "STALE_CAPTURE" } });
+    const next = await adapter.capture(configured);
+    await expect(
+      adapter.execute(
+        "click",
+        { x: 20, y: 20, frameId: next.id },
+        { ...configured, windowsCaptureBackend: "printwindow" },
+      ),
+    ).rejects.toMatchObject({ details: { code: "STALE_CAPTURE" } });
+  });
+  it("does not release keyboard/mouse input after a passive capability probe", async () => {
+    const { adapter, log } = await mock();
+    await adapter.capabilities();
+    await adapter.dispose();
+    const requests = (await readFile(log, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line).method);
+    expect(requests).toContain("releaseCapture");
+    expect(requests).not.toContain("releaseKeys");
+    expect(requests).not.toContain("releaseAll");
+    expect(requests).not.toContain("input");
+  });
+  it("persists explicit Windows choices without choosing for existing targets", () => {
+    expect(targetSchema.parse(target).windowsCaptureBackend).toBeUndefined();
+    expect(
+      targetSchema.parse({ ...target, windowsCaptureBackend: "printwindow" })
+        .windowsCaptureBackend,
+    ).toBe("printwindow");
+    expect(() =>
+      targetSchema.parse({ ...target, windowsCaptureBackend: "automatic" }),
+    ).toThrow();
+    expect(() =>
+      targetSchema.parse({
+        ...target,
+        kind: "browser",
+        windowsCaptureBackend: "wgc",
+      }),
+    ).toThrow();
   });
   it("cancels a stalled handshake without sending input", async () => {
     const { adapter, log } = await mock("hang");
@@ -144,11 +229,11 @@ it.skipIf(!existsSync(binary))(
     const requests = [
       {
         id: "unnegotiated",
-        protocolVersion: 1,
+        protocolVersion: 2,
         method: "input",
         params: { kind: "click", x: 10, y: 10 },
       },
-      { id: "hello", protocolVersion: 1, method: "handshake", params: {} },
+      { id: "hello", protocolVersion: 2, method: "handshake", params: {} },
       {
         id: "legacy",
         method: "launch",
@@ -156,13 +241,13 @@ it.skipIf(!existsSync(binary))(
       },
       {
         id: "future",
-        protocolVersion: 2,
+        protocolVersion: 3,
         method: "launch",
         params: { command: "must-not-launch" },
       },
       {
         id: "unknown",
-        protocolVersion: 1,
+        protocolVersion: 2,
         method: "unknown",
         params: { text: "must-not-leak" },
       },

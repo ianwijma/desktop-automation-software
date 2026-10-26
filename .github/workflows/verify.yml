@@ -34,6 +34,9 @@ jobs:
       - name: Linux native contract and desktop harness
         if: runner.os == 'Linux'
         run: xvfb-run -a npm run test:native -- --run --software-gpu --session-label=ci-xvfb
+      - name: Windows native controls and graphics matrix
+        if: runner.os == 'Windows'
+        run: npm run test:native:windows -- --run --allow-unavailable
       - run: npm run check
       - run: npm run test:ui
       - run: npm run build

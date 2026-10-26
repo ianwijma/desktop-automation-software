@@ -83,6 +83,7 @@ export interface TargetDescriptor {
   url?: string;
   application?: string;
   windowTitle?: string;
+  windowsCaptureBackend?: "wgc" | "printwindow";
   launch?: Partial<
     Record<"linux" | "win32" | "darwin", { command: string; args: string[] }>
   >;
@@ -92,6 +93,7 @@ export interface NativeWindow {
   title: string;
   application?: string;
   applicationIdentity?: import("./native-protocol").NativeApplicationIdentity;
+  dpi?: number;
   bounds: { x: number; y: number; width: number; height: number };
 }
 export interface CaptureFrame {

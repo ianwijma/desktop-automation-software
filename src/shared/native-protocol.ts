@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const NATIVE_PROTOCOL_VERSION = 1;
+export const NATIVE_PROTOCOL_VERSION = 2;
 export const nativeErrorSchema = z.object({
   code: z.enum([
     "PROTOCOL_MISMATCH",
@@ -15,6 +15,10 @@ export const nativeErrorSchema = z.object({
     "CANCELLED",
     "AMBIGUOUS_TARGET",
     "STALE_CAPTURE",
+    "CAPTURE_UNAVAILABLE",
+    "CAPTURE_LOST",
+    "INPUT_REJECTED",
+    "FOCUS_FAILED",
   ]),
   message: z.string(),
   operation: z.string(),
@@ -60,11 +64,12 @@ export const nativeWindowSchema = z.object({
   id: z.string().min(1),
   title: z.string(),
   application: z.string().optional(),
+  dpi: z.number().int().positive().optional(),
   bounds: boundsSchema,
   applicationIdentity: z
     .object({
       id: z.string().min(1),
-      kind: z.enum(["wm-class", "process-name", "owner-name"]),
+      kind: z.enum(["wm-class", "process-name", "owner-name", "pid-only"]),
       pid: z.number().int().positive().optional(),
     })
     .optional(),
@@ -82,6 +87,14 @@ export const nativeCapabilitiesSchema = z.object({
   native: z
     .object({
       helper: nativeHandshakeSchema,
+      windows: z
+        .object({
+          graphicsCaptureSupported: z.boolean(),
+          interactiveDesktop: z.boolean(),
+          perMonitorV2: z.boolean(),
+          captureLibraryVersion: z.string().optional(),
+        })
+        .optional(),
       permissions: z.record(z.string(), nativeErrorSchema.shape.permission),
       operations: z.record(
         z.string(),
@@ -108,20 +121,30 @@ export const nativeCaptureSchema = z.object({
       inputSpace: nativeHandshakeSchema.shape.coordinateSpace,
       captureSpace: z.literal("pixels"),
       boundsKind: z.enum(["window", "portal-source"]),
+      captureBounds: boundsSchema.optional(),
+      dpi: z.number().int().positive().optional(),
       pixelToInput: z.object({
         scaleX: z.number().positive(),
         scaleY: z.number().positive(),
+        offsetX: z.number().finite().optional(),
+        offsetY: z.number().finite().optional(),
       }),
     }),
   }),
 });
 export interface NativeApplicationIdentity {
   id: string;
-  kind: "wm-class" | "process-name" | "owner-name";
+  kind: "wm-class" | "process-name" | "owner-name" | "pid-only";
   pid?: number;
 }
 export interface NativeDiagnostics {
   helper?: NativeHandshake;
+  windows?: {
+    graphicsCaptureSupported: boolean;
+    interactiveDesktop: boolean;
+    perMonitorV2: boolean;
+    captureLibraryVersion?: string;
+  };
   permissions?: Record<string, NativeErrorDetails["permission"]>;
   operations?: Record<
     string,
@@ -142,6 +165,13 @@ export interface NativeCaptureMetadata {
     inputSpace: NativeHandshake["coordinateSpace"];
     captureSpace: "pixels";
     boundsKind: "window" | "portal-source";
-    pixelToInput: { scaleX: number; scaleY: number };
+    captureBounds?: { x: number; y: number; width: number; height: number };
+    dpi?: number;
+    pixelToInput: {
+      scaleX: number;
+      scaleY: number;
+      offsetX?: number;
+      offsetY?: number;
+    };
   };
 }

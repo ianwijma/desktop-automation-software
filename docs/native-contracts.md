@@ -1,13 +1,13 @@
-# Native contracts and desktop verification (N01)
+# Native contracts and desktop verification (N01–N02)
 
-The native helper and TypeScript adapter use protocol **1**, independently of workflow/database version 2 and recording envelope version 1. There is no automatic input retry, backend fallback, or migration of coordinate workflows to semantic targeting.
+The native helper and TypeScript adapter use protocol **2**, independently of workflow/database version 2 and recording envelope version 1. There is no automatic input retry, backend fallback, or migration of coordinate workflows to semantic targeting.
 
 ## Protocol
 
 Requests and responses are newline-delimited JSON. Every request carries `protocolVersion`, a string `id`, a `method`, and an object `params`. The first normal request is `handshake`:
 
 ```json
-{ "protocolVersion": 1, "id": "hello", "method": "handshake", "params": {} }
+{ "protocolVersion": 2, "id": "hello", "method": "handshake", "params": {} }
 ```
 
 The reply identifies `protocolVersion`, `helperVersion`, process-lifetime `instanceId`, `platform`, `backend`, and `coordinateSpace`. Missing/future protocol versions and incompatible handshakes fail before capture/input. A matching helper must be rebuilt or installed; the adapter never falls back to the old protocol. `releaseKeys` and `releaseAll` are allowed before handshake so a separate cleanup process can release owned input after the original process exits. Their versioned successful acknowledgements are required before desktop input becomes available again.
@@ -22,15 +22,17 @@ Existing capability booleans remain for compatibility. `capabilities.native` add
 
 macOS uses its existing Screen Recording/Accessibility preflight checks. Windows input permission remains unknown because an unlocked desktop and target privilege level cannot be established by helper startup. X11 capture has no separate consent permission, while desktop/service availability is reported independently. Wayland grants remain required and operations remain unavailable in the passive probe until separately exercised; portal service discovery is not consent or session qualification. Global shortcuts are still checked by the Electron application.
 
-Current backend identifiers are `x11-command-tools`, `wayland-portal-gstreamer`, `win32-powershell-printwindow`, and `coregraphics-screencapture`. N01 does not replace those implementations with the N02–N04 backends.
+Current backend identifiers are `x11-command-tools`, `wayland-portal-gstreamer`, `win32-wgc` (capture default), `win32-printwindow` (explicit compatibility), `win32-sendinput` (input errors), and `coregraphics-screencapture`. N02 replaces the Windows implementation; macOS/Wayland backend completion remains N03–N04.
 
 ## Identity and coordinates
 
-`NativeWindow.id` is a transient OS handle. `applicationIdentity` is separate: an application identifier with its source (`wm-class`, `process-name`, or `owner-name`) and owning PID when available. It is not a persisted executable fingerprint, semantic locator, or guarantee against handle reuse within the same process. Coordinate workflows keep their existing application/title configuration. Duplicate unbound window matches fail rather than selecting the first.
+`NativeWindow.id` is a transient OS handle. `applicationIdentity` is separate: an application identifier with its source (`wm-class`, `process-name`, `owner-name`, or `pid-only`) and owning PID when available. It is not a persisted executable fingerprint, semantic locator, or guarantee against handle reuse within the same process. Coordinate workflows keep their existing application/title configuration. Duplicate unbound window matches fail rather than selecting the first.
 
-Bindings remember application identity, and requests verify expected ownership in the helper immediately before dispatch. Restart/exit clears cached bindings and capture frames. Capture metadata carries helper instance, backend, window handle, application identity, input coordinate space, capture pixel space, bounds kind, and independent pixel-to-input X/Y scales. Bounds retain the screen origin, including negative coordinates; input coordinates are window-relative. macOS input uses logical points; X11/Win32 use their current physical-pixel geometry; portal geometry refers to the selected source. Unsupported platform mapping remains a qualification gap rather than a guessed desktop offset.
+Bindings remember application identity, and requests verify expected ownership in the helper immediately before dispatch. Restart/exit clears cached bindings and capture frames. Capture metadata carries helper instance, backend, window handle, application identity, input coordinate space, capture pixel space, bounds kind, and independent pixel-to-input X/Y scales, source bounds and offsets, and Windows DPI. Bounds retain the screen origin, including negative coordinates; input coordinates are window-relative. macOS input uses logical points; X11/Win32 use their current physical-pixel geometry; portal geometry refers to the selected source. Unsupported platform mapping remains a qualification gap rather than a guessed desktop offset.
 
-The adapter validates finite positive geometry and matching identity/backend/coordinate transforms before retaining a capture. A detector frame from a different helper, owner, handle, or target size is rejected before input. Moving the same window does not invalidate its window-relative coordinates; platform input resolves its current origin. Existing `scale` remains for compatibility, while replay uses both explicit axis scales. Frame IDs and native handles are runtime-only metadata.
+Protocol 2 adds `releaseCapture`, which stops capture resources without injecting key/button releases. Passive capability probes and disposal use it when no input has been attempted. Input attempts still require acknowledged release before reuse. Windows source/input bounds may differ at invisible resize borders: `inputX = pixelX * scaleX + offsetX`, with the analogous Y transform. Backend changes, DPI changes and failed captures invalidate cached frames. Existing Windows targets require an explicit capture choice; there is no implicit migration from PrintWindow.
+
+The adapter validates finite positive geometry and matching identity/backend/coordinate transforms before retaining a capture. A detector frame from a different helper, owner, handle, or target size is rejected before input. Moving the same window does not invalidate its window-relative coordinates; platform input resolves its current origin. Existing `scale` remains for compatibility, while replay uses both explicit axis scales plus source offsets. Frame IDs and native handles are runtime-only metadata.
 
 ## Desktop harness
 
@@ -50,7 +52,7 @@ RELAY_NATIVE_BINARY=native/target/debug/relay-native xvfb-run -a \
   npm run test:native -- --run --software-gpu --session-label=xvfb
 ```
 
-This verifies graphics capture with a software renderer, not a hardware GPU or compositor. Omit `--software-gpu` for real graphics qualification; unavailable WebGL fails the graphics check instead of passing it. Wayland produces a not-run result without opening a chooser or injecting input; N04 must add portal source/session qualification. Windows and macOS may run the same source harness manually with the matching helper, an unlocked disposable session, and required permissions. Hosted CI on those platforms compiles/tests the contract but does not enable this desktop harness.
+This verifies graphics capture with a software renderer, not a hardware GPU or compositor. Omit `--software-gpu` for real graphics qualification; unavailable WebGL fails the graphics check instead of passing it. Wayland produces a not-run result without opening a chooser or injecting input; N04 must add portal source/session qualification. Windows and macOS may run the same source harness manually with the matching helper, an unlocked disposable session, and required permissions. Windows CI now attempts the [N02 matrix](windows-native.md), reporting incomplete cases when no interactive graphics desktop is available. macOS CI does not enable this desktop harness.
 
 The eight checks cover launch/attach/focus; nonblank capture and transforms; observed click/type/secure-field/scroll/drag effects; changing graphics pixels; resize rejection; held-key/drag cancellation and actual release; helper restart/stale-frame rejection/input resumption; and duplicate-window rejection. Duplicate labels and a secure field are included for later semantic/recording slices; N01 does not qualify accessibility or secure-field recording.
 

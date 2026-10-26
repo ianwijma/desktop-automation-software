@@ -15,8 +15,8 @@ ipcMain.on("fixture-state", (event, value) => {
 const createWindow = () =>
   new BrowserWindow({
     title: config.title,
-    x: 80,
-    y: 80,
+    x: config.position?.x ?? 80,
+    y: config.position?.y ?? 80,
     width: 700,
     height: 560,
     frame: false,
@@ -45,7 +45,12 @@ app.whenReady().then(async () => {
         JSON.stringify({
           ...state,
           bounds: window.getBounds(),
+          contentBounds:
+            process.platform === "win32"
+              ? screen.dipToScreenRect(window, window.getContentBounds())
+              : window.getContentBounds(),
           focused: window.isFocused(),
+          minimized: window.isMinimized(),
           duplicate: Boolean(duplicate && !duplicate.isDestroyed()),
           displays: screen
             .getAllDisplays()
@@ -56,6 +61,13 @@ app.whenReady().then(async () => {
           },
         }),
       );
+    } else if (req.method === "POST" && req.url === "/minimize") {
+      window.minimize();
+      res.end("{}");
+    } else if (req.method === "POST" && req.url === "/restore") {
+      window.restore();
+      window.focus();
+      res.end("{}");
     } else if (req.method === "POST" && req.url === "/resize") {
       window.setSize(740, 580);
       res.end("{}");
