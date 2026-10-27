@@ -205,6 +205,25 @@ export const previewAPI: RelayAPI = {
       state.connections = state.connections.filter((x) => x.id !== id);
     });
   },
+  async cancelAIDiagnostic() {
+    return unavailable("Cancelling AI diagnostics");
+  },
+  async searchOpenRouterModels() {
+    return {
+      models: [],
+      total: 0,
+      matched: 0,
+      stale: true,
+      error: {
+        code: "configuration" as const,
+        message:
+          "OpenRouter discovery requires the desktop app. Manual model IDs remain available.",
+      },
+    };
+  },
+  async exportConnectionDiagnostics() {
+    return unavailable("Exporting AI diagnostics");
+  },
   async testConnection() {
     return unavailable("Testing AI connections");
   },

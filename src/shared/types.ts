@@ -325,7 +325,14 @@ export interface RelayAPI {
   testConnection(
     id: string,
     operation?: import("./ai-connections").AICheckOperation,
+    requestId?: string,
   ): Promise<import("./ai-connections").AICheckResult>;
+  cancelAIDiagnostic(requestId: string): Promise<boolean>;
+  searchOpenRouterModels(
+    query: string,
+    options?: import("./ai-diagnostics").OpenRouterSearchOptions,
+  ): Promise<import("./ai-diagnostics").OpenRouterSearchResult>;
+  exportConnectionDiagnostics(id: string): Promise<{ saved: boolean }>;
   saveTarget(target: TargetDescriptor): Promise<TargetDescriptor>;
   deleteTarget(id: string): Promise<void>;
   saveSchedule(schedule: Schedule): Promise<Schedule>;

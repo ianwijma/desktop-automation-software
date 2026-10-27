@@ -1,3 +1,4 @@
+import { connectionDiagnosticExport } from "../shared/ai-diagnostic-export";
 import {
   app,
   BrowserWindow,
@@ -21,6 +22,13 @@ import {
   nativeErrorSchema,
 } from "../shared/native-protocol";
 import { Storage } from "./storage";
+import { DiagnosticRequests } from "./ai-diagnostic-requests";
+import { OpenRouterDiscovery } from "../integrations/openrouter-catalog";
+import {
+  diagnosticRequestIdSchema,
+  openRouterSearchOptionsSchema,
+  diagnosticMessages,
+} from "../shared/ai-diagnostics";
 import { ConnectionCheckTracker } from "./connection-checks";
 import {
   aiCheckOperationSchema,
@@ -97,6 +105,14 @@ const pending = new Map<
 const dataDir = process.env.RELAY_DATA_DIR ?? app.getPath("userData");
 const encryptedKeys = new Map<string, string>();
 const connectionChecks = new ConnectionCheckTracker();
+const diagnosticRequests = new DiagnosticRequests();
+let modelDiscovery: OpenRouterDiscovery | undefined;
+function openRouterDiscovery() {
+  return (modelDiscovery ??= new OpenRouterDiscovery(
+    () => store.meta("openrouterCatalog"),
+    (catalog) => store.setMeta("openrouterCatalog", catalog),
+  ));
+}
 function rpc<T = unknown>(method: string, ...args: unknown[]): Promise<T> {
   return new Promise((resolve, reject) => {
     if (!runnerAlive) {
@@ -515,6 +531,10 @@ async function request(
         store.deleteCredential(connection.id);
         encryptedKeys.delete(connection.id);
       }
+      for (const requestId of diagnosticRequests.cancelConnection(
+        connection.id,
+      ))
+        void rpc("cancelAIDiagnostic", requestId).catch(() => {});
       connectionChecks.invalidate(connection.id);
       const result = store.put("connections", {
         ...prepareConnectionSave(previous, connection, credentialChanged),
@@ -525,6 +545,8 @@ async function request(
     }
     case "deleteConnection": {
       const key = id();
+      for (const requestId of diagnosticRequests.cancelConnection(key))
+        void rpc("cancelAIDiagnostic", requestId).catch(() => {});
       connectionChecks.invalidate(key);
       store.delete("connections", key);
       store.deleteCredential(key);
@@ -539,35 +561,99 @@ async function request(
       const operation = aiCheckOperationSchema.parse(
         args[1] ?? (snapshot.provider === "jev" ? "decision" : "text"),
       );
-      const token = connectionChecks.begin(snapshot, operation);
-      const raw = await rpc<AICheckResult>("testConnection", key, operation, {
-        connectionRevision: snapshot.revision ?? 0,
-        credentialRevision: snapshot.credentialRevision ?? 0,
+      const requestId = diagnosticRequestIdSchema.parse(
+        args[2] ?? randomUUID(),
+      );
+      const active = diagnosticRequests.start(requestId, key);
+      try {
+        const token = connectionChecks.begin(snapshot, operation);
+        const raw = await rpc<AICheckResult>(
+          "testConnection",
+          key,
+          operation,
+          {
+            connectionRevision: snapshot.revision ?? 0,
+            credentialRevision: snapshot.credentialRevision ?? 0,
+          },
+          requestId,
+        );
+        if (active.controller.signal.aborted) {
+          raw.status = "cancelled";
+          raw.ok = false;
+          raw.message = diagnosticMessages.cancelled;
+          if (raw.diagnostics) raw.diagnostics.errorCode = "cancelled";
+        }
+        const { ok: _ok, ...evidence } = raw;
+        const result = aiCheckSchema.parse(evidence);
+        if (
+          result.operation !== operation ||
+          result.connectionRevision !== (snapshot.revision ?? 0) ||
+          result.credentialRevision !== (snapshot.credentialRevision ?? 0)
+        )
+          throw new Error("Connection probe returned mismatched evidence.");
+        const current = store.get("connections", key);
+        if (!connectionChecks.accept(snapshot, current, operation, token))
+          return {
+            ...result,
+            ok: false,
+            discarded: true,
+            message:
+              "Probe discarded because the connection changed or a newer check started.",
+          };
+        store.put("connections", {
+          ...current!,
+          checks: { ...current!.checks, [operation]: result },
+          lastTest: undefined,
+        });
+        await sync();
+        return { ...result, ok: result.status === "passed" };
+      } finally {
+        diagnosticRequests.finish(requestId, active);
+      }
+    }
+    case "cancelAIDiagnostic": {
+      const requestId = diagnosticRequestIdSchema.parse(args[0]);
+      const accepted = diagnosticRequests.cancel(requestId);
+      if (accepted) void rpc("cancelAIDiagnostic", requestId).catch(() => {});
+      return accepted;
+    }
+    case "searchOpenRouterModels": {
+      const query = z.string().max(200).parse(args[0]);
+      const options = openRouterSearchOptionsSchema.parse(args[1] ?? {});
+      if (!options.refresh)
+        return openRouterDiscovery().search(
+          query,
+          false,
+          undefined,
+          options.selectedModel,
+        );
+      const requestId = options.requestId ?? randomUUID(),
+        active = diagnosticRequests.start(requestId);
+      try {
+        return await openRouterDiscovery().search(
+          query,
+          true,
+          active.controller.signal,
+          options.selectedModel,
+        );
+      } finally {
+        diagnosticRequests.finish(requestId, active);
+      }
+    }
+    case "exportConnectionDiagnostics": {
+      const connection = store.get("connections", id());
+      if (!connection) throw new Error("Connection not found.");
+      const report = connectionDiagnosticExport(connection, [
+        ...encryptedKeys.values(),
+      ]);
+      const choice = await dialog.showSaveDialog(win!, {
+        title: "Export AI diagnostic metadata",
+        defaultPath: "relay-ai-diagnostics.json",
+        filters: [{ name: "JSON", extensions: ["json"] }],
       });
-      const { ok: _ok, ...evidence } = raw;
-      const result = aiCheckSchema.parse(evidence);
-      if (
-        result.operation !== operation ||
-        result.connectionRevision !== (snapshot.revision ?? 0) ||
-        result.credentialRevision !== (snapshot.credentialRevision ?? 0)
-      )
-        throw new Error("Connection probe returned mismatched evidence.");
-      const current = store.get("connections", key);
-      if (!connectionChecks.accept(snapshot, current, operation, token))
-        return {
-          ...result,
-          ok: false,
-          discarded: true,
-          message:
-            "Probe discarded because the connection changed or a newer check started.",
-        };
-      store.put("connections", {
-        ...current!,
-        checks: { ...current!.checks, [operation]: result },
-        lastTest: undefined,
-      });
-      await sync();
-      return { ...result, ok: result.status === "passed" };
+      if (choice.canceled || !choice.filePath) return { saved: false };
+      await writeFile(choice.filePath, JSON.stringify(report, null, 2), "utf8");
+      return { saved: true };
     }
     case "saveTarget": {
       const target = targetSchema.parse(args[0]);

@@ -3343,3 +3343,50 @@ kbd {
 .connection-check button {
   flex-shrink: 0;
 }
+
+.model-discovery {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+.model-search-results {
+  max-height: 280px;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+}
+.model-search-results article {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+.model-search-results code,
+.model-search-results small {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 11px;
+}
+.connection-card > .card-actions {
+  align-self: flex-start;
+  flex-wrap: wrap;
+  max-width: 170px;
+  justify-content: flex-end;
+}
+
+.connection-check small {
+  overflow-wrap: anywhere;
+}
+.model-search-results article > div {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+.model-search-results article > button {
+  flex-shrink: 0;
+}

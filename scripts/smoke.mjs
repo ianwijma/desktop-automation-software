@@ -85,7 +85,7 @@ try {
   );
   assert.equal(initial.flows.length, 3);
   assert.equal(initial.connections.length, 0);
-  await runConnectionProbeSmoke(page);
+  await runConnectionProbeSmoke(page, app, dataDir);
   assert.equal(initial.keys, undefined);
   const referenceNode = initial.flows[0].nodes[0];
   await page

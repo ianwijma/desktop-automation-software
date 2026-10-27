@@ -103,3 +103,5 @@ The CI workflow builds and checks Windows, macOS, and Linux separately. Only tes
 Architecture and implementation boundaries are documented in [docs/architecture.md](docs/architecture.md). The [native contract and harness guide](docs/native-contracts.md) explains protocol negotiation, backend/permission diagnostics, coordinate transforms, and explicit desktop qualification runs. Browser and native adapters include platform-specific tests; cloud-provider behavior is tested with mocked requests so the test suite does not require API keys or consume inference credits.
 
 [AI connection checks](docs/ai-connection-checks.md) track text, decision, structured, image and localization evidence separately. Model, endpoint, capability and credential changes make previous results stale; probes run only from labeled actions.
+
+[AI diagnostics and OpenRouter discovery](docs/ai-diagnostics.md) add cancellable checks, provider-reported model/timing/usage metadata, cached model search with manual IDs, and allowlisted JSON exports. Catalog selection never enables or verifies capabilities automatically.

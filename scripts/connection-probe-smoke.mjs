@@ -1,5 +1,8 @@
 import { createServer } from "node:http";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 const waitFor = async (predicate) => {
   const deadline = Date.now() + 10000;
   while (!predicate()) {
@@ -8,7 +11,7 @@ const waitFor = async (predicate) => {
   }
 };
 // Real preload/main/utility/storage and production Ollama adapter, local HTTP only.
-export async function runConnectionProbeSmoke(page) {
+export async function runConnectionProbeSmoke(page, app, dataDir) {
   let holdNext = false,
     release,
     calls = 0;
@@ -18,9 +21,14 @@ export async function runConnectionProbeSmoke(page) {
     const data = JSON.parse(body);
     calls++;
     const send = () => {
+      if (res.destroyed) return;
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
+          model: "fixture-returned",
+          prompt_eval_count: 3,
+          eval_count: 2,
+          private_metadata: "do-not-export-response",
           message: {
             content: data.messages[0].images ? "red" : "Relay connected",
           },
@@ -67,6 +75,56 @@ export async function runConnectionProbeSmoke(page) {
     );
     assert.equal(passed.status, "passed");
     assert.equal(passed.connectionRevision, 1);
+    assert.equal(passed.diagnostics.requestedModel, "fixture");
+    assert.equal(passed.diagnostics.returnedModel, "fixture-returned");
+    assert.equal(passed.diagnostics.usage.inputTokens, 3);
+    const cached = await page.evaluate(() =>
+      window.relay.searchOpenRouterModels("manual-only"),
+    );
+    assert.equal(cached.total, 0);
+    await assert.rejects(
+      page.evaluate(() =>
+        window.relay.searchOpenRouterModels("", {
+          refresh: true,
+          requestId: "invalid",
+        }),
+      ),
+      /Invalid/,
+    );
+    const path = join(dataDir, "ai-diagnostics.json");
+    await app.evaluate(({ dialog }, path) => {
+      global.__aiOriginalSaveDialog = dialog.showSaveDialog;
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath: path });
+    }, path);
+    try {
+      assert.equal(
+        (
+          await page.evaluate(() =>
+            window.relay.exportConnectionDiagnostics("probe-smoke"),
+          )
+        ).saved,
+        true,
+      );
+    } finally {
+      await app.evaluate(({ dialog }) => {
+        dialog.showSaveDialog = global.__aiOriginalSaveDialog;
+        delete global.__aiOriginalSaveDialog;
+      });
+    }
+    const report = JSON.parse(await readFile(path, "utf8")),
+      exported = JSON.stringify(report);
+    assert.equal(report.format, "relay-ai-diagnostics");
+    assert.equal(report.operations[0].returnedModel, "fixture-returned");
+    for (const forbidden of [
+      "127.0.0.1",
+      "baseUrl",
+      "Local probe fixture",
+      "do-not-export-response",
+      "Relay connected",
+      "data:image",
+      '"message"',
+    ])
+      assert.ok(!exported.includes(forbidden));
     assert.equal((await read()).checks.text.status, "passed");
     assert.equal((await read()).checks.image, undefined);
     assert.equal(
@@ -111,9 +169,37 @@ export async function runConnectionProbeSmoke(page) {
       /Invalid/,
     );
     assert.equal(calls, count);
+    holdNext = true;
+    const cancelledBefore = calls,
+      requestId = randomUUID();
+    const cancelPending = page.evaluate(
+      (requestId) =>
+        window.relay.testConnection("probe-smoke", "text", requestId),
+      requestId,
+    );
+    await waitFor(() => calls > cancelledBefore && Boolean(release));
+    assert.equal(
+      await page.evaluate(
+        (requestId) => window.relay.cancelAIDiagnostic(requestId),
+        requestId,
+      ),
+      true,
+    );
+    const cancelled = await cancelPending;
+    assert.equal(cancelled.status, "cancelled");
+    assert.equal(cancelled.diagnostics.errorCode, "cancelled");
+    release?.();
+    release = undefined;
+    assert.equal(
+      await page.evaluate(
+        (requestId) => window.relay.cancelAIDiagnostic(requestId),
+        requestId,
+      ),
+      false,
+    );
     await page.evaluate(() => window.relay.deleteConnection("probe-smoke"));
     console.log(
-      "PASS: real AI probe IPC, per-operation persistence, owned revisions, synthetic image request, stale evidence and late-response discard; local HTTP only.",
+      "PASS: real AI probe IPC, per-operation persistence, owned revisions, synthetic image request, stale evidence and late-response discard, real provider cancellation, allowlisted diagnostic file export and cached/manual catalog IPC; local HTTP only.",
     );
   } finally {
     release?.();

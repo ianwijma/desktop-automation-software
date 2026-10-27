@@ -1,9 +1,27 @@
-import { generateText, jsonSchema, Output, type LanguageModel } from "ai";
+import {
+  generateText,
+  jsonSchema,
+  Output,
+  APICallError,
+  type LanguageModel,
+} from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogle } from "@ai-sdk/google";
 import Ajv from "ajv";
 import sharp from "sharp";
+import {
+  AIHTTPError,
+  ProbeResponseError,
+  diagnosticFailure,
+  responseObservation,
+  sdkResponseObservation,
+  type ResponseObservation,
+} from "./ai-diagnostics";
+import {
+  diagnosticMessages,
+  type AIProbeDiagnostics,
+} from "../shared/ai-diagnostics";
 import { prepareJevImage, restoreJevBox } from "./jev-images";
 import {
   aiCheckLabels,
@@ -48,6 +66,7 @@ export class AIService {
   constructor(
     private getKey: (id: string) => string | undefined,
     private fetcher: typeof fetch = fetch,
+    private observe?: (value: ResponseObservation) => void,
   ) {}
   private check(connection: AIConnection, request: AIRequest) {
     if (!connection.model.trim())
@@ -141,21 +160,37 @@ export class AIService {
         model: this.model(connection),
         messages,
         output: Output.object({ schema }),
+        ...(this.observe ? { include: { responseBody: true } } : {}),
         providerOptions,
         abortSignal: signal,
         maxRetries: 0,
         maxOutputTokens: request.maxOutputTokens,
       });
+      this.observe?.(
+        sdkResponseObservation(
+          connection.provider,
+          result.finalStep.response.body,
+          this.getKey(connection.id),
+        ),
+      );
       return result.output;
     }
     const result = await generateText({
       model: this.model(connection),
       messages,
+      ...(this.observe ? { include: { responseBody: true } } : {}),
       providerOptions,
       abortSignal: signal,
       maxRetries: 0,
       maxOutputTokens: request.maxOutputTokens,
     });
+    this.observe?.(
+      sdkResponseObservation(
+        connection.provider,
+        result.finalStep.response.body,
+        this.getKey(connection.id),
+      ),
+    );
     return result.text;
   }
   private async ollama(
@@ -192,21 +227,37 @@ export class AIService {
         ...(request.schema ? { format: request.schema } : {}),
       }),
     });
-    if (!response.ok)
-      throw new Error(
-        `Ollama returned HTTP ${response.status}. Check the endpoint and model.`,
-      );
-    const data = (await response.json()) as {
+    if (!response.ok) throw new AIHTTPError(response.status);
+    const data = (await response.json().catch(() => {
+      throw new ProbeResponseError("The local model returned malformed JSON.");
+    })) as {
       message?: { content?: string };
       error?: string;
+      model?: string;
+      prompt_eval_count?: number;
+      eval_count?: number;
     };
+    this.observe?.(
+      responseObservation(
+        data.model,
+        { inputTokens: data.prompt_eval_count, outputTokens: data.eval_count },
+        this.getKey(connection.id),
+      ),
+    );
     if (typeof data.message?.content !== "string")
-      throw new Error("Ollama did not return a text response.");
+      throw new ProbeResponseError("Ollama did not return a text response.");
     if (!request.schema) return data.message.content;
-    const value: unknown = JSON.parse(data.message.content);
+    let value: unknown;
+    try {
+      value = JSON.parse(data.message.content);
+    } catch {
+      throw new ProbeResponseError(
+        "Invalid structured response: the model did not return JSON.",
+      );
+    }
     const validate = ajv.compile(request.schema);
     if (!validate(value))
-      throw new Error(
+      throw new ProbeResponseError(
         `Invalid structured response: ${ajv.errorsText(validate.errors)}`,
       );
     return value as Json;
@@ -307,11 +358,12 @@ export class AIService {
       },
       body: encodedBody,
     });
-    if (!response.ok)
-      throw new Error(
-        `Jev returned HTTP ${response.status}. Check your connection and model.`,
-      );
-    const result = (await response.json()) as {
+    if (!response.ok) throw new AIHTTPError(response.status);
+    const result = (await response.json().catch(() => {
+      throw new ProbeResponseError("Jev returned malformed JSON.");
+    })) as {
+      model?: string;
+      usage?: { input_tokens?: number; output_tokens?: number };
       answers?: {
         present?: { noul?: number };
         location?: {
@@ -320,6 +372,16 @@ export class AIService {
         };
       };
     };
+    this.observe?.(
+      responseObservation(
+        result.model,
+        {
+          inputTokens: result.usage?.input_tokens,
+          outputTokens: result.usage?.output_tokens,
+        },
+        this.getKey(connection.id),
+      ),
+    );
     const probability = result.answers?.present?.noul;
     if (
       typeof probability !== "number" ||
@@ -327,7 +389,9 @@ export class AIService {
       probability < 0 ||
       probability > 1
     )
-      throw new Error("Jev returned an invalid presence probability.");
+      throw new ProbeResponseError(
+        "Jev returned an invalid presence probability.",
+      );
     let outcome: DetectionResult["outcome"] =
       probability >= threshold
         ? "match"
@@ -343,7 +407,9 @@ export class AIService {
     let box: DetectionResult["box"];
     if (outcome === "match" && request.locate && prepared) {
       if (!validLocationConfidence)
-        throw new Error("Jev returned an invalid localization confidence.");
+        throw new ProbeResponseError(
+          "Jev returned an invalid localization confidence.",
+        );
       if (locationConfidence < locationThreshold) outcome = "uncertain";
       else box = restoreJevBox(prepared, result.answers?.location?.box);
     }
@@ -362,7 +428,30 @@ export class AIService {
     operation: AICheckOperation = connection.provider === "jev"
       ? "decision"
       : "text",
+    externalSignal?: AbortSignal,
   ): Promise<AICheckResult> {
+    const started = performance.now();
+    const signal = externalSignal
+      ? AbortSignal.any([externalSignal, AbortSignal.timeout(20000)])
+      : AbortSignal.timeout(20000);
+    let observation: ResponseObservation = {};
+    const service = new AIService(this.getKey, this.fetcher, (value) => {
+      observation = value;
+    });
+    const diagnostics = (
+      extra: Partial<AIProbeDiagnostics> = {},
+    ): AIProbeDiagnostics => ({
+      provider: connection.provider,
+      requestedModel: (this.getKey(connection.id)
+        ? connection.model.split(this.getKey(connection.id)!).join("[redacted]")
+        : connection.model
+      )
+        .replace(/[\u0000-\u001f\u007f]/g, "")
+        .slice(0, 200),
+      elapsedMs: Math.max(0, Math.round(performance.now() - started)),
+      ...observation,
+      ...extra,
+    });
     const base = {
       operation,
       at: new Date().toISOString(),
@@ -376,23 +465,38 @@ export class AIService {
         ok: false,
         status: "unsupported",
         message: unsupported,
+        diagnostics: diagnostics({ errorCode: "unsupported" }),
+      };
+    if (
+      !connection.model.trim() ||
+      (!this.getKey(connection.id) &&
+        !["ollama", "lmstudio"].includes(connection.provider))
+    )
+      return {
+        ...base,
+        ok: false,
+        status: "failed",
+        message: diagnosticMessages.configuration,
+        diagnostics: diagnostics({ errorCode: "configuration" }),
       };
     try {
       const request: AIRequest = {
         prompt: "",
-        signal: AbortSignal.timeout(20_000),
+        signal,
         maxOutputTokens: 256,
       };
       if (operation === "text") {
-        const result = await this.generate(connection, {
+        const result = await service.generate(connection, {
           ...request,
           prompt: "Reply with exactly: Relay connected",
           mode: "text",
         });
         if (typeof result !== "string" || result.trim() !== "Relay connected")
-          throw new Error("Text probe returned an unexpected response.");
+          throw new ProbeResponseError(
+            "Text probe returned an unexpected response.",
+          );
       } else if (operation === "structured") {
-        const result = await this.generate(connection, {
+        const result = await service.generate(connection, {
           ...request,
           prompt: 'Return {"relay":"connected"}.',
           mode: "structured",
@@ -409,11 +513,11 @@ export class AIService {
           Array.isArray(result) ||
           result.relay !== "connected"
         )
-          throw new Error(
+          throw new ProbeResponseError(
             "Structured probe did not match the requested schema.",
           );
       } else if (operation === "decision") {
-        const result = await this.detect(connection, {
+        const result = await service.detect(connection, {
           ...request,
           prompt:
             "Does the following text contain the exact word Relay? Text: Relay",
@@ -421,7 +525,9 @@ export class AIService {
           locate: false,
         });
         if (result.outcome !== "match" || result.box)
-          throw new Error("Decision probe did not match the known condition.");
+          throw new ProbeResponseError(
+            "Decision probe did not match the known condition.",
+          );
       } else {
         // Synthetic, local image only. No application captures or user data enter a connection probe.
         const localize = operation === "localization";
@@ -460,7 +566,7 @@ export class AIService {
           dataUrl: `data:image/png;base64,${data.toString("base64")}`,
         };
         if (!localize && connection.provider !== "jev") {
-          const result = await this.generate(connection, {
+          const result = await service.generate(connection, {
             ...request,
             frame,
             mode: "vision",
@@ -471,11 +577,11 @@ export class AIService {
             typeof result !== "string" ||
             result.trim().toLowerCase() !== "red"
           )
-            throw new Error(
+            throw new ProbeResponseError(
               "Image probe did not identify the known image content.",
             );
         } else {
-          const result = await this.detect(connection, {
+          const result = await service.detect(connection, {
             ...request,
             frame,
             prompt: localize
@@ -484,13 +590,15 @@ export class AIService {
             locate: localize,
           });
           if (result.outcome !== "match")
-            throw new Error(
+            throw new ProbeResponseError(
               "Image decision did not match the known image content.",
             );
           if (localize) {
             const box = result.box;
             if (!box)
-              throw new Error("Localization probe returned no location.");
+              throw new ProbeResponseError(
+                "Localization probe returned no location.",
+              );
             const overlap =
               Math.max(
                 0,
@@ -501,30 +609,48 @@ export class AIService {
                 Math.min(180, box.y + box.height) - Math.max(100, box.y),
               );
             if (overlap / (120 * 80 + box.width * box.height - overlap) < 0.5)
-              throw new Error(
+              throw new ProbeResponseError(
                 "Localization probe did not locate the known rectangle.",
               );
           }
         }
       }
+      signal.throwIfAborted();
       return {
         ...base,
+        diagnostics: diagnostics(),
         ok: true,
         status: "passed",
         message: `${aiCheckLabels[operation]} probe passed for ${connection.model}. Other operations remain independent.`,
       };
     } catch (error) {
-      const message = safeAIError(error, this.getKey(connection.id));
+      const failure = diagnosticFailure(error, signal);
       return {
         ...base,
         ok: false,
-        status: "failed",
-        message,
+        status: failure.code === "cancelled" ? "cancelled" : "failed",
+        message: failure.message,
+        diagnostics: diagnostics({
+          errorCode: failure.code,
+          ...(failure.httpStatus ? { httpStatus: failure.httpStatus } : {}),
+        }),
       };
     }
   }
 }
 export function safeAIError(error: unknown, secret?: string): string {
+  if (
+    error instanceof Error &&
+    [
+      "AI_NoObjectGeneratedError",
+      "AI_NoOutputGeneratedError",
+      "AI_TypeValidationError",
+      "AI_JSONParseError",
+    ].includes(error.name)
+  )
+    return diagnosticMessages["invalid-response"];
+  if (error instanceof AIHTTPError || APICallError.isInstance(error))
+    return diagnosticFailure(error).message;
   if (error instanceof Error && error.name === "AbortError")
     return "AI request cancelled or timed out.";
   const raw = error instanceof Error ? error.message : "AI request failed.";

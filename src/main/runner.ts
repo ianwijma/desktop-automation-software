@@ -8,6 +8,8 @@ import {
 } from "../engine";
 import { NativeAdapter } from "../integrations/native";
 import { BrowserAdapter } from "../integrations/browser";
+import { diagnosticRequestIdSchema } from "../shared/ai-diagnostics";
+import { sameConnectionRevision } from "../shared/ai-connections";
 import { aiCheckOperationSchema } from "../shared/ai-connections";
 import { AIService, safeAIError } from "../integrations/ai";
 import { NativeServiceError } from "../shared/native-protocol";
@@ -68,6 +70,10 @@ const recordingLocked = () => Boolean(recording?.isLocked());
 const captures = new Map<string, CaptureFrame>();
 const detectors = new DetectorService();
 const ai = new AIService((id) => workspace?.keys[id]);
+const aiProbes = new Map<
+  string,
+  { controller: AbortController; connection: AIConnection; operation: string }
+>();
 const recordingRequests = new Map<
   string,
   {
@@ -479,6 +485,13 @@ async function handle(method: string, args: unknown[]): Promise<unknown> {
     throw new Error("The automation service is shutting down.");
   if (method === "sync") {
     workspace = args[0] as RunnerWorkspace;
+    for (const probe of aiProbes.values()) {
+      const current = workspace.connections.find(
+        (c) => c.id === probe.connection.id,
+      );
+      if (!current || !sameConnectionRevision(probe.connection, current))
+        probe.controller.abort();
+    }
     return true;
   }
   if (method === "capabilities") return native.capabilities();
@@ -565,6 +578,12 @@ async function handle(method: string, args: unknown[]): Promise<unknown> {
       await recording.pause(state.sessionId);
     return true;
   }
+  if (method === "cancelAIDiagnostic") {
+    const probe = aiProbes.get(diagnosticRequestIdSchema.parse(args[0]));
+    if (!probe) return false;
+    probe.controller.abort();
+    return true;
+  }
   if (method === "testConnection") {
     const connection = workspace.connections.find((c) => c.id === args[0]);
     if (!connection) throw new Error("Connection not found.");
@@ -581,10 +600,24 @@ async function handle(method: string, args: unknown[]): Promise<unknown> {
       );
     const snapshot = structuredClone(connection),
       key = workspace.keys[connection.id];
-    return new AIService(() => key).test(
-      snapshot,
-      aiCheckOperationSchema.parse(args[1]),
-    );
+    const requestId = diagnosticRequestIdSchema.parse(args[3]),
+      operation = aiCheckOperationSchema.parse(args[1]);
+    if (aiProbes.has(requestId))
+      throw new Error("Diagnostic request already active.");
+    for (const probe of aiProbes.values())
+      if (probe.connection.id === snapshot.id && probe.operation === operation)
+        probe.controller.abort();
+    const controller = new AbortController();
+    aiProbes.set(requestId, { controller, connection: snapshot, operation });
+    try {
+      return await new AIService(() => key).test(
+        snapshot,
+        operation,
+        controller.signal,
+      );
+    } finally {
+      aiProbes.delete(requestId);
+    }
   }
   if (method === "startRecording")
     return recording.start(args[0] as RecordingStartOptions);
@@ -628,6 +661,7 @@ async function handle(method: string, args: unknown[]): Promise<unknown> {
       args[2] as RecordingInsertOptions,
     );
   if (method === "dispose") {
+    for (const probe of aiProbes.values()) probe.controller.abort();
     disposing = true;
     try {
       await handle("stopAll", []);
