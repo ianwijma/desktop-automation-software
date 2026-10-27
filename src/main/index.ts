@@ -22,6 +22,7 @@ import {
   nativeErrorSchema,
 } from "../shared/native-protocol";
 import { Storage } from "./storage";
+import { FlowAuthoringService } from "./authoring-service";
 import { DiagnosticRequests } from "./ai-diagnostic-requests";
 import { OpenRouterDiscovery } from "../integrations/openrouter-catalog";
 import {
@@ -106,6 +107,22 @@ const dataDir = process.env.RELAY_DATA_DIR ?? app.getPath("userData");
 const encryptedKeys = new Map<string, string>();
 const connectionChecks = new ConnectionCheckTracker();
 const diagnosticRequests = new DiagnosticRequests();
+const flowAuthoring = new FlowAuthoringService({
+  workspace: () => {
+    const settings = store.settings();
+    return {
+      flows: store.list("flows"),
+      targets: store.list("targets"),
+      connections: store.list("connections"),
+      settings: {
+        defaultTextConnection: settings.defaultTextConnection,
+        defaultVisionConnection: settings.defaultVisionConnection,
+      },
+    };
+  },
+  getKey: keyFor,
+  progress: (progress) => broadcast({ type: "authoring-progress", progress }),
+});
 let modelDiscovery: OpenRouterDiscovery | undefined;
 function openRouterDiscovery() {
   return (modelDiscovery ??= new OpenRouterDiscovery(
@@ -176,6 +193,7 @@ function workspace(): RunnerWorkspace {
   };
 }
 async function sync() {
+  flowAuthoring.invalidate();
   workspaceGeneration++;
   await rpc("sync", workspace());
   broadcast({ type: "workspace" });
@@ -655,6 +673,13 @@ async function request(
       await writeFile(choice.filePath, JSON.stringify(report, null, 2), "utf8");
       return { saved: true };
     }
+    case "requestFlowProposal":
+      return flowAuthoring.send(args[0]);
+    case "cancelFlowProposal":
+      return flowAuthoring.cancel(
+        z.string().uuid().parse(args[0]),
+        z.string().uuid().parse(args[1]),
+      );
     case "saveTarget": {
       const target = targetSchema.parse(args[0]);
       const result = store.put("targets", target);
@@ -810,6 +835,7 @@ function createWindow() {
     }
   });
   win.on("closed", () => {
+    flowAuthoring.cancelAll();
     win = null;
   });
 }
@@ -1024,6 +1050,7 @@ else {
     if (quitting) return;
     event.preventDefault();
     quitting = true;
+    flowAuthoring.dispose();
     globalShortcut.unregisterAll();
     if (!runner) {
       app.quit();

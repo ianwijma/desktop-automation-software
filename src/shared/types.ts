@@ -302,7 +302,11 @@ export type AppEvent =
   | { type: "run"; run: RunRecord }
   | { type: "recording"; recording: RecordingState }
   | { type: "capabilities"; capabilities: PlatformCapabilities }
-  | { type: "workspace" };
+  | { type: "workspace" }
+  | {
+      type: "authoring-progress";
+      progress: import("./chat-authoring").ProposalProgress;
+    };
 export interface RelayAPI {
   bootstrap(): Promise<WorkspaceState>;
   saveFlow(
@@ -333,6 +337,10 @@ export interface RelayAPI {
     options?: import("./ai-diagnostics").OpenRouterSearchOptions,
   ): Promise<import("./ai-diagnostics").OpenRouterSearchResult>;
   exportConnectionDiagnostics(id: string): Promise<{ saved: boolean }>;
+  requestFlowProposal(
+    request: import("./chat-authoring").FlowProposalRequest,
+  ): Promise<import("./chat-authoring").FlowProposalResult>;
+  cancelFlowProposal(sessionId: string, requestId: string): Promise<boolean>;
   saveTarget(target: TargetDescriptor): Promise<TargetDescriptor>;
   deleteTarget(id: string): Promise<void>;
   saveSchedule(schedule: Schedule): Promise<Schedule>;

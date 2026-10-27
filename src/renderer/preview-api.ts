@@ -221,6 +221,12 @@ export const previewAPI: RelayAPI = {
       },
     };
   },
+  async requestFlowProposal() {
+    return unavailable("AI flow authoring");
+  },
+  async cancelFlowProposal() {
+    return false;
+  },
   async exportConnectionDiagnostics() {
     return unavailable("Exporting AI diagnostics");
   },

@@ -42,6 +42,8 @@ export interface AIRequest {
   mode?: "text" | "structured" | "vision";
   schema?: Record<string, unknown>;
   frame?: CaptureFrame;
+  /** Prepared authoring image content; never a runtime capture identity. */
+  images?: string[];
   threshold?: number;
   locationThreshold?: number;
   locate?: boolean;
@@ -73,7 +75,10 @@ export class AIService {
       throw new Error("Choose a model in AI Connections.");
     if (request.mode === "text" && !connection.capabilities.text)
       throw new Error(`${connection.name} is not configured for text.`);
-    if (request.frame && !connection.capabilities.vision)
+    if (
+      (request.frame || request.images?.length) &&
+      !connection.capabilities.vision
+    )
       throw new Error(`${connection.name} is not configured for vision.`);
     if (
       (request.mode === "structured" || request.schema) &&
@@ -112,6 +117,8 @@ export class AIService {
       ? AbortSignal.any([request.signal, AbortSignal.timeout(90_000)])
       : AbortSignal.timeout(90_000);
     if (connection.provider === "jev") {
+      if (request.images?.length)
+        throw new Error("Jev does not support multi-image authoring.");
       if (request.mode === "text" || request.schema)
         throw new Error(
           "Jev is a decision model. Select a text-generation connection for this node.",
@@ -123,13 +130,17 @@ export class AIService {
     }
     if (connection.provider === "ollama")
       return this.ollama(connection, { ...request, signal });
+    const images = [
+      ...(request.frame ? [request.frame.dataUrl] : []),
+      ...(request.images ?? []),
+    ];
     const messages = [
       {
         role: "user" as const,
-        content: request.frame
+        content: images.length
           ? [
               { type: "text" as const, text: request.prompt },
-              { type: "image" as const, image: request.frame.dataUrl },
+              ...images.map((image) => ({ type: "image" as const, image })),
             ]
           : request.prompt,
       },
@@ -219,8 +230,17 @@ export class AIService {
           {
             role: "user",
             content: request.prompt,
-            ...(request.frame
-              ? { images: [request.frame.dataUrl.split(",")[1]] }
+            ...(request.frame || request.images?.length
+              ? {
+                  images: [
+                    ...(request.frame
+                      ? [request.frame.dataUrl.split(",")[1]]
+                      : []),
+                    ...(request.images ?? []).map(
+                      (image) => image.split(",")[1],
+                    ),
+                  ],
+                }
               : {}),
           },
         ],

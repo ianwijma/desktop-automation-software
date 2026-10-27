@@ -14,6 +14,8 @@ const methods: (keyof Omit<RelayAPI, "onEvent">)[] = [
   "cancelAIDiagnostic",
   "searchOpenRouterModels",
   "exportConnectionDiagnostics",
+  "requestFlowProposal",
+  "cancelFlowProposal",
   "saveTarget",
   "deleteTarget",
   "saveSchedule",

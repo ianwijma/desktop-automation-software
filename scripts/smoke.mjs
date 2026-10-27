@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { runAuthoringProposalSmoke } from "./authoring-proposal-smoke.mjs";
 import { runConnectionProbeSmoke } from "./connection-probe-smoke.mjs";
 import { _electron as electron } from "playwright";
 import { expect } from "@playwright/test";
@@ -86,6 +87,7 @@ try {
   assert.equal(initial.flows.length, 3);
   assert.equal(initial.connections.length, 0);
   await runConnectionProbeSmoke(page, app, dataDir);
+  await runAuthoringProposalSmoke(page);
   assert.equal(initial.keys, undefined);
   const referenceNode = initial.flows[0].nodes[0];
   await page
