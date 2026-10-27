@@ -107,3 +107,5 @@ Architecture and implementation boundaries are documented in [docs/architecture.
 [AI diagnostics and OpenRouter discovery](docs/ai-diagnostics.md) add cancellable checks, provider-reported model/timing/usage metadata, cached model search with manual IDs, and allowlisted JSON exports. Catalog selection never enables or verifies capabilities automatically.
 
 [Opt-in AI conformance](docs/ai-conformance.md) tests explicit provider/model configurations with bounded production-adapter requests. Ordinary CI verifies its harness using loopback fixtures only; real model qualification remains separate.
+
+[Chat authoring service](docs/chat-authoring-service.md) provides cancellable, validated unsaved graph proposals and explicit binding receipts. The attachment/review/Apply/history UI remains the following roadmap slices.

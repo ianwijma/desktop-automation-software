@@ -137,7 +137,8 @@ function App() {
         setWorkspace((w) =>
           w ? { ...w, capabilities: event.capabilities } : w,
         );
-      else void refresh().catch(onError);
+      else if (event.type !== "authoring-progress")
+        void refresh().catch(onError);
     });
   }, [refresh, onError]);
   useEffect(() => {
