@@ -18,7 +18,9 @@ export function OpenRouterModelPicker({
   const [query, setQuery] = useState(""),
     [result, setResult] = useState<OpenRouterSearchResult>(),
     [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
+    [error, setError] = useState(""),
+    [refreshError, setRefreshError] =
+      useState<OpenRouterSearchResult["error"]>();
   const generation = useRef(0),
     mounted = useRef(true),
     pending = useRef<string | undefined>(undefined),
@@ -33,6 +35,7 @@ export function OpenRouterModelPicker({
       if (requestId) {
         pending.current = requestId;
         setBusy(true);
+        setRefreshError(undefined);
       }
       setError("");
       try {
@@ -41,6 +44,8 @@ export function OpenRouterModelPicker({
           selectedModel: modelRef.current,
           ...(requestId ? { requestId } : {}),
         });
+        if (mounted.current && requestId && pending.current === requestId)
+          setRefreshError(next.error);
         if (mounted.current && token === generation.current) setResult(next);
       } catch {
         if (mounted.current && token === generation.current) {
@@ -147,9 +152,15 @@ export function OpenRouterModelPicker({
           model ID manually.
         </p>
       )}
-      {error || result?.error ? (
-        <Notice kind={result?.error?.code === "cancelled" ? "info" : "error"}>
-          {error || result?.error?.message}
+      {error || refreshError || result?.error ? (
+        <Notice
+          kind={
+            !error && (refreshError || result?.error)?.code === "cancelled"
+              ? "info"
+              : "error"
+          }
+        >
+          {error || refreshError?.message || result?.error?.message}
         </Notice>
       ) : null}
       {selected ? (

@@ -299,6 +299,14 @@ export async function runConnectionChecksUISmoke({
       .getByRole("button", { name: "Refresh model catalog", exact: true })
       .click();
     await page.waitForFunction(() => Boolean(window.__pendingCatalog));
+    // A cached search can finish while a refresh is in flight. Its generation
+    // must not hide the eventual cancellation outcome of that refresh.
+    await search.fill("fixture");
+    await page.waitForFunction(() =>
+      window.__catalogCalls.some(
+        (call) => call.query === "fixture" && !call.refresh,
+      ),
+    );
     await page
       .getByRole("button", { name: "Cancel model refresh", exact: true })
       .click();
