@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "maxRequests": 32,
+  "requestTimeoutMs": 20000,
+  "totalTimeoutMs": 600000,
+  "profiles": [
+    {
+      "id": "local-text-and-vision",
+      "provider": "ollama",
+      "model": "YOUR_EXACT_MODEL_ID",
+      "baseUrl": "http://127.0.0.1:11434",
+      "capabilities": { "text": true, "vision": true, "structured": true },
+      "runtime": {
+        "name": "Ollama",
+        "version": "YOUR_EXACT_RUNTIME_VERSION",
+        "modelRevision": "YOUR_EXACT_MODEL_DIGEST"
+      },
+      "operations": ["text", "structured", "decision", "image", "localization"],
+      "coldStartExpected": false,
+      "cancellation": { "operation": "text", "afterMs": 500 }
+    },
+    {
+      "id": "openrouter-selected-model",
+      "provider": "openrouter",
+      "model": "YOUR_EXACT_MODEL_ID",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "keyEnv": "RELAY_CONFORMANCE_OPENROUTER_KEY",
+      "capabilities": { "text": true, "vision": true, "structured": true },
+      "operations": ["text", "structured", "decision", "image", "localization"]
+    },
+    {
+      "id": "jev-visual-evaluation",
+      "provider": "jev",
+      "model": "YOUR_EXACT_MODEL_ID",
+      "baseUrl": "https://api.typesafe.ai/v1",
+      "keyEnv": "RELAY_CONFORMANCE_JEV_KEY",
+      "capabilities": { "text": false, "vision": true, "structured": false },
+      "experimentalVision": true,
+      "operations": ["decision", "image", "localization"],
+      "visualCases": [
+        "light-1x",
+        "dark-1x",
+        "light-2x",
+        "dark-2x",
+        "absent",
+        "duplicate",
+        "obscured"
+      ]
+    }
+  ]
+}

@@ -105,3 +105,5 @@ Architecture and implementation boundaries are documented in [docs/architecture.
 [AI connection checks](docs/ai-connection-checks.md) track text, decision, structured, image and localization evidence separately. Model, endpoint, capability and credential changes make previous results stale; probes run only from labeled actions.
 
 [AI diagnostics and OpenRouter discovery](docs/ai-diagnostics.md) add cancellable checks, provider-reported model/timing/usage metadata, cached model search with manual IDs, and allowlisted JSON exports. Catalog selection never enables or verifies capabilities automatically.
+
+[Opt-in AI conformance](docs/ai-conformance.md) tests explicit provider/model configurations with bounded production-adapter requests. Ordinary CI verifies its harness using loopback fixtures only; real model qualification remains separate.
