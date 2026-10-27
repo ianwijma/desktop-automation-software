@@ -25,7 +25,9 @@
     "format": "prettier --write src tests scripts docs README.md package.json *.json *.ts *.html .github/workflows/*.yml",
     "install:browser": "playwright install chromium",
     "test:native:macos": "node scripts/macos-native-matrix.mjs",
-    "test:native:wayland": "node scripts/wayland-native-matrix.mjs"
+    "test:native:wayland": "node scripts/wayland-native-matrix.mjs",
+    "test:ai:live": "node scripts/ai-conformance.mjs",
+    "test:ai:harness": "node scripts/ai-conformance-smoke.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.85",

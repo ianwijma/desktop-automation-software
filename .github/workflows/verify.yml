@@ -45,6 +45,8 @@ jobs:
         if: runner.os == 'macOS'
         run: npm run test:native:macos -- --run --allow-unavailable
       - run: npx playwright install --with-deps chromium
+      - name: AI conformance harness (loopback fixtures only)
+        run: npm run test:ai:harness
       - run: npm run check
       - run: npm run test:ui
       - run: npm run build
