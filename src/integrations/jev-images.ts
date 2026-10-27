@@ -1,4 +1,5 @@
 import sharp from "sharp";
+import { ProbeResponseError } from "./ai-diagnostics";
 import { randomUUID } from "node:crypto";
 import type { CaptureFrame, DetectionResult } from "../shared/types";
 
@@ -99,7 +100,7 @@ export function restoreJevBox(
   value: unknown,
 ): NonNullable<DetectionResult["box"]> {
   if (!value || typeof value !== "object")
-    throw new Error("Jev returned an invalid target box.");
+    throw new ProbeResponseError("Jev returned an invalid target box.");
   const box = value as Record<string, unknown>,
     edges = [box.left, box.right, box.top, box.bottom];
   if (
@@ -109,7 +110,7 @@ export function restoreJevBox(
     Number(box.left) >= Number(box.right) ||
     Number(box.top) >= Number(box.bottom)
   )
-    throw new Error("Jev returned an invalid target box.");
+    throw new ProbeResponseError("Jev returned an invalid target box.");
   const c = prepared.content;
   const left = Number(box.left) * prepared.width - c.x,
     right = Number(box.right) * prepared.width - c.x;
@@ -122,7 +123,7 @@ export function restoreJevBox(
     right > c.width + epsilon ||
     bottom > c.height + epsilon
   )
-    throw new Error(
+    throw new ProbeResponseError(
       "Jev returned a target box in image padding or outside the source image.",
     );
   const sx = prepared.source.width / c.width,

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { aiProbeDiagnosticsSchema } from "./ai-diagnostics";
 import type { AIConnection } from "./types";
 
 export const aiCheckOperations = [
@@ -13,7 +14,8 @@ export type AICheckOperation = z.infer<typeof aiCheckOperationSchema>;
 export const aiCheckSchema = z
   .object({
     operation: aiCheckOperationSchema,
-    status: z.enum(["passed", "failed", "unsupported"]),
+    status: z.enum(["passed", "failed", "unsupported", "cancelled"]),
+    diagnostics: aiProbeDiagnosticsSchema.optional(),
     message: z.string().max(800),
     at: z.string().datetime(),
     connectionRevision: z.number().int().nonnegative(),

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
   Plus,
   PlugZap,
@@ -31,6 +31,8 @@ import {
   connectionCheckState,
   unsupportedCheck,
 } from "../shared/ai-connections";
+import { OpenRouterModelPicker } from "./openrouter-model-picker";
+import type { AICheckOperation } from "../shared/ai-connections";
 import { accents, uid } from "./catalog";
 import {
   Button,
@@ -380,7 +382,25 @@ function Connections({ workspace, api, refresh, onError, onSuccess }: Props) {
   const [editing, setEditing] = useState<AIConnection | null>(null);
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
-  const [testing, setTesting] = useState<string | null>(null);
+  const [testing, setTesting] = useState<{
+    connectionId: string;
+    operation: AICheckOperation;
+    requestId: string;
+  } | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const mounted = useRef(true),
+    activeProbe = useRef<{ requestId: string } | null>(null);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (activeProbe.current)
+        void api
+          .cancelAIDiagnostic(activeProbe.current.requestId)
+          .catch(() => {});
+      activeProbe.current = null;
+    };
+  }, [api]);
   const save = async () => {
     if (!editing) return;
     setBusy(true);
@@ -486,6 +506,21 @@ function Connections({ workspace, api, refresh, onError, onSuccess }: Props) {
                             {result.status}
                           </span>
                           <small>{result.message}</small>
+                          {"diagnostics" in result && result.diagnostics ? (
+                            <small>
+                              Requested {result.diagnostics.requestedModel} ·
+                              Returned{" "}
+                              {result.diagnostics.returnedModel ??
+                                "not reported"}{" "}
+                              · {result.diagnostics.elapsedMs} ms
+                              {result.diagnostics.usage
+                                ? ` · Reported input ${result.diagnostics.usage.inputTokens ?? "?"} / Output ${result.diagnostics.usage.outputTokens ?? "?"} tokens`
+                                : ""}
+                              {result.diagnostics.errorCode
+                                ? ` · ${result.diagnostics.errorCode}`
+                                : ""}
+                            </small>
+                          ) : null}
                         </span>
                         <Button
                           aria-label={`Test ${aiCheckLabels[operation]} for ${connection.name}`}
@@ -494,29 +529,101 @@ function Connections({ workspace, api, refresh, onError, onSuccess }: Props) {
                             Boolean(testing) ||
                             Boolean(unsupportedCheck(connection, operation))
                           }
-                          busy={testing === `${connection.id}:${operation}`}
+                          busy={
+                            testing?.connectionId === connection.id &&
+                            testing.operation === operation
+                          }
                           onClick={() => {
-                            setTesting(`${connection.id}:${operation}`);
+                            const requestId = crypto.randomUUID();
+                            activeProbe.current = { requestId };
+                            setTesting({
+                              connectionId: connection.id,
+                              operation,
+                              requestId,
+                            });
+                            setCancelling(false);
                             void api
-                              .testConnection(connection.id, operation)
+                              .testConnection(
+                                connection.id,
+                                operation,
+                                requestId,
+                              )
                               .then(async (result) => {
+                                if (
+                                  !mounted.current ||
+                                  activeProbe.current?.requestId !== requestId
+                                )
+                                  return;
                                 await refresh();
+                                if (
+                                  !mounted.current ||
+                                  activeProbe.current?.requestId !== requestId
+                                )
+                                  return;
+                                if (result.status === "cancelled") return;
                                 if (result.ok && !result.discarded)
                                   onSuccess(result.message);
                                 else onError(result.message);
                               })
-                              .catch(onError)
-                              .finally(() => setTesting(null));
+                              .catch((error) => {
+                                if (
+                                  mounted.current &&
+                                  activeProbe.current?.requestId === requestId
+                                )
+                                  onError(error);
+                              })
+                              .finally(() => {
+                                if (
+                                  activeProbe.current?.requestId !== requestId
+                                )
+                                  return;
+                                activeProbe.current = null;
+                                if (mounted.current) {
+                                  setTesting(null);
+                                  setCancelling(false);
+                                }
+                              });
                           }}
                         >
                           Test {aiCheckLabels[operation]}
                         </Button>
+                        {testing?.connectionId === connection.id &&
+                        testing.operation === operation ? (
+                          <Button
+                            disabled={cancelling}
+                            aria-label={`Cancel ${aiCheckLabels[operation]} for ${connection.name}`}
+                            onClick={() => {
+                              setCancelling(true);
+                              void api
+                                .cancelAIDiagnostic(testing.requestId)
+                                .catch(onError)
+                                .finally(() => setCancelling(false));
+                            }}
+                          >
+                            Cancel check
+                          </Button>
+                        ) : null}
                       </div>
                     );
                   })}
                 </div>
               </div>
               <div className="card-actions">
+                <Button
+                  disabled={!workspace.desktop}
+                  aria-label={`Export diagnostics for ${connection.name}`}
+                  onClick={() =>
+                    void api
+                      .exportConnectionDiagnostics(connection.id)
+                      .then((result) => {
+                        if (result.saved)
+                          onSuccess("Diagnostic metadata exported.");
+                      })
+                      .catch(onError)
+                  }
+                >
+                  Export diagnostics
+                </Button>
                 <IconButton
                   label={`Edit ${connection.name}`}
                   onClick={() => {
@@ -636,6 +743,15 @@ function Connections({ workspace, api, refresh, onError, onSuccess }: Props) {
                 }
               />
             </Field>
+            {editing.provider === "openrouter" ? (
+              <OpenRouterModelPicker
+                api={api}
+                desktop={workspace.desktop}
+                model={editing.model}
+                enabled={editing.capabilities}
+                onSelect={(model) => setEditing({ ...editing, model })}
+              />
+            ) : null}
             <Field
               label={editing.hasKey ? "Replace API key (optional)" : "API key"}
               help={

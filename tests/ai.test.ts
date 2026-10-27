@@ -241,7 +241,8 @@ describe("bring-your-own AI adapters", () => {
     const service = new AIService(() => undefined, fetcher);
     const result = await service.test(connection("ollama"));
     expect(result.ok).toBe(false);
-    expect(result.message).toContain("ECONNREFUSED");
+    expect(result.diagnostics?.errorCode).toBe("network");
+    expect(result.message).toContain("local model server");
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(String(fetcher.mock.calls[0][0])).toContain("127.0.0.1");
   });
@@ -279,7 +280,16 @@ describe("bring-your-own AI adapters", () => {
   it("tests OpenRouter using the user's key, exact model and direct chat endpoint", async () => {
     const fetcher = mockFetch(completion("Relay connected"));
     const service = new AIService(() => "sk-or-v1-test-key", fetcher);
-    expect(await service.test(openrouter())).toMatchObject({ ok: true });
+    const probe = await service.test(openrouter());
+    expect(probe).toMatchObject({
+      ok: true,
+      diagnostics: {
+        provider: "openrouter",
+        requestedModel: "fixture/vision-model",
+        returnedModel: "fixture/vision-model",
+        usage: { inputTokens: 1, outputTokens: 2, totalTokens: 3 },
+      },
+    });
     expect(fetcher).toHaveBeenCalledTimes(1);
     const [url, options] = fetcher.mock.calls[0];
     expect(String(url)).toBe("https://openrouter.ai/api/v1/chat/completions");
@@ -333,7 +343,7 @@ describe("bring-your-own AI adapters", () => {
     const fetcher = mockFetch({});
     expect(
       await new AIService(() => undefined, fetcher).test(openrouter()),
-    ).toMatchObject({ ok: false, message: "Add an API key for OpenRouter." });
+    ).toMatchObject({ ok: false, diagnostics: { errorCode: "configuration" } });
     const service = new AIService(() => "test-key", fetcher);
     await expect(
       service.generate(
@@ -373,7 +383,8 @@ describe("bring-your-own AI adapters", () => {
     const service = new AIService(() => "sk-or-v1-test-secret", fetcher);
     const result = await service.test(openrouter());
     expect(result.ok).toBe(false);
-    expect(result.message).toContain("Invalid API key");
+    expect(result.diagnostics?.errorCode).toBe("authentication");
+    expect(result.message).toContain("API key");
     expect(result.message).not.toContain("test-secret");
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(String(fetcher.mock.calls[0][0])).toBe(
