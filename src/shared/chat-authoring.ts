@@ -39,6 +39,14 @@ export const flowProposalRequestSchema = z
     sessionId: z.string().uuid(),
     connectionId: id,
     prompt: z.string().max(8000),
+    attachmentIds: z
+      .array(z.string().uuid())
+      .max(4)
+      .refine(
+        (ids) => new Set(ids).size === ids.length,
+        "Image IDs must be unique.",
+      )
+      .optional(),
     targetIds: ids,
     connectionIds: ids,
     childFlowIds: ids,
@@ -128,6 +136,7 @@ export type ProposalProgress = {
     | "rejected";
 };
 export type ProposalErrorCode =
+  | "attachment"
   | "configuration"
   | "context-limit"
   | "invalid-output"
@@ -148,6 +157,8 @@ export interface ProposalReceipt {
   requestId: string;
   sessionId: string;
   contextSha256?: string;
+  /** App-owned references to the exact images explicitly selected for this turn. */
+  attachmentIds?: string[];
   diagnostics?: AIProbeDiagnostics;
 }
 export type FlowProposalResult = ProposalReceipt &
@@ -185,6 +196,8 @@ export interface PreparedAuthoringImage {
   height: number;
 }
 export const proposalMessages: Record<ProposalErrorCode, string> = {
+  attachment:
+    "An attached image is unavailable or changed. Add it again or explicitly reuse it before Send.",
   configuration:
     "Select a text and structured-output connection, configure its key/model, and select existing resources. Images additionally require vision.",
   "context-limit":

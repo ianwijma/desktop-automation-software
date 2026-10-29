@@ -341,6 +341,29 @@ export interface RelayAPI {
     request: import("./chat-authoring").FlowProposalRequest,
   ): Promise<import("./chat-authoring").FlowProposalResult>;
   cancelFlowProposal(sessionId: string, requestId: string): Promise<boolean>;
+  importAuthoringImage(
+    upload: import("./chat-attachments").AttachmentUpload,
+  ): Promise<import("./chat-attachments").AuthoringAttachment>;
+  captureAuthoringImage(request: {
+    sessionId: string;
+    targetId: string;
+  }): Promise<import("./chat-attachments").AuthoringAttachment>;
+  listAuthoringImages(
+    sessionId: string,
+  ): Promise<import("./chat-attachments").AuthoringAttachment[]>;
+  previewAuthoringImage(request: {
+    sessionId: string;
+    attachmentId: string;
+  }): Promise<import("./chat-attachments").AttachmentPreview>;
+  reuseAuthoringImage(request: {
+    sessionId: string;
+    attachmentId: string;
+  }): Promise<import("./chat-attachments").AuthoringAttachment>;
+  deleteAuthoringImage(request: {
+    sessionId: string;
+    attachmentId: string;
+  }): Promise<void>;
+  closeAuthoringSession(sessionId: string): Promise<void>;
   saveTarget(target: TargetDescriptor): Promise<TargetDescriptor>;
   deleteTarget(id: string): Promise<void>;
   saveSchedule(schedule: Schedule): Promise<Schedule>;

@@ -1,6 +1,6 @@
 # Chat authoring service and proposal contract (C01)
 
-C01 supplies the desktop service/IPC contract for later chat UI work. It returns an **unsaved proposal**, a clarification, a cancelled result or a rejection. It cannot save/apply a workflow, create targets/connections/children/triggers, launch an application, inspect/capture a window or submit a run. C02 adds attachment import/capture; C03 adds graph review/binding/Apply; C04 adds local history. The full user-facing chat journey is not implemented by this slice.
+C01 supplies the desktop service/IPC contract for later chat UI work. It returns an **unsaved proposal**, a clarification, a cancelled result or a rejection. It cannot save/apply a workflow, create targets/connections/children/triggers, launch an application, inspect/capture a window or submit a run. [C02](chat-attachments.md) adds attachment import/capture and a temporary composer; C03 adds graph review/binding/Apply; C04 adds local history. The full user-facing chat journey is not implemented by this slice.
 
 ## Explicit Send and selected context
 
@@ -11,6 +11,7 @@ const request = {
   requestId: crypto.randomUUID(),
   sessionId: crypto.randomUUID(),
   connectionId: selectedConnectionId,
+  attachmentIds: selectedDraftImageIds, // C02: explicit current-session image IDs only
   prompt: "Create a flow that opens my browser and waits for the login form.",
   targetIds: selectedTargetIds,
   connectionIds: selectedNodeConnectionIds,
@@ -19,7 +20,7 @@ const request = {
 const result = await window.relay.requestFlowProposal(request);
 ```
 
-The selected transport must support text and structured output, plus vision when trusted prepared images are supplied internally. Jev remains a detector/decision provider and cannot author arbitrary graphs. Cloud transports require the configured key; Ollama/LM Studio may use a key when configured. One Send makes at most one POST through the existing production adapter, with no repair/retry/model fallback. Duplicate request UUIDs do not call a provider again during the app session. There are at most four active requests, retained until the underlying operation settles; an in-memory cap of 10,000 handled request IDs bounds deduplication state for one application session.
+The selected transport must support text and structured output, plus vision when [C02 attachment IDs](chat-attachments.md) resolve to trusted prepared images. Jev remains a detector/decision provider and cannot author arbitrary graphs. Cloud transports require the configured key; Ollama/LM Studio may use a key when configured. One Send makes at most one POST through the existing production adapter, with no repair/retry/model fallback. Duplicate request UUIDs do not call a provider again during the app session. There are at most four active requests, retained until the underlying operation settles; an in-memory cap of 10,000 handled request IDs bounds deduplication state for one application session.
 
 Model context includes the selected graph, the shared node registry/ports/output/reference contract, selected target ID/name/kind/browser mode, selected connection ID/name/provider/model/capabilities, and selected child ID/name/input/output interfaces. Target launch commands, endpoints/key metadata and child implementation graphs are omitted. Transitive children and their configured resources are checked locally for validity/freshness, without adding their graphs to the model context.
 
@@ -53,6 +54,6 @@ Selected connection/credential revisions, source saved revision, explicit draft 
 
 The limits are one graph, 200 nodes, 400 edges, up to 30 selected resources per type, an 8,000-character prompt, 256 KiB text context, 512 KiB decoded candidate, 32 KiB per JSON-string configuration/interface, 24 levels of JSON nesting, a 2 MiB provider response and a 90-second deadline. The trusted host can shorten that deadline; it cannot extend it. Requests reject redirects and calls outside the explicitly configured origin/path, including production Ollama endpoint aliases. Output is capped at 16,384 tokens; truncation is rejected with no automatic resend.
 
-The internal prepared-image path supports up to four 2 MiB PNG/JPEG/WebP images, longest side 2,048 pixels, with explicit vision requirements. Image content is separate from runtime CaptureFrames and never supplies usable frame identities. C01's public IPC rejects unknown attachment/image payload fields; C02 owns source decoding, normalization, binary IPC, attachment ownership and one-time capture. An image-only internal request asks for a goal without making an unnecessary provider request.
+The internal prepared-image path supports up to four 2 MiB PNG/JPEG/WebP images, longest side 2,048 pixels, with explicit vision requirements. Image content is separate from runtime CaptureFrames and never supplies usable frame identities. The public proposal IPC accepts C02 attachment IDs, never arbitrary image bodies or runtime frames. C02 owns source decoding, normalization, binary import IPC, attachment ownership and one-time capture. An image-only internal request asks for a goal without making an unnecessary provider request.
 
 Results expose available model/timing/usage metadata and curated error categories. Raw provider error bodies are not returned. No session/message/proposal is persisted and no request is replayed after restart in this slice. See [C01 evidence](verification/c01-2026-10-27.md). Controlled protocol fixtures do not qualify live model output quality; [A04](ai-conformance.md) remains the live qualification track.
