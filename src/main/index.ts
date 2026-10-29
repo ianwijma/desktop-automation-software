@@ -97,6 +97,17 @@ import type {
 } from "../shared/types";
 import type { RunnerInit, RunnerResponse, RunnerWorkspace } from "./protocol";
 
+if (process.env.RELAY_TEST_MODE)
+  app.on("child-process-gone", (_event, details) =>
+    console.error(
+      "Child process terminated:",
+      JSON.stringify({
+        type: details.type,
+        reason: details.reason,
+        exitCode: details.exitCode,
+      }),
+    ),
+  );
 app.setName("Relay");
 if (process.env.RELAY_DATA_DIR)
   app.setPath("userData", process.env.RELAY_DATA_DIR);
@@ -991,7 +1002,9 @@ else {
           broadcast({ type: "workspace" });
         }
       });
-      runner.on("exit", () => {
+      runner.on("exit", (code) => {
+        if (process.env.RELAY_TEST_MODE)
+          console.error("Automation worker exit code:", code);
         runnerAlive = false;
         for (const p of pending.values()) {
           clearTimeout(p.timer);

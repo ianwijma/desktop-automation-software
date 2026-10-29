@@ -22,7 +22,14 @@ const launchOptions = {
   env,
   timeout: 30000,
 };
-let app = await electron.launch(launchOptions);
+let processDiagnostics = "";
+function observeProcess(handle) {
+  handle.process().stderr?.on("data", (data) => {
+    processDiagnostics = (processDiagnostics + data.toString()).slice(-65536);
+  });
+  return handle;
+}
+let app = observeProcess(await electron.launch(launchOptions));
 const errors = [];
 let locatorServer;
 try {
@@ -507,7 +514,7 @@ try {
     );
     assert.equal(edited.actions[0].label, "Reviewed click");
     await app.close();
-    app = await electron.launch(launchOptions);
+    app = observeProcess(await electron.launch(launchOptions));
     const reopened = await app.firstWindow();
     reopened.on("pageerror", (error) => errors.push(error.message));
     await reopened.waitForFunction(() => Boolean(window.relay));
@@ -949,6 +956,10 @@ try {
       2,
     ),
   );
+} catch (error) {
+  await writeFile("test-results/desktop-smoke-process.log", processDiagnostics);
+  console.error("Application process diagnostics:\n" + processDiagnostics);
+  throw error;
 } finally {
   const forceClose = setTimeout(() => app.process().kill("SIGKILL"), 5000);
   try {
