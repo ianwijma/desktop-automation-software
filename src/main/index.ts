@@ -31,6 +31,8 @@ import {
   attachmentCaptureSchema,
   attachmentSessionSchema,
   attachmentUploadSchema,
+  type PreparedAttachmentImage,
+  type AttachmentErrorCode,
 } from "../shared/chat-attachments";
 import {
   flowProposalRequestSchema,
@@ -132,6 +134,15 @@ const pending = new Map<
 const dataDir = process.env.RELAY_DATA_DIR ?? app.getPath("userData");
 const authoringAttachments = new AuthoringAttachments(
   join(dataDir, "authoring-images-temporary"),
+  Date.now,
+  async (bytes) => {
+    const result = await rpc<
+      | { status: "prepared"; image: PreparedAttachmentImage }
+      | { status: "rejected"; code: AttachmentErrorCode }
+    >("prepareAuthoringImage", bytes);
+    if (result.status === "rejected") throw new AttachmentError(result.code);
+    return result.image;
+  },
 );
 const encryptedKeys = new Map<string, string>();
 const connectionChecks = new ConnectionCheckTracker();

@@ -90,3 +90,20 @@ export class AttachmentError extends Error {
     this.name = "AttachmentError";
   }
 }
+
+export const preparedAuthoringImageSchema = z
+  .object({
+    bytes: z
+      .instanceof(Uint8Array)
+      .refine(
+        (bytes) =>
+          bytes.byteLength > 0 &&
+          bytes.byteLength <= attachmentLimits.preparedBytes,
+      ),
+    width: z.number().int().min(1).max(attachmentLimits.preparedSide),
+    height: z.number().int().min(1).max(attachmentLimits.preparedSide),
+  })
+  .strict();
+export type PreparedAttachmentImage = z.infer<
+  typeof preparedAuthoringImageSchema
+>;

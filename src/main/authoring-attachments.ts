@@ -9,6 +9,8 @@ import {
   attachmentRefSchema,
   type AuthoringAttachment,
   type AttachmentPreview,
+  preparedAuthoringImageSchema,
+  type PreparedAttachmentImage,
 } from "../shared/chat-attachments";
 import type { PreparedAuthoringImage } from "../shared/chat-authoring";
 import { prepareAuthoringImage } from "./authoring-images";
@@ -45,6 +47,9 @@ export class AuthoringAttachments {
   constructor(
     private directory: string,
     private now = Date.now,
+    private prepareImage: (
+      bytes: Uint8Array,
+    ) => Promise<PreparedAttachmentImage> = prepareAuthoringImage,
   ) {}
   private session(id: string) {
     attachmentSessionSchema.parse(id);
@@ -175,7 +180,9 @@ export class AuthoringAttachments {
     const id = randomUUID();
     let stored = false;
     try {
-      const prepared = await prepareAuthoringImage(await input());
+      const prepared = preparedAuthoringImageSchema.parse(
+        await this.prepareImage(await input()),
+      );
       if (session.closed || session.generation !== generation || this.disposed)
         throw new AttachmentError("closed-session");
       const info: AuthoringAttachment = {
