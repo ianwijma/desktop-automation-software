@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Workflow,
+  Sparkles,
   Activity,
   CalendarClock,
   Settings2,
@@ -52,17 +53,19 @@ import { GraphEditor, Inspector, NodePalette } from "./editor";
 import { Recorder } from "./recorder";
 import type { RecordingReviewCache } from "./recording-review";
 import { Settings } from "./settings";
+import { Authoring } from "./authoring";
 import { Runs, Schedules } from "./runs";
 import { Button, IconButton, Modal, JsonField } from "./components";
 import "@xyflow/react/dist/style.css";
 import "./styles.css";
 const api: RelayAPI = window.relay ?? previewAPI;
-type Page = "flows" | "runs" | "schedules" | "settings";
+type Page = "flows" | "runs" | "schedules" | "settings" | "authoring";
 type Toast = { id: string; message: string; error: boolean };
 function App() {
   const [workspace, setWorkspace] = useState<WorkspaceState | null>(null);
   const [draft, setDraft] = useState<FlowDefinition | null>(null);
   const [page, setPage] = useState<Page>("flows");
+  const [authoringOpened, setAuthoringOpened] = useState(false);
   const [flowTab, setFlowTab] = useState<"flow" | "record" | "runs">("flow");
   const [selected, setSelected] = useState<string | null>(null);
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
@@ -410,7 +413,8 @@ function App() {
         event.preventDefault();
         // Review edits use their own revisioned save. Saving the graph here
         // would invalidate the bound insertion revision without changing it.
-        if (page === "flows" && flowTab === "record") return;
+        if (page === "authoring" || (page === "flows" && flowTab === "record"))
+          return;
         if (document.activeElement instanceof HTMLElement)
           document.activeElement.blur();
         queueMicrotask(() => void save());
@@ -689,6 +693,7 @@ function App() {
         {(
           [
             { id: "flows", label: "Workflows", icon: Workflow },
+            { id: "authoring", label: "Flow assistant", icon: Sparkles },
             { id: "runs", label: "Run history", icon: Activity },
             { id: "schedules", label: "Schedules", icon: CalendarClock },
           ] as const
@@ -698,7 +703,10 @@ function App() {
             className={`rail-button ${page === id ? "active" : ""}`}
             title={label}
             aria-label={label}
-            onClick={() => setPage(id)}
+            onClick={() => {
+              if (id === "authoring") setAuthoringOpened(true);
+              setPage(id);
+            }}
           >
             <Icon size={22} />
           </button>
@@ -1184,7 +1192,7 @@ function App() {
             onError={onError}
             onSuccess={toast}
           />
-        ) : page === "runs" ? (
+        ) : page === "authoring" ? null : page === "runs" ? (
           <Runs
             workspace={workspace}
             api={api}
@@ -1200,6 +1208,14 @@ function App() {
             onSuccess={toast}
           />
         )}
+        {authoringOpened ? (
+          <Authoring
+            api={api}
+            workspace={workspace}
+            visible={page === "authoring"}
+            onSettings={() => setPage("settings")}
+          />
+        ) : null}
       </main>
       <NodePalette
         open={palette}

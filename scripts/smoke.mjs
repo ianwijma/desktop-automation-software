@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { runAuthoringAttachmentsSmoke } from "./authoring-attachments-smoke.mjs";
 import { runAuthoringProposalSmoke } from "./authoring-proposal-smoke.mjs";
 import { runConnectionProbeSmoke } from "./connection-probe-smoke.mjs";
 import { _electron as electron } from "playwright";
@@ -21,7 +22,14 @@ const launchOptions = {
   env,
   timeout: 30000,
 };
-let app = await electron.launch(launchOptions);
+let processDiagnostics = "";
+function observeProcess(handle) {
+  handle.process().stderr?.on("data", (data) => {
+    processDiagnostics = (processDiagnostics + data.toString()).slice(-65536);
+  });
+  return handle;
+}
+let app = observeProcess(await electron.launch(launchOptions));
 const errors = [];
 let locatorServer;
 try {
@@ -88,6 +96,7 @@ try {
   assert.equal(initial.connections.length, 0);
   await runConnectionProbeSmoke(page, app, dataDir);
   await runAuthoringProposalSmoke(page);
+  await runAuthoringAttachmentsSmoke(page);
   assert.equal(initial.keys, undefined);
   const referenceNode = initial.flows[0].nodes[0];
   await page
@@ -268,6 +277,30 @@ try {
       window.relay.getCapabilities(),
     );
     assert.equal(capabilities.input, true, capabilities.reasons.join("; "));
+    const authoringSession = await page.evaluate(() => crypto.randomUUID());
+    const capturedImage = await page.evaluate(
+      (sessionId) =>
+        window.relay.captureAuthoringImage({
+          sessionId,
+          targetId: "native-smoke",
+        }),
+      authoringSession,
+    );
+    assert.equal(capturedImage.source, "capture");
+    assert.equal(capturedImage.state, "draft");
+    assert(capturedImage.width > 300);
+    assert.equal(capturedImage.frameId, undefined);
+    assert.equal(capturedImage.targetId, undefined);
+    assert.equal(capturedImage.native, undefined);
+    await expect(fixturePage.locator("button")).toHaveText("Test button");
+    await expect(fixturePage.locator("textarea")).toHaveValue("");
+    await page.evaluate(
+      (s) => window.relay.closeAuthoringSession(s),
+      authoringSession,
+    );
+    console.log(
+      "PASS: chosen-window authoring capture adds one local image through the real helper without input or exposed runtime frame identity.",
+    );
     const frame = await page.evaluate(() =>
       window.relay.capture("native-smoke"),
     );
@@ -481,7 +514,7 @@ try {
     );
     assert.equal(edited.actions[0].label, "Reviewed click");
     await app.close();
-    app = await electron.launch(launchOptions);
+    app = observeProcess(await electron.launch(launchOptions));
     const reopened = await app.firstWindow();
     reopened.on("pageerror", (error) => errors.push(error.message));
     await reopened.waitForFunction(() => Boolean(window.relay));
@@ -923,6 +956,10 @@ try {
       2,
     ),
   );
+} catch (error) {
+  await writeFile("test-results/desktop-smoke-process.log", processDiagnostics);
+  console.error("Application process diagnostics:\n" + processDiagnostics);
+  throw error;
 } finally {
   const forceClose = setTimeout(() => app.process().kill("SIGKILL"), 5000);
   try {

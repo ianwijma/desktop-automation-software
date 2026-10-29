@@ -1,3 +1,5 @@
+import { prepareAuthoringImage } from "./authoring-images";
+import { AttachmentError } from "../shared/chat-attachments";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
@@ -497,6 +499,34 @@ async function handle(method: string, args: unknown[]): Promise<unknown> {
   if (method === "capabilities") return native.capabilities();
   if (method === "browserBridge") return browser.getBridgeInfo();
   if (method === "capture") return capture(targetFor(args[0]));
+  if (method === "prepareAuthoringImage") {
+    try {
+      const image = await prepareAuthoringImage(args[0] as Uint8Array);
+      return { status: "prepared", image };
+    } catch (error) {
+      return {
+        status: "rejected",
+        code: error instanceof AttachmentError ? error.code : "invalid-image",
+      };
+    }
+  }
+  if (method === "captureAuthoring") {
+    if (engine.isActive() || recordingLocked())
+      throw new Error(
+        "Stop active workflows and recording before taking an authoring image.",
+      );
+    const target = targetFor(args[0]);
+    if (
+      target.kind !== "desktop" ||
+      JSON.stringify(target) !== JSON.stringify(args[1])
+    )
+      throw new Error("Choose the current desktop target.");
+    // One explicit read-only native capture. Never register an actionable frame ID.
+    const frame = await native.capture(target);
+    if (JSON.stringify(target) !== JSON.stringify(targetFor(args[0])))
+      throw new Error("The selected target changed during capture.");
+    return { dataUrl: frame.dataUrl };
+  }
   if (method === "testDetector") {
     if (engine.isActive())
       throw new Error("Stop active workflows before testing a detector.");

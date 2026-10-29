@@ -108,4 +108,4 @@ Architecture and implementation boundaries are documented in [docs/architecture.
 
 [Opt-in AI conformance](docs/ai-conformance.md) tests explicit provider/model configurations with bounded production-adapter requests. Ordinary CI verifies its harness using loopback fixtures only; real model qualification remains separate.
 
-[Chat authoring service](docs/chat-authoring-service.md) provides cancellable, validated unsaved graph proposals and explicit binding receipts. The attachment/review/Apply/history UI remains the following roadmap slices.
+[Chat authoring service](docs/chat-authoring-service.md) provides cancellable, validated unsaved graph proposals and explicit binding receipts. [Flow assistant images](docs/chat-attachments.md) add local paste/drop/file imports, explicit chosen-window capture and prepared previews. Graph review/Apply and durable history remain the following roadmap slices.

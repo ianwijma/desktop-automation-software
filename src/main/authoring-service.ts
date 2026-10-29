@@ -105,6 +105,11 @@ export class FlowAuthoringService {
       record.controller.abort(new AuthoringContextError("stale-context"));
     }
   }
+  cancelSession(sessionId: string) {
+    for (const record of this.active.values())
+      if (record.request.sessionId === sessionId)
+        this.cancel(sessionId, record.request.requestId);
+  }
   cancelAll() {
     for (const record of this.active.values()) {
       record.controller.abort();

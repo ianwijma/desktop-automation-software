@@ -22,6 +22,23 @@ import {
   nativeErrorSchema,
 } from "../shared/native-protocol";
 import { Storage } from "./storage";
+import {
+  AuthoringAttachments,
+  captureChosenAuthoringWindow,
+} from "./authoring-attachments";
+import {
+  AttachmentError,
+  attachmentCaptureSchema,
+  attachmentSessionSchema,
+  attachmentUploadSchema,
+  type PreparedAttachmentImage,
+  type AttachmentErrorCode,
+} from "../shared/chat-attachments";
+import {
+  flowProposalRequestSchema,
+  proposalMessages,
+  type FlowProposalResult,
+} from "../shared/chat-authoring";
 import { FlowAuthoringService } from "./authoring-service";
 import { DiagnosticRequests } from "./ai-diagnostic-requests";
 import { OpenRouterDiscovery } from "../integrations/openrouter-catalog";
@@ -82,6 +99,17 @@ import type {
 } from "../shared/types";
 import type { RunnerInit, RunnerResponse, RunnerWorkspace } from "./protocol";
 
+if (process.env.RELAY_TEST_MODE)
+  app.on("child-process-gone", (_event, details) =>
+    console.error(
+      "Child process terminated:",
+      JSON.stringify({
+        type: details.type,
+        reason: details.reason,
+        exitCode: details.exitCode,
+      }),
+    ),
+  );
 app.setName("Relay");
 if (process.env.RELAY_DATA_DIR)
   app.setPath("userData", process.env.RELAY_DATA_DIR);
@@ -104,6 +132,18 @@ const pending = new Map<
   }
 >();
 const dataDir = process.env.RELAY_DATA_DIR ?? app.getPath("userData");
+const authoringAttachments = new AuthoringAttachments(
+  join(dataDir, "authoring-images-temporary"),
+  Date.now,
+  async (bytes) => {
+    const result = await rpc<
+      | { status: "prepared"; image: PreparedAttachmentImage }
+      | { status: "rejected"; code: AttachmentErrorCode }
+    >("prepareAuthoringImage", bytes);
+    if (result.status === "rejected") throw new AttachmentError(result.code);
+    return result.image;
+  },
+);
 const encryptedKeys = new Map<string, string>();
 const connectionChecks = new ConnectionCheckTracker();
 const diagnosticRequests = new DiagnosticRequests();
@@ -150,7 +190,12 @@ function rpc<T = unknown>(method: string, ...args: unknown[]): Promise<T> {
           ),
         );
       },
-      ["testDetector", "capture", "startRecording"].includes(method)
+      [
+        "testDetector",
+        "capture",
+        "captureAuthoring",
+        "startRecording",
+      ].includes(method)
         ? 120000
         : 45000,
     );
@@ -389,6 +434,13 @@ async function request(
   args: unknown[],
 ): Promise<unknown> {
   await ready;
+  if (method === "importAuthoringImage") {
+    if (!Array.isArray(args) || args.length !== 1)
+      throw new AttachmentError("invalid-image");
+    // Keep binary payloads out of JSON.stringify; both preload and main enforce 8 MiB.
+    const upload = attachmentUploadSchema.parse(args[0]);
+    return authoringAttachments.import(upload);
+  }
   boundedJson(args);
   const id = () => z.string().min(1).max(200).parse(args[0]);
   switch (method) {
@@ -673,8 +725,54 @@ async function request(
       await writeFile(choice.filePath, JSON.stringify(report, null, 2), "utf8");
       return { saved: true };
     }
-    case "requestFlowProposal":
-      return flowAuthoring.send(args[0]);
+    case "requestFlowProposal": {
+      const input = flowProposalRequestSchema.parse(args[0]);
+      let lease: Awaited<ReturnType<AuthoringAttachments["lease"]>> | undefined;
+      const attachmentRejected = (): FlowProposalResult => ({
+        requestId: input.requestId,
+        sessionId: input.sessionId,
+        status: "rejected",
+        code: "attachment",
+        message: proposalMessages.attachment,
+      });
+      try {
+        lease = await authoringAttachments.lease(
+          input.sessionId,
+          input.attachmentIds ?? [],
+          () => flowAuthoring.cancel(input.sessionId, input.requestId),
+        );
+        const result = await flowAuthoring.send(input, lease.images);
+        return lease.current()
+          ? { ...result, attachmentIds: input.attachmentIds ?? [] }
+          : attachmentRejected();
+      } catch (error) {
+        if (error instanceof AttachmentError) return attachmentRejected();
+        throw error;
+      } finally {
+        lease?.release();
+      }
+    }
+    case "captureAuthoringImage": {
+      const input = attachmentCaptureSchema.parse(args[0]);
+      return captureChosenAuthoringWindow(authoringAttachments, input, {
+        target: (id) => store.list("targets").find((t) => t.id === id),
+        capture: (target) =>
+          rpc<{ dataUrl: string }>("captureAuthoring", target.id, target),
+      });
+    }
+    case "listAuthoringImages":
+      return authoringAttachments.list(attachmentSessionSchema.parse(args[0]));
+    case "previewAuthoringImage":
+      return authoringAttachments.preview(args[0]);
+    case "reuseAuthoringImage":
+      return authoringAttachments.reuse(args[0]);
+    case "deleteAuthoringImage":
+      return authoringAttachments.delete(args[0]);
+    case "closeAuthoringSession": {
+      const sessionId = attachmentSessionSchema.parse(args[0]);
+      flowAuthoring.cancelSession(sessionId);
+      return authoringAttachments.close(sessionId);
+    }
     case "cancelFlowProposal":
       return flowAuthoring.cancel(
         z.string().uuid().parse(args[0]),
@@ -836,6 +934,7 @@ function createWindow() {
   });
   win.on("closed", () => {
     flowAuthoring.cancelAll();
+    void authoringAttachments.closeAll().catch(() => {});
     win = null;
   });
 }
@@ -914,7 +1013,9 @@ else {
           broadcast({ type: "workspace" });
         }
       });
-      runner.on("exit", () => {
+      runner.on("exit", (code) => {
+        if (process.env.RELAY_TEST_MODE)
+          console.error("Automation worker exit code:", code);
         runnerAlive = false;
         for (const p of pending.values()) {
           clearTimeout(p.timer);
@@ -1051,6 +1152,7 @@ else {
     event.preventDefault();
     quitting = true;
     flowAuthoring.dispose();
+    authoringAttachments.dispose();
     globalShortcut.unregisterAll();
     if (!runner) {
       app.quit();

@@ -16,6 +16,13 @@ const methods: (keyof Omit<RelayAPI, "onEvent">)[] = [
   "exportConnectionDiagnostics",
   "requestFlowProposal",
   "cancelFlowProposal",
+  "importAuthoringImage",
+  "captureAuthoringImage",
+  "listAuthoringImages",
+  "previewAuthoringImage",
+  "reuseAuthoringImage",
+  "deleteAuthoringImage",
+  "closeAuthoringSession",
   "saveTarget",
   "deleteTarget",
   "saveSchedule",
@@ -49,5 +56,31 @@ api.onEvent = (listener: (event: AppEvent) => void) => {
   const receive = (_: unknown, event: AppEvent) => listener(event);
   ipcRenderer.on("relay:event", receive);
   return () => ipcRenderer.removeListener("relay:event", receive);
+};
+// Binary imports never enter the generic JSON request path.
+let imageUploads = 0;
+api.importAuthoringImage = async (
+  upload: import("../shared/chat-attachments").AttachmentUpload,
+) => {
+  if (
+    !(upload?.bytes instanceof Uint8Array) ||
+    !upload.bytes.byteLength ||
+    upload.bytes.byteLength > 8 * 1024 * 1024
+  )
+    return Promise.reject(
+      new Error("Images must be binary data of at most 8 MiB."),
+    );
+  if (imageUploads >= 2)
+    throw new Error(
+      "Image preparation is busy. Wait for the current import to finish.",
+    );
+  imageUploads++;
+  try {
+    return await ipcRenderer.invoke("relay:request", "importAuthoringImage", [
+      upload,
+    ]);
+  } finally {
+    imageUploads--;
+  }
 };
 contextBridge.exposeInMainWorld("relay", Object.freeze(api));

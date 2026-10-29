@@ -224,6 +224,25 @@ export const previewAPI: RelayAPI = {
   async requestFlowProposal() {
     return unavailable("AI flow authoring");
   },
+  async importAuthoringImage() {
+    return unavailable("Image attachments");
+  },
+  async captureAuthoringImage() {
+    return unavailable("Window image capture");
+  },
+  async listAuthoringImages() {
+    return unavailable("Image attachments");
+  },
+  async previewAuthoringImage() {
+    return unavailable("Image attachments");
+  },
+  async reuseAuthoringImage() {
+    return unavailable("Image attachments");
+  },
+  async deleteAuthoringImage() {
+    return unavailable("Image attachments");
+  },
+  async closeAuthoringSession() {},
   async cancelFlowProposal() {
     return false;
   },
